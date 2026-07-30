@@ -23,6 +23,10 @@ _LOGGER = logging.getLogger(__name__)
 TIME_KEYS: tuple[str, ...] = ("datetime", "time", "period_start", "start")
 CLOUD_KEYS: tuple[str, ...] = ("cloud_coverage", "cloud_cover", "clouds", "cloudiness")
 TEMP_KEYS: tuple[str, ...] = ("temperature", "temp", "native_temperature")
+# UV index is the fallback sky signal for providers that publish no numeric
+# cloud cover. The UK Met Office integration is the notable example: its hourly
+# forecast carries condition, temperature and uv_index but no cloud coverage.
+UV_KEYS: tuple[str, ...] = ("uv_index", "uv", "uvi")
 
 # Weather conditions mapped to an approximate cloud cover, used when a provider
 # reports a condition but no numeric cloud coverage (Met Office, some others).
@@ -73,6 +77,7 @@ class WeatherPoint:
     temperature: float | None = None
     cloud_coverage: float | None = None
     condition: str | None = None
+    uv_index: float | None = None
 
     @property
     def effective_cloud(self) -> float | None:
@@ -82,6 +87,11 @@ class WeatherPoint:
         if self.condition:
             return CONDITION_CLOUD.get(str(self.condition).lower())
         return None
+
+    @property
+    def measured_cloud(self) -> float | None:
+        """Numeric cloud cover only -- no condition-derived estimate."""
+        return self.cloud_coverage
 
 
 class WeatherSeries:
@@ -134,6 +144,7 @@ class WeatherSeries:
                     temperature=_as_float(temp),
                     cloud_coverage=_as_float(cloud),
                     condition=entry.get("condition"),
+                    uv_index=_as_float(_pick(entry, UV_KEYS)),
                 )
             )
         return cls(points)
@@ -145,6 +156,10 @@ class WeatherSeries:
         def value_of(point: WeatherPoint) -> float | None:
             if attribute == "cloud":
                 return point.effective_cloud
+            if attribute == "measured_cloud":
+                return point.measured_cloud
+            if attribute == "uv":
+                return point.uv_index
             return point.temperature
 
         if moment <= self._times[0]:
@@ -172,6 +187,33 @@ class WeatherSeries:
         if value is None:
             return None
         return min(max(value, 0.0), 100.0)
+
+    def measured_cloud_at(self, moment: datetime) -> float | None:
+        """Numeric cloud cover, or ``None`` if the provider does not publish it."""
+        value = self._interpolate(moment, "measured_cloud")
+        if value is None:
+            return None
+        return min(max(value, 0.0), 100.0)
+
+    def uv_index_at(self, moment: datetime) -> float | None:
+        """Forecast UV index.
+
+        Useful as a sky signal in its own right. Within a fixed season and
+        half-hour slot the sun is at roughly the same elevation every day, so
+        clear-sky UV is near-constant and the *variation* in UV is mostly cloud
+        attenuation. That makes it a continuous stand-in for cloud cover for
+        providers that publish UV but not cloud -- notably the UK Met Office.
+        """
+        value = self._interpolate(moment, "uv")
+        if value is None:
+            return None
+        return max(value, 0.0)
+
+    def has_measured_cloud(self) -> bool:
+        return any(p.cloud_coverage is not None for p in self._points)
+
+    def has_uv_index(self) -> bool:
+        return any(p.uv_index is not None for p in self._points)
 
     def temperature_at(self, moment: datetime) -> float | None:
         return self._interpolate(moment, "temperature")
@@ -201,7 +243,20 @@ class WeatherSeries:
             "start": self.start.isoformat() if self.start else None,
             "end": self.end.isoformat() if self.end else None,
             "max_temperature": self.max_temperature(),
+            "has_measured_cloud": self.has_measured_cloud(),
+            "has_uv_index": self.has_uv_index(),
+            "sky_signal": self.sky_signal_kind(),
         }
+
+    def sky_signal_kind(self) -> str:
+        """Which signal the solar model will condition on, for diagnostics."""
+        if self.has_measured_cloud():
+            return "cloud_coverage"
+        if self.has_uv_index():
+            return "uv_index"
+        if any(p.condition for p in self._points):
+            return "condition"
+        return "none"
 
 
 def _as_float(value: Any) -> float | None:

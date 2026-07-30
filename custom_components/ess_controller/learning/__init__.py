@@ -13,7 +13,9 @@ from .model import (
     SolarObservation,
     cloud_bucket,
     day_type,
+    sky_key,
     temperature_bucket,
+    uv_bucket,
 )
 
 __all__ = [
@@ -24,5 +26,7 @@ __all__ = [
     "SolarObservation",
     "cloud_bucket",
     "day_type",
+    "sky_key",
     "temperature_bucket",
+    "uv_bucket",
 ]

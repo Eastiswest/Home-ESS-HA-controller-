@@ -45,6 +45,7 @@ class CompletedSlot:
     load_kwh: float
     coverage: float
     cloud_cover: float | None = None
+    uv_index: float | None = None
     temperature: float | None = None
     forecast_kwh: float | None = None
 
@@ -56,6 +57,7 @@ class _Bucket:
     load_kwh: float = 0.0
     covered_seconds: float = 0.0
     cloud_samples: list[float] = field(default_factory=list)
+    uv_samples: list[float] = field(default_factory=list)
     temp_samples: list[float] = field(default_factory=list)
     forecast_kwh: float | None = None
 
@@ -85,6 +87,7 @@ class SlotAccumulator:
         cloud_cover: float | None = None,
         temperature: float | None = None,
         forecast_kwh: float | None = None,
+        uv_index: float | None = None,
     ) -> list[CompletedSlot]:
         """Record a sample, returning any slots completed by it.
 
@@ -137,6 +140,8 @@ class SlotAccumulator:
 
         if cloud_cover is not None:
             self._bucket.cloud_samples.append(float(cloud_cover))
+        if uv_index is not None:
+            self._bucket.uv_samples.append(float(uv_index))
         if temperature is not None:
             self._bucket.temp_samples.append(float(temperature))
         if forecast_kwh is not None:
@@ -162,6 +167,9 @@ class SlotAccumulator:
             if bucket.cloud_samples
             else None
         )
+        uv = (
+            sum(bucket.uv_samples) / len(bucket.uv_samples) if bucket.uv_samples else None
+        )
         temp = (
             sum(bucket.temp_samples) / len(bucket.temp_samples)
             if bucket.temp_samples
@@ -174,6 +182,7 @@ class SlotAccumulator:
             load_kwh=bucket.load_kwh * scale,
             coverage=min(coverage, 1.0),
             cloud_cover=cloud,
+            uv_index=uv,
             temperature=temp,
             forecast_kwh=bucket.forecast_kwh,
         )

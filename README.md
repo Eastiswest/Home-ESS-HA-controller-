@@ -67,7 +67,7 @@ actually drive them, and each bin holds an exponentially weighted mean:
   overnight charge.
 
 If you have a solar forecast integration (Solcast, Forecast.Solar), its *shape*
-is trusted and a **correction factor** is learned per season/hour/cloud bucket.
+is trusted and a **correction factor** is learned per season/hour/sky bucket.
 That factor absorbs everything a generic forecast cannot know about your specific
 installation — shading from a tree or chimney, panel soiling, a mis-declared
 azimuth, inverter clipping. Learning a ratio converges far faster than learning
@@ -106,7 +106,7 @@ directory and restart.
 | A tariff source | Nothing to optimise without prices | Yes |
 | A house load power sensor | The load model cannot learn without it | Strongly recommended |
 | A PV power sensor | The solar model cannot learn without it | Strongly recommended |
-| A weather entity | Cloud cover for solar, temperature for A/C load | Recommended |
+| A weather entity | Sky condition for solar, temperature for A/C load | Recommended |
 | A solar forecast integration | Better day-ahead solar than history alone | Optional |
 
 For a Solax inverter, install
@@ -186,6 +186,30 @@ starts arbitraging into it — no rewrite needed.
 
 Point it at your solar forecast sensors (add both today and tomorrow to cover the
 horizon), a weather entity, and your PV / load / grid power sensors.
+
+**Any HA weather integration works** — the code reads whichever fields your
+provider publishes rather than requiring one specific schema. It picks the best
+available sky signal, in this order:
+
+1. **Numeric cloud cover** (`cloud_coverage`) — Met.no, OpenWeatherMap, AccuWeather.
+2. **UV index** — used when a provider gives UV but no cloud cover. **This is the
+   UK Met Office case**: its hourly forecast carries condition, temperature and
+   `uv_index`, but no cloud coverage. UV is a good stand-in because the bucket key
+   already pins season and half-hour, so solar elevation is held roughly constant
+   and the *variation* in UV is mostly cloud attenuation.
+3. **Condition string** — `sunny` / `partlycloudy` / `cloudy` mapped to an
+   approximate cloud cover. Only six levels, so this is the weakest option.
+
+Which one is in use is reported in the diagnostics download under
+`weather.sky_signal`. Buckets encode the signal type (`c3` vs `u6`), so if you
+change weather provider the old buckets simply stop being used and new ones build
+alongside rather than silently mixing two different scales.
+
+Met Office does provide hourly **temperature**, which is what the A/C load model
+needs, so the load side is unaffected. If you want the strongest solar signal,
+adding Met.no (which does publish `cloud_coverage`) purely as a second weather
+entity is a reasonable move — or add Solcast, in which case its forecast shape is
+used and the sky signal only drives the learned correction factor.
 
 **Typical daily consumption** is only used for slots the load model has not
 learned yet, spread over a typical domestic diurnal shape rather than assumed

@@ -28,7 +28,9 @@ from custom_components.ess_controller.learning.model import (
     SolarObservation,
     cloud_bucket,
     day_type,
+    sky_key,
     temperature_bucket,
+    uv_bucket,
 )
 from custom_components.ess_controller.sampling import SlotAccumulator, slot_start_for
 
@@ -728,3 +730,191 @@ class TestEndToEndLearning:
         summer, _ = model.predict_solar(7, 13, 0, cloud=10.0)
         winter, _ = model.predict_solar(1, 13, 0, cloud=10.0)
         assert summer > winter * 2
+
+
+class TestMetOfficeSkySignal:
+    """The UK Met Office integration publishes hourly condition, temperature and
+    UV index, but no numeric cloud coverage. UV is the better fallback: within a
+    fixed season and half-hour the sun sits at roughly the same elevation, so
+    variation in UV is mostly cloud attenuation."""
+
+    def _metoffice_forecast(self):
+        # Field names as the HA metoffice weather platform emits them.
+        return [
+            {
+                "datetime": "2026-07-15T12:00:00+00:00",
+                "condition": "partlycloudy",
+                "temperature": 24.0,
+                "apparent_temperature": 25.0,
+                "precipitation_probability": 20,
+                "uv_index": 6,
+                "wind_speed": 4.1,
+            },
+            {
+                "datetime": "2026-07-15T13:00:00+00:00",
+                "condition": "sunny",
+                "temperature": 26.0,
+                "uv_index": 7,
+            },
+        ]
+
+    def test_uv_index_is_parsed(self):
+        series = WeatherSeries.from_forecast(self._metoffice_forecast())
+        assert series.has_uv_index()
+        assert series.uv_index_at(dt(12)) == pytest.approx(6.0)
+        assert series.uv_index_at(dt(12, 30)) == pytest.approx(6.5)
+
+    def test_no_measured_cloud_reported(self):
+        series = WeatherSeries.from_forecast(self._metoffice_forecast())
+        assert not series.has_measured_cloud()
+        assert series.measured_cloud_at(dt(12)) is None
+        # The condition-derived estimate is still available as a last resort.
+        assert series.cloud_at(dt(12)) == pytest.approx(45.0)
+
+    def test_sky_signal_kind_reports_uv(self):
+        series = WeatherSeries.from_forecast(self._metoffice_forecast())
+        assert series.sky_signal_kind() == "uv_index"
+
+    def test_sky_signal_prefers_measured_cloud_when_present(self):
+        series = WeatherSeries.from_forecast(
+            [
+                {
+                    "datetime": "2026-07-15T12:00:00+00:00",
+                    "cloud_coverage": 30,
+                    "uv_index": 6,
+                }
+            ]
+        )
+        assert series.sky_signal_kind() == "cloud_coverage"
+        assert series.measured_cloud_at(dt(12)) == pytest.approx(30.0)
+
+    def test_sky_signal_falls_back_to_condition(self):
+        series = WeatherSeries.from_forecast(
+            [{"datetime": "2026-07-15T12:00:00+00:00", "condition": "cloudy"}]
+        )
+        assert series.sky_signal_kind() == "condition"
+
+    def test_temperature_still_available_for_load_model(self):
+        """A/C learning depends on this, and Met Office does provide it."""
+        series = WeatherSeries.from_forecast(self._metoffice_forecast())
+        assert series.temperature_at(dt(12)) == pytest.approx(24.0)
+        assert series.max_temperature() == pytest.approx(26.0)
+
+
+class TestUvBucketing:
+    def test_buckets_by_index(self):
+        assert uv_bucket(0.0) == -1
+        assert uv_bucket(None) == -1
+        assert uv_bucket(1.0) == 1
+        assert uv_bucket(6.4) == 6
+        assert uv_bucket(20.0) == 8
+
+    def test_low_uv_is_treated_as_uninformative(self):
+        # A UK winter noon reads ~0-1 whatever the sky is doing.
+        assert uv_bucket(0.2) == -1
+
+    def test_sky_key_prefers_cloud(self):
+        assert sky_key(cloud=30.0, uv_index=6.0) == "c1"
+
+    def test_sky_key_uses_uv_when_cloud_missing(self):
+        assert sky_key(cloud=None, uv_index=6.0) == "u6"
+
+    def test_sky_key_signals_do_not_collide(self):
+        """Buckets learned from cloud must never be read as UV buckets."""
+        assert sky_key(cloud=60.0) != sky_key(cloud=None, uv_index=3.0)
+
+    def test_sky_key_neutral_when_nothing_known(self):
+        # Must not read as clear sky, which would over-forecast solar.
+        assert sky_key(cloud=None, uv_index=None) == f"c{cloud_bucket(None)}"
+
+
+class TestSolarLearningFromUv:
+    def test_learns_yield_against_uv_index(self):
+        """The Met Office path: no cloud cover, so UV must carry the signal."""
+        model = LearningModel()
+        for _ in range(6):
+            # Bright afternoon.
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.92, uv_index=7.0)
+            )
+            # Overcast afternoon, same slot and season.
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.21, uv_index=2.0)
+            )
+        bright, bright_src = model.predict_solar(7, 13, 0, cloud=None, uv_index=7.0)
+        dull, dull_src = model.predict_solar(7, 13, 0, cloud=None, uv_index=2.0)
+        assert bright > dull * 3
+        assert bright_src != "default" and dull_src != "default"
+        assert "u7" in bright_src
+
+    def test_cloud_and_uv_observations_do_not_contaminate_each_other(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.9, uv_index=7.0)
+            )
+        # A cloud-keyed lookup must not pick up the UV-keyed bucket at the
+        # specific level; it falls back to the season/slot aggregate instead.
+        _, source = model.predict_solar(7, 13, 0, cloud=10.0)
+        assert "c0" not in source
+
+    def test_forecast_correction_learned_against_uv(self):
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=12, minute=0, kwh=0.6, uv_index=5.0, forecast_kwh=1.0
+                )
+            )
+        predicted, source = model.predict_solar(
+            7, 12, 0, cloud=None, uv_index=5.0, forecast_kwh=1.0
+        )
+        assert predicted == pytest.approx(0.6, abs=0.07)
+        assert "forecast*" in source
+
+
+class TestSolarForecasterUvPath:
+    def _local(self, moment: datetime) -> datetime:
+        return moment
+
+    def test_predict_series_uses_uv_when_cloud_absent(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_solar(
+                SolarObservation(month=7, hour=12, minute=0, kwh=0.85, uv_index=7.0)
+            )
+            model.observe_solar(
+                SolarObservation(month=7, hour=12, minute=0, kwh=0.15, uv_index=1.0)
+            )
+        forecaster = SolarForecaster(model, peak_power_kw=2.0)
+        bright = WeatherSeries.from_forecast(
+            [{"datetime": "2026-07-15T12:00:00+00:00", "uv_index": 7, "temperature": 25}]
+        )
+        dull = WeatherSeries.from_forecast(
+            [{"datetime": "2026-07-15T12:00:00+00:00", "uv_index": 1, "temperature": 15}]
+        )
+        slots = [(dt(12), dt(12, 30))]
+        hot = forecaster.predict_series(slots, None, bright, self._local)
+        cold = forecaster.predict_series(slots, None, dull, self._local)
+        assert hot[0].kwh > cold[0].kwh * 3
+        assert hot[0].uv_index == pytest.approx(7.0)
+
+
+class TestSlotAccumulatorUv:
+    def test_averages_uv_over_the_slot(self):
+        acc = SlotAccumulator()
+        # Readings at 12:00, 12:10 and 12:20 belong to the 12:00 slot; the 12:30
+        # sample rolls the slot over, so its reading belongs to the next one.
+        for minute, uv in ((0, 4.0), (10, 6.0), (20, 8.0)):
+            acc.add_sample(dt(12, minute), 1.0, 1.0, uv_index=uv)
+        completed = acc.add_sample(dt(12, 30), 1.0, 1.0, uv_index=9.0)
+        assert len(completed) == 1
+        assert completed[0].uv_index == pytest.approx(6.0)
+
+    def test_uv_absent_stays_none(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 0), 1.0, 1.0, cloud_cover=20.0)
+        for minute in (10, 20, 30):
+            completed = acc.add_sample(dt(12, minute), 1.0, 1.0, cloud_cover=20.0)
+        assert completed[0].uv_index is None
+        assert completed[0].cloud_cover == pytest.approx(20.0)

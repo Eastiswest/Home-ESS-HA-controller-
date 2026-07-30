@@ -4,9 +4,13 @@ The approach is deliberately simple and inspectable rather than a black box:
 observations are binned into buckets keyed by the conditions that actually
 drive the quantity, and each bucket holds an exponentially weighted mean.
 
-* Solar is keyed by ``month : hour : cloud-cover bucket``. Given "this weather
-  at this time of year at this hour", the bucket tells you how much you
-  generated last time. That is exactly the relationship asked for.
+* Solar is keyed by ``month : hour : sky bucket``. Given "this weather at this
+  time of year at this hour", the bucket tells you how much you generated last
+  time. The sky bucket is numeric cloud cover where the weather provider offers
+  it, and UV index where it does not (the UK Met Office publishes UV but no
+  cloud cover). Because the key already pins season and half-hour, solar
+  elevation is held roughly constant, so variation in UV within a bucket is
+  mostly cloud attenuation -- which makes it a sound stand-in.
 * Load is keyed by ``day-type : hour : temperature bucket``. Temperature
   binning is what captures A/C draw on hot afternoons (and resistive heating on
   cold mornings) without needing an explicit model of either.
@@ -33,6 +37,14 @@ MIN_SAMPLES_TRUSTED = 3
 CLOUD_BUCKET_SIZE = 20.0
 CLOUD_BUCKETS = 5  # 0-20, 20-40, 40-60, 60-80, 80-100
 
+# UV index buckets, used when a weather provider publishes UV but no cloud cover
+# (the UK Met Office integration being the common case). Capped at 8: UK UV
+# rarely exceeds that, and higher values carry no extra information about cloud.
+UV_BUCKETS = 9
+# Below this, UV carries almost no information -- winter days and early mornings
+# read near zero whatever the sky is doing -- so fall back to another signal.
+UV_USEFUL_THRESHOLD = 0.5
+
 TEMPERATURE_EDGES: tuple[float, ...] = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0)
 
 
@@ -46,6 +58,34 @@ def cloud_bucket(cloud_cover: float | None) -> int:
         return CLOUD_BUCKETS // 2
     clamped = min(max(float(cloud_cover), 0.0), 100.0)
     return min(int(clamped // CLOUD_BUCKET_SIZE), CLOUD_BUCKETS - 1)
+
+
+def uv_bucket(uv_index: float | None) -> int:
+    """Bin a UV index. Returns ``-1`` when unknown or too low to be informative."""
+    if uv_index is None:
+        return -1
+    value = float(uv_index)
+    if value < UV_USEFUL_THRESHOLD:
+        return -1
+    return min(round(value), UV_BUCKETS - 1)
+
+
+def sky_key(cloud: float | None, uv_index: float | None = None) -> str:
+    """The key fragment describing sky conditions for a solar bucket.
+
+    Prefers numeric cloud cover, then UV index, then a neutral marker. The kind
+    is encoded in the fragment (``c3`` vs ``u5``) so buckets learned from one
+    signal never mix with another after a change of weather provider -- they
+    simply stop being hit and new ones build alongside.
+    """
+    if cloud is not None:
+        return f"c{cloud_bucket(cloud)}"
+    bucket = uv_bucket(uv_index)
+    if bucket >= 0:
+        return f"u{bucket}"
+    # Nothing usable: match the behaviour of an unknown cloud reading rather
+    # than pretending the sky is clear.
+    return f"c{cloud_bucket(None)}"
 
 
 def temperature_bucket(temperature: float | None) -> int:
@@ -169,6 +209,8 @@ class SolarObservation:
     minute: int
     kwh: float
     cloud_cover: float | None = None
+    uv_index: float | None = None
+    """Sky signal fallback for providers publishing UV but not cloud cover."""
     forecast_kwh: float | None = None
     """External forecast for the same slot, when one was available."""
 
@@ -214,14 +256,19 @@ class LearningModel:
         return hour * 2 + (1 if minute >= 30 else 0)
 
     def solar_keys(
-        self, month: int, hour: int, minute: int, cloud: float | None
+        self,
+        month: int,
+        hour: int,
+        minute: int,
+        cloud: float | None,
+        uv_index: float | None = None,
     ) -> list[str]:
         slot = self._slot_index(hour, minute)
-        bucket = cloud_bucket(cloud)
+        sky = sky_key(cloud, uv_index)
         season = self.season_of(month)
         return [
-            f"m{month}:s{slot}:c{bucket}",
-            f"season{season}:s{slot}:c{bucket}",
+            f"m{month}:s{slot}:{sky}",
+            f"season{season}:s{slot}:{sky}",
             f"season{season}:s{slot}",
             f"s{slot}",
         ]
@@ -253,7 +300,9 @@ class LearningModel:
     # -- training --------------------------------------------------------
 
     def observe_solar(self, obs: SolarObservation) -> None:
-        keys = self.solar_keys(obs.month, obs.hour, obs.minute, obs.cloud_cover)
+        keys = self.solar_keys(
+            obs.month, obs.hour, obs.minute, obs.cloud_cover, obs.uv_index
+        )
         self.solar_observations += 1
         for key in keys:
             self.solar_absolute.update(key, obs.kwh)
@@ -281,6 +330,7 @@ class LearningModel:
         cloud: float | None,
         forecast_kwh: float | None = None,
         default_kwh: float = 0.0,
+        uv_index: float | None = None,
     ) -> tuple[float, str]:
         """Predict PV energy for a half-hour slot.
 
@@ -288,7 +338,7 @@ class LearningModel:
         correction factor; otherwise we fall back to the learned absolute
         history, and finally to ``default_kwh``.
         """
-        keys = self.solar_keys(month, hour, minute, cloud)
+        keys = self.solar_keys(month, hour, minute, cloud, uv_index)
         if forecast_kwh is not None:
             ratio, source = self.solar_ratio.lookup(keys, default=1.0)
             # Keep the correction sane even if a bucket is polluted.

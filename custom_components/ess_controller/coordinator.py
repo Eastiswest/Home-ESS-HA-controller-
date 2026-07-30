@@ -383,8 +383,15 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def _train_from_samples(self, now: datetime, site: SiteState) -> None:
-        """Integrate live power into half-hour observations and learn from them."""
-        cloud = self._weather.cloud_at(now) if self._weather else None
+        """Integrate live power into half-hour observations and learn from them.
+
+        The sky signal recorded here must match the one used for prediction, or
+        the learned buckets would be keyed one way and looked up another.
+        """
+        cloud = self._weather.measured_cloud_at(now) if self._weather else None
+        uv_index = self._weather.uv_index_at(now) if self._weather else None
+        if cloud is None and uv_index is None and self._weather is not None:
+            cloud = self._weather.cloud_at(now)
         forecast_kwh = None
         if self._solar_forecast:
             slot_start = now.replace(
@@ -403,6 +410,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cloud_cover=cloud,
             temperature=site.outdoor_temperature,
             forecast_kwh=forecast_kwh,
+            uv_index=uv_index,
         )
 
         model = self.learning_store.model
@@ -415,6 +423,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     minute=local.minute,
                     kwh=slot.pv_kwh,
                     cloud_cover=slot.cloud_cover,
+                    uv_index=slot.uv_index,
                     forecast_kwh=slot.forecast_kwh,
                 )
             )
@@ -428,11 +437,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             _LOGGER.debug(
-                "Learned slot %s: pv=%.3f kWh load=%.3f kWh cloud=%s temp=%s",
+                "Learned slot %s: pv=%.3f kWh load=%.3f kWh cloud=%s uv=%s temp=%s",
                 local.isoformat(),
                 slot.pv_kwh,
                 slot.load_kwh,
                 slot.cloud_cover,
+                slot.uv_index,
                 slot.temperature,
             )
         if completed:

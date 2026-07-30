@@ -206,6 +206,7 @@ class SolarPrediction:
     source: str
     external_kwh: float | None = None
     cloud: float | None = None
+    uv_index: float | None = None
 
 
 class SolarForecaster:
@@ -227,6 +228,7 @@ class SolarForecaster:
         duration_hours: float,
         external_kwh: float | None = None,
         cloud: float | None = None,
+        uv_index: float | None = None,
     ) -> SolarPrediction:
         """Predict one slot. ``local_start`` must be in the user's timezone.
 
@@ -240,6 +242,7 @@ class SolarForecaster:
                 source="forecast",
                 external_kwh=external_kwh,
                 cloud=cloud,
+                uv_index=uv_index,
             )
 
         kwh, source = self._model.predict_solar(
@@ -249,12 +252,14 @@ class SolarForecaster:
             cloud=cloud,
             forecast_kwh=external_kwh,
             default_kwh=0.0,
+            uv_index=uv_index,
         )
         return SolarPrediction(
             kwh=self._clamp(kwh, duration_hours),
             source=source,
             external_kwh=external_kwh,
             cloud=cloud,
+            uv_index=uv_index,
         )
 
     def _clamp(self, kwh: float, duration_hours: float) -> float:
@@ -290,9 +295,17 @@ class SolarForecaster:
                 and external_kwh <= 0.0
             ):
                 external_kwh = None
-            cloud = weather.cloud_at(start) if weather else None
+            # Prefer numeric cloud cover; fall back to UV index for providers
+            # that publish it instead (Met Office), and only then to a
+            # condition-derived cloud estimate.
+            cloud = weather.measured_cloud_at(start) if weather else None
+            uv_index = weather.uv_index_at(start) if weather else None
+            if cloud is None and uv_index is None and weather is not None:
+                cloud = weather.cloud_at(start)
             predictions.append(
-                self.predict_slot(to_local(start), duration, external_kwh, cloud)
+                self.predict_slot(
+                    to_local(start), duration, external_kwh, cloud, uv_index
+                )
             )
         return predictions
 
