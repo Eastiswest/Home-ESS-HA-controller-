@@ -1,0 +1,414 @@
+"""Adapter for SolaX hybrid inverters via the SolaX Modbus integration.
+
+Control model for an X1/X3 Hybrid G4:
+
+* ``Self Use`` -- normal behaviour; PV first, battery covers the shortfall.
+* ``Manual Mode`` plus a manual sub-mode -- ``Force Charge``, ``Force
+  Discharge``, or ``Stop Charge and Discharge`` for a true hold.
+
+So every plan action maps onto a working mode, and charge/discharge rate is set
+through the battery current limits. Two details are handled carefully because
+they cause silent failures in practice:
+
+1. **The lock.** SolaX inverters reject setting writes unless the integration's
+   ``Lock State`` is ``Unlocked``. Unlocking is therefore part of applying a
+   command, not a manual prerequisite.
+2. **Read-back.** A Pocket WiFi dongle will accept a Modbus write and quietly
+   drop it. The base class re-reads every write, so a dropped write shows up as
+   unverified instead of being mistaken for success.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from ..models import ControlCommand, SlotAction
+from .base import (
+    Capabilities,
+    InverterAdapter,
+    InverterState,
+    Write,
+    clamp_to_number,
+    pick_option,
+    power_kw,
+    power_limit_value,
+    state_float,
+    state_options,
+    state_value,
+)
+from .roles import (
+    ROLE_BATTERY_POWER,
+    ROLE_BATTERY_VOLTAGE,
+    ROLE_CHARGE_LIMIT,
+    ROLE_DISCHARGE_LIMIT,
+    ROLE_EXPORT_LIMIT,
+    ROLE_GRID_CHARGE,
+    ROLE_GRID_POWER,
+    ROLE_LOAD_POWER,
+    ROLE_LOCK,
+    ROLE_MANUAL_MODE,
+    ROLE_MIN_SOC,
+    ROLE_PV_POWER,
+    ROLE_SOC,
+    ROLE_TARGET_SOC,
+    ROLE_USE_MODE,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+# Wording varies across firmware and integration versions, so each is a list of
+# candidates matched loosely rather than one exact string.
+MODE_SELF_USE = ("Self Use", "Self Use Mode", "selfuse")
+MODE_MANUAL = ("Manual Mode", "Manual")
+MODE_FEED_IN = ("Feedin Priority", "Feed-in Priority", "Feedin")
+MODE_BACKUP = ("Back Up Mode", "Backup Mode", "Backup")
+
+MANUAL_FORCE_CHARGE = ("Force Charge",)
+MANUAL_FORCE_DISCHARGE = ("Force Discharge",)
+MANUAL_STOP = ("Stop Charge and Discharge", "Stop Charge & Discharge", "Stop")
+
+LOCK_UNLOCKED = ("Unlocked", "Unlock")
+LOCK_LOCKED = ("Locked", "Lock")
+
+GRID_CHARGE_ON = ("Enabled", "On", "Yes", "true")
+GRID_CHARGE_OFF = ("Disabled", "Off", "No", "false")
+
+DEFAULT_NOMINAL_VOLTAGE = 360.0
+
+
+class SolaxModbusAdapter(InverterAdapter):
+    """Drives a SolaX hybrid through the SolaX Modbus integration's entities."""
+
+    name = "solax_modbus"
+
+    # Option vocabularies, as class attributes so another inverter with the
+    # same mode-select control model can reuse this adapter by overriding them
+    # rather than duplicating the logic.
+    OPT_SELF_USE: tuple[str, ...] = MODE_SELF_USE
+    OPT_MANUAL: tuple[str, ...] = MODE_MANUAL
+    OPT_FORCE_CHARGE: tuple[str, ...] = MANUAL_FORCE_CHARGE
+    OPT_FORCE_DISCHARGE: tuple[str, ...] = MANUAL_FORCE_DISCHARGE
+    OPT_STOP: tuple[str, ...] = MANUAL_STOP
+    OPT_UNLOCKED: tuple[str, ...] = LOCK_UNLOCKED
+    OPT_GRID_ON: tuple[str, ...] = GRID_CHARGE_ON
+    OPT_GRID_OFF: tuple[str, ...] = GRID_CHARGE_OFF
+
+    def __init__(
+        self,
+        hass: Any,
+        entities: dict[str, str],
+        nominal_voltage: float = DEFAULT_NOMINAL_VOLTAGE,
+        manage_export_limit: bool = False,
+        manage_min_soc: bool = True,
+    ) -> None:
+        super().__init__(hass)
+        self._entities = dict(entities)
+        self._nominal_voltage = nominal_voltage or DEFAULT_NOMINAL_VOLTAGE
+        self._manage_export_limit = manage_export_limit
+        self._manage_min_soc = manage_min_soc
+
+    # -- role helpers ----------------------------------------------------
+
+    def entity(self, role: str) -> str | None:
+        return self._entities.get(role)
+
+    @property
+    def entities(self) -> dict[str, str]:
+        return dict(self._entities)
+
+    # -- capabilities ----------------------------------------------------
+
+    @property
+    def capabilities(self) -> Capabilities:
+        use_mode = self.entity(ROLE_USE_MODE)
+        manual = self.entity(ROLE_MANUAL_MODE)
+        options = state_options(self.hass, manual)
+        return Capabilities(
+            force_charge=bool(manual)
+            and pick_option(options, self.OPT_FORCE_CHARGE) is not None,
+            force_discharge=bool(manual)
+            and pick_option(options, self.OPT_FORCE_DISCHARGE) is not None,
+            idle=bool(manual) and pick_option(options, self.OPT_STOP) is not None,
+            self_use=bool(use_mode)
+            and pick_option(state_options(self.hass, use_mode), self.OPT_SELF_USE)
+            is not None,
+            charge_power_limit=bool(self.entity(ROLE_CHARGE_LIMIT)),
+            discharge_power_limit=bool(self.entity(ROLE_DISCHARGE_LIMIT)),
+            target_soc=bool(self.entity(ROLE_TARGET_SOC)),
+            min_soc=bool(self.entity(ROLE_MIN_SOC)),
+            export_limit=bool(self.entity(ROLE_EXPORT_LIMIT)),
+            grid_charge_toggle=bool(self.entity(ROLE_GRID_CHARGE)),
+        )
+
+    # -- reading ---------------------------------------------------------
+
+    async def async_read_state(self) -> InverterState:
+        soc = state_float(self.hass, self.entity(ROLE_SOC))
+        mode = state_value(self.hass, self.entity(ROLE_USE_MODE))
+        lock = state_value(self.hass, self.entity(ROLE_LOCK))
+        locked: bool | None = None
+        if lock is not None:
+            locked = pick_option([lock], self.OPT_UNLOCKED) is None
+
+        return InverterState(
+            available=mode is not None or soc is not None,
+            soc=soc,
+            mode=mode,
+            manual_mode=state_value(self.hass, self.entity(ROLE_MANUAL_MODE)),
+            battery_voltage=state_float(self.hass, self.entity(ROLE_BATTERY_VOLTAGE)),
+            battery_power_kw=power_kw(self.hass, self.entity(ROLE_BATTERY_POWER)),
+            pv_power_kw=power_kw(self.hass, self.entity(ROLE_PV_POWER)),
+            grid_power_kw=power_kw(self.hass, self.entity(ROLE_GRID_POWER)),
+            load_power_kw=power_kw(self.hass, self.entity(ROLE_LOAD_POWER)),
+            min_soc=state_float(self.hass, self.entity(ROLE_MIN_SOC)),
+            locked=locked,
+            raw={"entities": self._entities},
+        )
+
+    # -- writing ---------------------------------------------------------
+
+    def plan_writes(self, command: ControlCommand) -> tuple[list[Write], list[str]]:
+        writes: list[Write] = []
+        skipped: list[str] = []
+
+        use_mode_entity = self.entity(ROLE_USE_MODE)
+        manual_entity = self.entity(ROLE_MANUAL_MODE)
+        if not use_mode_entity:
+            return [], ["no working-mode entity found; cannot control the inverter"]
+
+        use_options = state_options(self.hass, use_mode_entity)
+        manual_options = state_options(self.hass, manual_entity)
+
+        action = command.action
+        voltage = state_float(self.hass, self.entity(ROLE_BATTERY_VOLTAGE))
+
+        # Unlock first: SolaX refuses setting writes while locked, and a locked
+        # inverter is the single most common reason control appears to do nothing.
+        lock_entity = self.entity(ROLE_LOCK)
+        if lock_entity:
+            current_lock = state_value(self.hass, lock_entity)
+            unlocked = pick_option(state_options(self.hass, lock_entity), self.OPT_UNLOCKED)
+            if unlocked and current_lock is not None:
+                if pick_option([current_lock], self.OPT_UNLOCKED) is None:
+                    writes.append(
+                        _select_write(lock_entity, unlocked, ROLE_LOCK)
+                    )
+
+        if action in (SlotAction.CHARGE, SlotAction.DISCHARGE, SlotAction.IDLE):
+            manual_target = {
+                SlotAction.CHARGE: self.OPT_FORCE_CHARGE,
+                SlotAction.DISCHARGE: self.OPT_FORCE_DISCHARGE,
+                SlotAction.IDLE: self.OPT_STOP,
+            }[action]
+            manual_option = pick_option(manual_options, manual_target)
+            manual_mode_option = pick_option(use_options, self.OPT_MANUAL)
+
+            if manual_option is None or manual_mode_option is None or not manual_entity:
+                skipped.append(
+                    f"{action.value} not supported by this inverter; using self-use"
+                )
+                writes.extend(
+                    self._self_use_writes(use_mode_entity, use_options, skipped)
+                )
+            else:
+                writes.extend(
+                    _mode_writes(
+                        self.hass,
+                        use_mode_entity,
+                        manual_mode_option,
+                        manual_entity,
+                        manual_option,
+                    )
+                )
+                writes.extend(
+                    self._power_writes(action, command, voltage, skipped)
+                )
+        else:
+            # SELF_USE and CHARGE_SOLAR_ONLY both map to plain self-use; the
+            # difference between them is whether grid charging is permitted.
+            writes.extend(self._self_use_writes(use_mode_entity, use_options, skipped))
+
+        writes.extend(self._grid_charge_writes(command, action, skipped))
+        writes.extend(self._min_soc_writes(command, skipped))
+        writes.extend(self._export_limit_writes(command, skipped))
+
+        return _dedupe(writes), skipped
+
+    def _self_use_writes(
+        self, use_mode_entity: str, use_options: list[str], skipped: list[str]
+    ) -> list[Write]:
+        option = pick_option(use_options, self.OPT_SELF_USE)
+        if option is None:
+            skipped.append("no Self Use option found on the working-mode entity")
+            return []
+        if _normalised_state(self.hass, use_mode_entity) == _norm(option):
+            return []
+        return [_select_write(use_mode_entity, option, ROLE_USE_MODE)]
+
+    def _power_writes(
+        self,
+        action: SlotAction,
+        command: ControlCommand,
+        voltage: float | None,
+        skipped: list[str],
+    ) -> list[Write]:
+        role = ROLE_CHARGE_LIMIT if action is SlotAction.CHARGE else ROLE_DISCHARGE_LIMIT
+        if action is SlotAction.IDLE:
+            return []
+        entity_id = self.entity(role)
+        if not entity_id:
+            skipped.append(f"no {role} entity; rate will be inverter default")
+            return []
+        if command.power_kw <= 0:
+            return []
+        raw = power_limit_value(
+            self.hass, entity_id, command.power_kw, voltage, self._nominal_voltage
+        )
+        value = clamp_to_number(self.hass, entity_id, raw)
+        current = state_float(self.hass, entity_id)
+        if current is not None and abs(current - value) <= max(value * 0.03, 0.5):
+            return []
+        return [_number_write(entity_id, value, role)]
+
+    def _grid_charge_writes(
+        self, command: ControlCommand, action: SlotAction, skipped: list[str]
+    ) -> list[Write]:
+        entity_id = self.entity(ROLE_GRID_CHARGE)
+        if not entity_id:
+            return []
+        # A forced charge inherently draws from the grid, so the toggle only
+        # matters while the inverter is running its own self-use logic.
+        if action is SlotAction.CHARGE:
+            return []
+        want_on = command.allow_grid_charge and action is not SlotAction.CHARGE_SOLAR_ONLY
+        domain = entity_id.split(".", 1)[0]
+
+        if domain == "switch":
+            current = state_value(self.hass, entity_id)
+            if current is not None and (current == "on") == want_on:
+                return []
+            return [
+                Write(
+                    domain="switch",
+                    service="turn_on" if want_on else "turn_off",
+                    entity_id=entity_id,
+                    value="on" if want_on else "off",
+                    role=ROLE_GRID_CHARGE,
+                    field="",
+                )
+            ]
+
+        options = state_options(self.hass, entity_id)
+        option = pick_option(options, self.OPT_GRID_ON if want_on else self.OPT_GRID_OFF)
+        if option is None:
+            skipped.append("could not match a grid-charge option")
+            return []
+        if _normalised_state(self.hass, entity_id) == _norm(option):
+            return []
+        return [_select_write(entity_id, option, ROLE_GRID_CHARGE)]
+
+    def _min_soc_writes(
+        self, command: ControlCommand, skipped: list[str]
+    ) -> list[Write]:
+        if not self._manage_min_soc:
+            return []
+        entity_id = self.entity(ROLE_MIN_SOC)
+        if not entity_id:
+            return []
+        value = clamp_to_number(self.hass, entity_id, command.min_soc)
+        current = state_float(self.hass, entity_id)
+        if current is not None and abs(current - value) <= 0.5:
+            return []
+        return [_number_write(entity_id, value, ROLE_MIN_SOC)]
+
+    def _export_limit_writes(
+        self, command: ControlCommand, skipped: list[str]
+    ) -> list[Write]:
+        if not self._manage_export_limit or command.export_limit_kw is None:
+            return []
+        entity_id = self.entity(ROLE_EXPORT_LIMIT)
+        if not entity_id:
+            return []
+        raw = power_limit_value(
+            self.hass, entity_id, command.export_limit_kw, None, self._nominal_voltage
+        )
+        value = clamp_to_number(self.hass, entity_id, raw)
+        current = state_float(self.hass, entity_id)
+        if current is not None and abs(current - value) <= max(value * 0.03, 1.0):
+            return []
+        return [_number_write(entity_id, value, ROLE_EXPORT_LIMIT)]
+
+    def describe(self) -> dict[str, Any]:
+        data = super().describe()
+        data["entities"] = self._entities
+        data["nominal_voltage"] = self._nominal_voltage
+        data["manage_export_limit"] = self._manage_export_limit
+        return data
+
+
+def _mode_writes(
+    hass: Any,
+    use_mode_entity: str,
+    use_option: str,
+    manual_entity: str,
+    manual_option: str,
+) -> list[Write]:
+    """Set the working mode and its manual sub-mode, skipping no-op writes.
+
+    The manual sub-mode is written first: switching into Manual Mode while the
+    sub-mode still says ``Force Discharge`` would briefly discharge the battery
+    before the second write lands.
+    """
+    writes: list[Write] = []
+    if _normalised_state(hass, manual_entity) != _norm(manual_option):
+        writes.append(_select_write(manual_entity, manual_option, ROLE_MANUAL_MODE))
+    if _normalised_state(hass, use_mode_entity) != _norm(use_option):
+        writes.append(_select_write(use_mode_entity, use_option, ROLE_USE_MODE))
+    return writes
+
+
+def _select_write(entity_id: str, option: str, role: str) -> Write:
+    return Write(
+        domain="select",
+        service="select_option",
+        entity_id=entity_id,
+        value=option,
+        role=role,
+        field="option",
+    )
+
+
+def _number_write(entity_id: str, value: float, role: str) -> Write:
+    return Write(
+        domain="number",
+        service="set_value",
+        entity_id=entity_id,
+        value=value,
+        role=role,
+        field="value",
+    )
+
+
+def _dedupe(writes: list[Write]) -> list[Write]:
+    """Keep the last write per entity, preserving order."""
+    seen: dict[str, Write] = {}
+    for write in writes:
+        seen[write.entity_id] = write
+    ordered: list[Write] = []
+    used: set[str] = set()
+    for write in writes:
+        if write.entity_id in used:
+            continue
+        used.add(write.entity_id)
+        ordered.append(seen[write.entity_id])
+    return ordered
+
+
+def _norm(text: str) -> str:
+    return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+
+def _normalised_state(hass: Any, entity_id: str) -> str | None:
+    raw = state_value(hass, entity_id)
+    return _norm(raw) if raw is not None else None
