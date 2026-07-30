@@ -321,7 +321,14 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._build_data(now, site)
 
     async def _async_release(self, now: datetime) -> None:
-        """Return the inverter to self-use and stop controlling it."""
+        """Return the inverter to self-use and stop controlling it.
+
+        This write is gated on ``may_write`` rather than ``controlling``, which
+        is false whenever the optimiser is disabled. Gating on ``controlling``
+        would mean switching the optimiser off could never hand the inverter
+        back, leaving it stuck in whatever mode was last set -- quite possibly a
+        forced charge.
+        """
         self.plan = None
         command = ControlCommand(
             action=SlotAction.SELF_USE,
@@ -333,7 +340,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_command = command
         self.last_apply = await self._adapter.async_apply(
             command,
-            dry_run=not self.settings.controlling,
+            dry_run=not self.settings.may_write,
             verify=False,
         )
 

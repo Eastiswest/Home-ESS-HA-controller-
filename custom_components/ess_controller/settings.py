@@ -123,8 +123,18 @@ class RuntimeSettings:
         return self
 
     @property
+    def may_write(self) -> bool:
+        """Whether writing to the inverter is permitted at all.
+
+        Distinct from :attr:`controlling`: a disabled optimiser must still be
+        able to write once, to hand the inverter back to its own logic. Only
+        dry-run mode forbids writing outright.
+        """
+        return not self.dry_run
+
+    @property
     def controlling(self) -> bool:
-        """Whether writes to the inverter are permitted right now."""
+        """Whether the *plan* may be applied to the inverter right now."""
         return self.enabled and not self.dry_run
 
     def as_dict(self) -> dict[str, Any]:

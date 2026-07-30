@@ -32,6 +32,21 @@ class TestDefaults:
         assert settings.controlling is True
         assert RuntimeSettings(enabled=False, dry_run=False).controlling is False
 
+    def test_disabled_optimiser_may_still_write(self):
+        """Switching the optimiser off must be able to hand the inverter back.
+
+        If this were gated on `controlling`, disabling the optimiser could never
+        release the inverter, leaving it stuck in whatever mode was last set --
+        possibly a forced charge.
+        """
+        settings = RuntimeSettings(enabled=False, dry_run=False)
+        assert settings.controlling is False
+        assert settings.may_write is True
+
+    def test_dry_run_forbids_writing_outright(self):
+        assert RuntimeSettings(enabled=True, dry_run=True).may_write is False
+        assert RuntimeSettings(enabled=False, dry_run=True).may_write is False
+
 
 class TestSanitisation:
     def test_clamps_soc_into_range(self):

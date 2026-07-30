@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: pip install pytest ruff
+      - name: Lint
+        run: ruff check custom_components tests
+      - name: Check formatting
+        run: ruff format --check custom_components tests
+      - name: Test
+        run: python -m pytest tests/ -q
+
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
