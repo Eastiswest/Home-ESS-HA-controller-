@@ -114,7 +114,11 @@ def _price_delta(
     if charge_ac > EPS and not grid.allow_grid_charge and charge_ac > surplus + EPS:
         return None
 
-    if discharge_ac > EPS and not grid.allow_battery_export and discharge_ac > deficit + EPS:
+    if (
+        discharge_ac > EPS
+        and not grid.allow_battery_export
+        and discharge_ac > deficit + EPS
+    ):
         # The battery may cover the house but must not push into the grid.
         return None
 
@@ -205,9 +209,7 @@ def optimise(
 
     usable = battery.usable_kwh
     if usable < MIN_USABLE_KWH:
-        plan.reason = (
-            f"Usable capacity is only {usable:.3f} kWh; check the SoC limits"
-        )
+        plan.reason = f"Usable capacity is only {usable:.3f} kWh; check the SoC limits"
         plan.infeasible = True
         return plan
 
@@ -216,7 +218,7 @@ def optimise(
     n = len(slots)
 
     start_energy = battery.soc_to_energy(start_soc)
-    start_level = int(round(start_energy / step))
+    start_level = round(start_energy / step)
     start_level = min(max(start_level, 0), levels)
 
     # --- terminal valuation ------------------------------------------------
@@ -314,7 +316,9 @@ def optimise(
 
     plan.total_cost = total_cost
     plan.terminal_value = (level * step) * value_per_kwh
-    plan.baseline_cost = simulate_idle(slots, start_soc, battery, grid, created).total_cost
+    plan.baseline_cost = simulate_idle(
+        slots, start_soc, battery, grid, created
+    ).total_cost
     plan.self_use_cost = simulate_self_use(
         slots, start_soc, battery, grid, created
     ).total_cost
@@ -436,7 +440,9 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
 
     if charge_slots:
         energy = sum(s.charge_ac_kwh for s in charge_slots)
-        avg = sum(s.import_price * s.charge_ac_kwh for s in charge_slots) / max(energy, EPS)
+        avg = sum(s.import_price * s.charge_ac_kwh for s in charge_slots) / max(
+            energy, EPS
+        )
         parts.append(
             f"grid-charge {energy:.1f} kWh over {len(charge_slots)} slots "
             f"at avg {avg:.1f}p"
@@ -444,9 +450,9 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
     if discharge_slots:
         energy = sum(s.grid_export_kwh for s in discharge_slots)
         if energy > EPS:
-            avg = sum(
-                s.export_price * s.grid_export_kwh for s in discharge_slots
-            ) / max(energy, EPS)
+            avg = sum(s.export_price * s.grid_export_kwh for s in discharge_slots) / max(
+                energy, EPS
+            )
             parts.append(f"export {energy:.1f} kWh at avg {avg:.1f}p")
         else:
             parts.append(f"discharge across {len(discharge_slots)} slots")
@@ -464,8 +470,7 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
     if not parts:
         spread = battery.spread_needed_to_cycle()
         parts.append(
-            "hold battery: no price spread beats the "
-            f"{spread:.1f}p/kWh round-trip cost"
+            f"hold battery: no price spread beats the {spread:.1f}p/kWh round-trip cost"
         )
 
     saving = plan.saving_vs_self_use

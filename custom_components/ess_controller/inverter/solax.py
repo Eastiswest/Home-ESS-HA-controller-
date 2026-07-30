@@ -188,12 +188,15 @@ class SolaxModbusAdapter(InverterAdapter):
         lock_entity = self.entity(ROLE_LOCK)
         if lock_entity:
             current_lock = state_value(self.hass, lock_entity)
-            unlocked = pick_option(state_options(self.hass, lock_entity), self.OPT_UNLOCKED)
-            if unlocked and current_lock is not None:
-                if pick_option([current_lock], self.OPT_UNLOCKED) is None:
-                    writes.append(
-                        _select_write(lock_entity, unlocked, ROLE_LOCK)
-                    )
+            unlocked = pick_option(
+                state_options(self.hass, lock_entity), self.OPT_UNLOCKED
+            )
+            already_unlocked = (
+                current_lock is not None
+                and pick_option([current_lock], self.OPT_UNLOCKED) is not None
+            )
+            if unlocked and current_lock is not None and not already_unlocked:
+                writes.append(_select_write(lock_entity, unlocked, ROLE_LOCK))
 
         if action in (SlotAction.CHARGE, SlotAction.DISCHARGE, SlotAction.IDLE):
             manual_target = {
@@ -221,9 +224,7 @@ class SolaxModbusAdapter(InverterAdapter):
                         manual_option,
                     )
                 )
-                writes.extend(
-                    self._power_writes(action, command, voltage, skipped)
-                )
+                writes.extend(self._power_writes(action, command, voltage, skipped))
         else:
             # SELF_USE and CHARGE_SOLAR_ONLY both map to plain self-use; the
             # difference between them is whether grid charging is permitted.
@@ -308,9 +309,7 @@ class SolaxModbusAdapter(InverterAdapter):
             return []
         return [_select_write(entity_id, option, ROLE_GRID_CHARGE)]
 
-    def _min_soc_writes(
-        self, command: ControlCommand, skipped: list[str]
-    ) -> list[Write]:
+    def _min_soc_writes(self, command: ControlCommand, skipped: list[str]) -> list[Write]:
         if not self._manage_min_soc:
             return []
         entity_id = self.entity(ROLE_MIN_SOC)

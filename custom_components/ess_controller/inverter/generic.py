@@ -69,9 +69,7 @@ class GenericEntityAdapter(SolaxModbusAdapter):
         # adapter, so only the wording a user actually needs to change is changed.
         self.OPT_SELF_USE = _candidates(opts.get("self_use"), MODE_SELF_USE)
         self.OPT_MANUAL = _candidates(opts.get("manual"), MODE_MANUAL)
-        self.OPT_FORCE_CHARGE = _candidates(
-            opts.get("force_charge"), MANUAL_FORCE_CHARGE
-        )
+        self.OPT_FORCE_CHARGE = _candidates(opts.get("force_charge"), MANUAL_FORCE_CHARGE)
         self.OPT_FORCE_DISCHARGE = _candidates(
             opts.get("force_discharge"), MANUAL_FORCE_DISCHARGE
         )

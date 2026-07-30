@@ -12,8 +12,9 @@ non-standard setup is always recoverable without code changes.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 

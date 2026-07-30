@@ -30,25 +30,63 @@ _LOGGER = logging.getLogger(__name__)
 # a typical domestic profile: quiet overnight, morning peak, evening maximum.
 DIURNAL_WEIGHTS: tuple[float, ...] = (
     # 00:00-06:00
-    0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
     # 06:00-08:00
-    1.0, 1.0, 1.0, 1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
     # 08:00-09:00
-    1.2, 1.2,
+    1.2,
+    1.2,
     # 09:00-12:00
-    0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
     # 12:00-14:00
-    1.0, 1.0, 1.0, 1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
     # 14:00-17:00
-    0.9, 0.9, 0.9, 0.9, 0.9, 0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
+    0.9,
     # 17:00-19:00
-    1.8, 1.8, 1.8, 1.8,
+    1.8,
+    1.8,
+    1.8,
+    1.8,
     # 19:00-21:00
-    1.7, 1.7, 1.7, 1.7,
+    1.7,
+    1.7,
+    1.7,
+    1.7,
     # 21:00-23:00
-    1.2, 1.2, 1.2, 1.2,
+    1.2,
+    1.2,
+    1.2,
+    1.2,
     # 23:00-24:00
-    0.8, 0.8,
+    0.8,
+    0.8,
 )
 
 _WEIGHT_SUM = sum(DIURNAL_WEIGHTS)
@@ -175,9 +213,7 @@ class LoadForecaster:
             temperature = weather.temperature_at(start) if weather else None
             local = to_local(start)
             holiday = bool(is_holiday(local)) if callable(is_holiday) else False
-            predictions.append(
-                self.predict_slot(local, duration, temperature, holiday)
-            )
+            predictions.append(self.predict_slot(local, duration, temperature, holiday))
         return predictions
 
     def describe(self) -> dict[str, Any]:

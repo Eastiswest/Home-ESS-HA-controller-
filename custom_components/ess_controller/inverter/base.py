@@ -20,8 +20,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from ..models import ControlCommand, SlotAction
 
@@ -423,7 +424,7 @@ class InverterAdapter(ABC):
                 await self.hass.services.async_call(
                     write.domain, write.service, data, blocking=True
                 )
-            except Exception as err:  # noqa: BLE001 - surface any transport error
+            except Exception as err:
                 _LOGGER.warning(
                     "Failed writing %s to %s: %s", write.value, write.entity_id, err
                 )
@@ -458,7 +459,9 @@ class InverterAdapter(ABC):
                     if abs(float(actual) - float(write.value)) > max(
                         abs(float(write.value)) * 0.05, 0.5
                     ):
-                        failed.append(f"{write.entity_id}={actual} (wanted {write.value})")
+                        failed.append(
+                            f"{write.entity_id}={actual} (wanted {write.value})"
+                        )
                 except (TypeError, ValueError):
                     failed.append(f"{write.entity_id}={actual} (not numeric)")
             elif _normalise(actual) != _normalise(str(write.value)):

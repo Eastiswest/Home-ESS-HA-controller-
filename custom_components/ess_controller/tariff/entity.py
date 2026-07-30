@@ -13,8 +13,9 @@ captured real-world attribute payloads.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from ..const import PRICE_SCALE_AUTO, SLOT_MINUTES
 from ..models import PriceSlot
@@ -48,7 +49,14 @@ COMPANION_ATTRIBUTES: tuple[tuple[str, ...], ...] = (
     ("today", "tomorrow"),
 )
 
-START_KEYS: tuple[str, ...] = ("start", "valid_from", "from", "start_time", "hour", "time")
+START_KEYS: tuple[str, ...] = (
+    "start",
+    "valid_from",
+    "from",
+    "start_time",
+    "hour",
+    "time",
+)
 END_KEYS: tuple[str, ...] = ("end", "valid_to", "to", "end_time")
 VALUE_KEYS: tuple[str, ...] = (
     "value_inc_vat",
@@ -132,11 +140,7 @@ def parse_rate_entries(
     for index, (start, end, value) in enumerate(staged):
         if end is None or end <= start:
             # Infer the window from the next entry, defaulting to a half hour.
-            end = (
-                staged[index + 1][0]
-                if index + 1 < len(staged)
-                else start + _SLOT
-            )
+            end = staged[index + 1][0] if index + 1 < len(staged) else start + _SLOT
         # Split anything longer than a slot so the grid stays uniform.
         if end - start > _SLOT * 1.5:
             cursor = start
@@ -209,7 +213,9 @@ class EntityTariffProvider(TariffProvider):
             )
             if self._fallback_rate is not None:
                 _LOGGER.warning(
-                    "%s; falling back to a flat %.2f", self._last_error, self._fallback_rate
+                    "%s; falling back to a flat %.2f",
+                    self._last_error,
+                    self._fallback_rate,
                 )
                 cursor = now.replace(
                     minute=(now.minute // SLOT_MINUTES) * SLOT_MINUTES,

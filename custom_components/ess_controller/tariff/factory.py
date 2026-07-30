@@ -93,9 +93,7 @@ def build_provider(
             options.get(CONF_IMPORT_RATE_ENTITY if is_import else CONF_EXPORT_RATE_ENTITY)
         )
         if not entities:
-            _LOGGER.warning(
-                "No %s rate entity configured; using a fixed rate", direction
-            )
+            _LOGGER.warning("No %s rate entity configured; using a fixed rate", direction)
             return FixedTariffProvider(fixed_rate)
         return EntityTariffProvider(
             hass, entities, scale, fallback_rate=fixed_rate if is_import else 0.0
@@ -119,9 +117,7 @@ def build_provider(
             _LOGGER.warning(
                 "Octopus %s tariff code missing; using a fixed rate", direction
             )
-            return (
-                FixedTariffProvider(fixed_rate) if is_import else ZeroTariffProvider()
-            )
+            return FixedTariffProvider(fixed_rate) if is_import else ZeroTariffProvider()
         return OctopusApiTariffProvider(
             async_get_clientsession(hass),
             tariff_code=tariff_code,
@@ -134,9 +130,7 @@ def build_provider(
         schedule = options.get(
             CONF_IMPORT_TOU_SCHEDULE if is_import else CONF_EXPORT_TOU_SCHEDULE
         )
-        return TimeOfUseTariffProvider(
-            schedule, fixed_rate, tz=dt_timezone(hass)
-        )
+        return TimeOfUseTariffProvider(schedule, fixed_rate, tz=dt_timezone(hass))
 
     return FixedTariffProvider(fixed_rate)
 

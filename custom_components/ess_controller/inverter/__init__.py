@@ -31,6 +31,7 @@ from .solax import SolaxModbusAdapter
 
 __all__ = [
     "ALL_ROLES",
+    "SOLAX_ROLE_SPECS",
     "ApplyResult",
     "BatteryReading",
     "BatterySource",
@@ -40,7 +41,6 @@ __all__ = [
     "InverterState",
     "NullAdapter",
     "RoleSpec",
-    "SOLAX_ROLE_SPECS",
     "SolaxModbusAdapter",
     "Write",
     "clamp_to_number",

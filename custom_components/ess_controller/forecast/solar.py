@@ -20,9 +20,10 @@ bad forecast or a polluted bucket cannot hand the optimiser an impossible number
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from ..learning.model import LearningModel
 from .energy import EnergySeries, EnergySlot
@@ -126,7 +127,7 @@ def parse_power_list(entries: Iterable[Mapping[str, Any]]) -> list[EnergySlot]:
     periods = _infer_periods(times)
 
     slots: list[EnergySlot] = []
-    for (moment, value, is_power), period in zip(staged, periods):
+    for (moment, value, is_power), period in zip(staged, periods, strict=True):
         hours = period.total_seconds() / 3600.0
         kwh = max(value, 0.0) * hours if is_power else max(value, 0.0)
         slots.append(EnergySlot(start=moment, end=moment + period, kwh=kwh))
@@ -153,7 +154,7 @@ def parse_wh_mapping(mapping: Mapping[str, Any], as_power: bool) -> list[EnergyS
     periods = _infer_periods(times)
 
     slots: list[EnergySlot] = []
-    for (moment, value), period in zip(staged, periods):
+    for (moment, value), period in zip(staged, periods, strict=True):
         hours = period.total_seconds() / 3600.0
         # Both variants are in watts / watt-hours, hence the /1000.
         kwh = (max(value, 0.0) / 1000.0) * (hours if as_power else 1.0)
@@ -278,9 +279,7 @@ class SolarForecaster:
         has_external = bool(external)
         for start, end in slots:
             duration = (end - start).total_seconds() / 3600.0
-            external_kwh = (
-                external.energy_between(start, end) if has_external else None
-            )
+            external_kwh = external.energy_between(start, end) if has_external else None
             # Outside the forecast's coverage, fall back to the learned model
             # rather than trusting an implicit zero.
             if (

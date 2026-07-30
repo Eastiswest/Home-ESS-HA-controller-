@@ -9,9 +9,10 @@ proportional time overlap.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -84,8 +85,10 @@ class EnergySeries:
         """Whether the series spans the whole requested window."""
         if not self._slots:
             return False
-        return self.start is not None and self.end is not None and (
-            self.start <= start and self.end >= end
+        return (
+            self.start is not None
+            and self.end is not None
+            and (self.start <= start and self.end >= end)
         )
 
     def total(self) -> float:

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from custom_components.ess_controller.inverter.base import (
+    InverterState,
     NullAdapter,
     clamp_to_number,
     current_from_power,
@@ -17,12 +18,9 @@ from custom_components.ess_controller.inverter.base import (
     power_limit_value,
 )
 from custom_components.ess_controller.inverter.battery import BatterySource
-from custom_components.ess_controller.inverter.base import InverterState
 from custom_components.ess_controller.inverter.generic import GenericEntityAdapter
 from custom_components.ess_controller.inverter.roles import (
     ROLE_CHARGE_LIMIT,
-    ROLE_DISCHARGE_LIMIT,
-    ROLE_GRID_CHARGE,
     ROLE_LOCK,
     ROLE_MANUAL_MODE,
     ROLE_MIN_SOC,
@@ -34,7 +32,6 @@ from custom_components.ess_controller.inverter.roles import (
 )
 from custom_components.ess_controller.inverter.solax import SolaxModbusAdapter
 from custom_components.ess_controller.models import ControlCommand, SlotAction
-
 
 # ---------------------------------------------------------------------------
 # Stub Home Assistant
@@ -324,9 +321,7 @@ class TestCapabilities:
     def test_missing_manual_mode_drops_forcing(self):
         hass = build_solax_hass()
         # An inverter without a manual sub-mode cannot be forced.
-        hass.states.set(
-            "select.solax_manual_mode_select", "unavailable", options=[]
-        )
+        hass.states.set("select.solax_manual_mode_select", "unavailable", options=[])
         adapter = solax_adapter(hass)
         caps = adapter.capabilities
         assert not caps.force_charge
@@ -524,7 +519,8 @@ class TestGridChargeToggle:
         adapter = solax_adapter(hass)
         apply(adapter, command(SlotAction.CHARGE_SOLAR_ONLY))
         calls = [
-            c for c in hass.services.calls
+            c
+            for c in hass.services.calls
             if c[2]["entity_id"] == "switch.solax_selfuse_night_charge_enable"
         ]
         assert calls and calls[0][1] == "turn_off"
@@ -742,9 +738,7 @@ class TestBatterySource:
         """A used EV pack must be planned against its real capacity."""
         hass = StubHass()
         hass.states.set("sensor.be_capacity", 17.4, unit_of_measurement="kWh")
-        source = BatterySource(
-            hass, 22.0, capacity_entity="sensor.be_capacity"
-        )
+        source = BatterySource(hass, 22.0, capacity_entity="sensor.be_capacity")
         reading = source.read(None)
         assert reading.capacity_kwh == pytest.approx(17.4)
         assert reading.capacity_source == "sensor.be_capacity"

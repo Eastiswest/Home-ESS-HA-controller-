@@ -18,8 +18,9 @@ system produces sane plans on day one and sharpens over weeks.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 # Minimum weight given to a new observation once a bucket is well populated.
 # 0.12 ~ an effective window of the last ~8 comparable observations, which
@@ -212,7 +213,9 @@ class LearningModel:
     def _slot_index(hour: int, minute: int) -> int:
         return hour * 2 + (1 if minute >= 30 else 0)
 
-    def solar_keys(self, month: int, hour: int, minute: int, cloud: float | None) -> list[str]:
+    def solar_keys(
+        self, month: int, hour: int, minute: int, cloud: float | None
+    ) -> list[str]:
         slot = self._slot_index(hour, minute)
         bucket = cloud_bucket(cloud)
         season = self.season_of(month)
@@ -224,7 +227,12 @@ class LearningModel:
         ]
 
     def load_keys(
-        self, hour: int, minute: int, weekday: int, is_holiday: bool, temperature: float | None
+        self,
+        hour: int,
+        minute: int,
+        weekday: int,
+        is_holiday: bool,
+        temperature: float | None,
     ) -> list[str]:
         slot = self._slot_index(hour, minute)
         dtype = day_type(weekday, is_holiday)
@@ -240,7 +248,7 @@ class LearningModel:
     @staticmethod
     def season_of(month: int) -> int:
         """Group months into quarters so buckets fill ~3x faster than monthly."""
-        return ((month % 12) // 3)
+        return (month % 12) // 3
 
     # -- training --------------------------------------------------------
 

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_left
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 

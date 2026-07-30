@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from custom_components.ess_controller.forecast.energy import EnergySeries, EnergySlot
 from custom_components.ess_controller.forecast.load import (
-    DIURNAL_WEIGHTS,
     LoadForecaster,
     default_slot_load,
 )
@@ -33,7 +32,7 @@ from custom_components.ess_controller.learning.model import (
 )
 from custom_components.ess_controller.sampling import SlotAccumulator, slot_start_for
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def dt(hour: int, minute: int = 0, day: int = 15, month: int = 7) -> datetime:
@@ -168,7 +167,11 @@ class TestSolarLearning:
         for _ in range(8):
             model.observe_solar(
                 SolarObservation(
-                    month=7, hour=12, minute=0, kwh=0.75, cloud_cover=20.0,
+                    month=7,
+                    hour=12,
+                    minute=0,
+                    kwh=0.75,
+                    cloud_cover=20.0,
                     forecast_kwh=1.0,
                 )
             )
@@ -184,7 +187,11 @@ class TestSolarLearning:
         for _ in range(10):
             model.observe_solar(
                 SolarObservation(
-                    month=7, hour=12, minute=0, kwh=50.0, cloud_cover=20.0,
+                    month=7,
+                    hour=12,
+                    minute=0,
+                    kwh=50.0,
+                    cloud_cover=20.0,
                     forecast_kwh=1.0,
                 )
             )
@@ -196,7 +203,11 @@ class TestSolarLearning:
         for _ in range(5):
             model.observe_solar(
                 SolarObservation(
-                    month=7, hour=4, minute=0, kwh=0.02, cloud_cover=50.0,
+                    month=7,
+                    hour=4,
+                    minute=0,
+                    kwh=0.02,
+                    cloud_cover=50.0,
                     forecast_kwh=0.001,
                 )
             )
@@ -302,9 +313,7 @@ class TestModelPersistence:
 
 class TestEnergySeries:
     def test_resamples_hourly_to_half_hourly(self):
-        series = EnergySeries(
-            [EnergySlot(start=dt(12), end=dt(13), kwh=1.0)]
-        )
+        series = EnergySeries([EnergySlot(start=dt(12), end=dt(13), kwh=1.0)])
         assert series.energy_between(dt(12), dt(12, 30)) == pytest.approx(0.5)
         assert series.energy_between(dt(12, 30), dt(13)) == pytest.approx(0.5)
 
@@ -481,7 +490,11 @@ class TestSolarForecaster:
         for _ in range(8):
             model.observe_solar(
                 SolarObservation(
-                    month=7, hour=13, minute=0, kwh=0.4, cloud_cover=30.0,
+                    month=7,
+                    hour=13,
+                    minute=0,
+                    kwh=0.4,
+                    cloud_cover=30.0,
                     forecast_kwh=0.8,
                 )
             )
@@ -494,14 +507,10 @@ class TestSolarForecaster:
     def test_predict_series_over_horizon(self):
         model = LearningModel()
         forecaster = SolarForecaster(model, peak_power_kw=2.0)
-        external = EnergySeries(
-            [EnergySlot(start=dt(12), end=dt(13), kwh=1.6)]
-        )
+        external = EnergySeries([EnergySlot(start=dt(12), end=dt(13), kwh=1.6)])
         weather = WeatherSeries([WeatherPoint(time=dt(12), cloud_coverage=10.0)])
         slots = [(dt(12), dt(12, 30)), (dt(12, 30), dt(13))]
-        predictions = forecaster.predict_series(
-            slots, external, weather, self._local
-        )
+        predictions = forecaster.predict_series(slots, external, weather, self._local)
         assert len(predictions) == 2
         assert predictions[0].kwh == pytest.approx(0.8)
 
@@ -510,7 +519,11 @@ class TestSolarForecaster:
         for _ in range(8):
             model.observe_solar(
                 SolarObservation(
-                    month=7, hour=13, minute=0, kwh=0.1, cloud_cover=30.0,
+                    month=7,
+                    hour=13,
+                    minute=0,
+                    kwh=0.1,
+                    cloud_cover=30.0,
                     forecast_kwh=0.8,
                 )
             )
@@ -525,8 +538,7 @@ class TestLoadForecaster:
 
     def test_default_profile_sums_to_daily_total(self):
         total = sum(
-            default_slot_load(index // 2, (index % 2) * 30, 10.0)
-            for index in range(48)
+            default_slot_load(index // 2, (index % 2) * 30, 10.0) for index in range(48)
         )
         assert total == pytest.approx(10.0)
 
@@ -693,7 +705,11 @@ class TestEndToEndLearning:
             load = 0.3 if day <= 7 else 1.7
             model.observe_load(
                 LoadObservation(
-                    hour=14, minute=0, kwh=load, weekday=(day % 7), temperature=temperature
+                    hour=14,
+                    minute=0,
+                    kwh=load,
+                    weekday=(day % 7),
+                    temperature=temperature,
                 )
             )
         cool, _ = model.predict_load(14, 0, weekday=1, temperature=17.0)

@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from ..const import (
     PRICE_SCALE_AUTO,
@@ -122,10 +123,10 @@ class PriceSeries:
             cursor = slot.end
         return cursor
 
-    def mean(self, start: datetime | None = None, end: datetime | None = None) -> float | None:
-        subset = (
-            self.between(start, end) if start and end else self._slots
-        )
+    def mean(
+        self, start: datetime | None = None, end: datetime | None = None
+    ) -> float | None:
+        subset = self.between(start, end) if start and end else self._slots
         if not subset:
             return None
         return sum(s.price for s in subset) / len(subset)
@@ -148,7 +149,9 @@ class PriceSeries:
         for slot in self._slots:
             if slot.is_forecast:
                 continue
-            by_time.setdefault((slot.start.hour, slot.start.minute), []).append(slot.price)
+            by_time.setdefault((slot.start.hour, slot.start.minute), []).append(
+                slot.price
+            )
 
         overall = self.mean()
         if overall is None:

@@ -26,7 +26,20 @@ API_BASE = "https://api.octopus.energy/v1"
 
 # Octopus region codes (the trailing letter of a tariff code).
 REGIONS: tuple[str, ...] = (
-    "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "P",
 )
 
 REGION_NAMES: dict[str, str] = {
@@ -131,9 +144,7 @@ def parse_unit_rates(
                 )
                 cursor += _SLOT
         else:
-            slots.append(
-                PriceSlot(start=start, end=end, price=float(value) * scale)
-            )
+            slots.append(PriceSlot(start=start, end=end, price=float(value) * scale))
 
     slots.sort(key=lambda s: s.start)
     return slots
@@ -226,7 +237,9 @@ class OctopusApiTariffProvider(TariffProvider):
         for payload in payloads:
             series.merge(
                 parse_unit_rates(
-                    payload, self._scale_mode, fallback_end=horizon_end + timedelta(days=1)
+                    payload,
+                    self._scale_mode,
+                    fallback_end=horizon_end + timedelta(days=1),
                 )
             )
 
@@ -253,9 +266,7 @@ class OctopusApiTariffProvider(TariffProvider):
             next_params = None
         return payloads
 
-    async def _async_get(
-        self, url: str, params: dict[str, str] | None
-    ) -> dict[str, Any]:
+    async def _async_get(self, url: str, params: dict[str, str] | None) -> dict[str, Any]:
         return await async_get_json(self._session, url, params, self._api_key)
 
     def describe(self) -> dict[str, Any]:
@@ -280,7 +291,7 @@ async def async_get_json(
         response = await session.get(
             url, params=params, headers=_auth_header(api_key), timeout=REQUEST_TIMEOUT
         )
-    except Exception as err:  # noqa: BLE001 - aiohttp/asyncio errors vary
+    except Exception as err:
         raise OctopusApiError(f"request to {url} failed: {err}") from err
 
     async with response:
@@ -294,7 +305,7 @@ async def async_get_json(
             raise OctopusApiError(f"HTTP {response.status} from {url}")
         try:
             return await response.json()
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             raise OctopusApiError(f"invalid JSON from {url}: {err}") from err
 
 

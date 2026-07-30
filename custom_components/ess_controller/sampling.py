@@ -102,7 +102,11 @@ class SlotAccumulator:
         if self._bucket is None:
             self._bucket = _Bucket(start=slot_start_for(moment))
 
-        if previous is not None and moment > previous and moment - previous <= MAX_SAMPLE_GAP:
+        if (
+            previous is not None
+            and moment > previous
+            and moment - previous <= MAX_SAMPLE_GAP
+        ):
             cursor = previous
             while cursor < moment:
                 cursor_slot = slot_start_for(cursor)
@@ -173,3 +177,32 @@ class SlotAccumulator:
             temperature=temp,
             forecast_kwh=bucket.forecast_kwh,
         )
+
+
+def slot_boundaries(
+    now: datetime, horizon_end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Half-hour planning boundaries from ``now``, with a shortened first slot.
+
+    Planning from the next half-hour boundary would ignore the remainder of the
+    current one, which is exactly the period a decision applies to. A sliver of
+    a slot is not worth planning separately, so anything under two minutes is
+    folded into the following slot.
+
+    The final slot is clamped to ``horizon_end`` so the plan never prices energy
+    beyond the horizon it was asked for.
+    """
+    if horizon_end <= now:
+        return []
+
+    boundaries: list[tuple[datetime, datetime]] = []
+    first_end = min(slot_start_for(now) + _SLOT_LENGTH, horizon_end)
+
+    if (first_end - now).total_seconds() >= 120:
+        boundaries.append((now, first_end))
+    cursor = first_end
+
+    while cursor < horizon_end:
+        boundaries.append((cursor, min(cursor + _SLOT_LENGTH, horizon_end)))
+        cursor += _SLOT_LENGTH
+    return boundaries

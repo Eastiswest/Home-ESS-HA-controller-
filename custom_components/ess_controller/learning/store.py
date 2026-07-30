@@ -31,7 +31,7 @@ class LearningStore:
     async def async_load(self) -> LearningModel:
         try:
             data = await self._store.async_load()
-        except Exception:  # noqa: BLE001 - never block setup on a bad store
+        except Exception:
             _LOGGER.exception("Failed to load learning data; starting fresh")
             data = None
         if data:

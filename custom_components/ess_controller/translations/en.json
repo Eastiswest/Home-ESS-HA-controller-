@@ -1,0 +1,468 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Battery",
+        "description": "Describe your storage. Nameplate capacity can be left as the manufacturer's figure — if a BMS reports the real (degraded) capacity, point the capacity sensor at it and that will be used instead.",
+        "data": {
+          "battery_capacity_kwh": "Nameplate capacity",
+          "battery_soc_entity": "State of charge sensor",
+          "battery_capacity_entity": "Measured capacity sensor (optional)",
+          "battery_health_entity": "State of health sensor (optional)",
+          "battery_temperature_entity": "Battery temperature sensor (optional)",
+          "derate_capacity_by_soh": "Scale nameplate capacity by reported health",
+          "battery_min_soc": "Minimum state of charge the optimiser may plan to",
+          "battery_max_soc": "Maximum state of charge",
+          "battery_reserve_soc": "Emergency reserve written to the inverter",
+          "max_charge_power_kw": "Maximum charge power",
+          "max_discharge_power_kw": "Maximum discharge power",
+          "charge_efficiency": "Charge efficiency",
+          "discharge_efficiency": "Discharge efficiency",
+          "cycle_cost_per_kwh": "Battery wear allowance"
+        },
+        "data_description": {
+          "battery_soc_entity": "Leave empty to use the inverter's own reading. A separate BMS figure is usually more accurate.",
+          "battery_min_soc": "The floor for planning. The emergency reserve sits below this.",
+          "cycle_cost_per_kwh": "Roughly pack cost divided by expected lifetime throughput. Higher values make the optimiser cycle less."
+        }
+      },
+      "inverter": {
+        "title": "Inverter",
+        "description": "Control is applied through your existing inverter integration's entities.\n\nAuto-discovered so far: {discovered}",
+        "data": {
+          "inverter_adapter": "Inverter type",
+          "inverter_entity_prefix": "Entity name prefix",
+          "nominal_voltage": "Nominal battery voltage",
+          "manage_export_limit": "Also manage the inverter's export limit",
+          "grid_import_limit_kw": "Grid import limit",
+          "grid_export_limit_kw": "Grid export limit"
+        },
+        "data_description": {
+          "inverter_entity_prefix": "Used to pick the right entities if you have more than one inverter, e.g. \"solax\".",
+          "nominal_voltage": "Used to convert a power target into a battery current limit when the inverter limits by current. The live voltage sensor is preferred when available.",
+          "grid_export_limit_kw": "Your permitted export, e.g. 3.68 kW for a typical single-phase G98 connection."
+        }
+      },
+      "tariff": {
+        "title": "Tariff sources",
+        "description": "Choose where prices come from. Import prices are required; an export tariff is optional — leave it as \"none\" if you are not paid for export.",
+        "data": {
+          "import_provider": "Import price source",
+          "export_provider": "Export price source",
+          "currency": "Currency"
+        }
+      },
+      "tariff_import": {
+        "title": "Import tariff",
+        "description": "Prices are normalised to pence per kWh. If your source publishes pounds, that is detected automatically.",
+        "data": {
+          "import_rate_entity": "Rate entities",
+          "octopus_import_product": "Octopus product code",
+          "octopus_import_tariff": "Full tariff code (optional)",
+          "octopus_region": "Region",
+          "octopus_api_key": "Octopus API key (optional)",
+          "octopus_account": "Octopus account number (optional)",
+          "import_tou_schedule": "Time-of-use schedule",
+          "import_fixed_rate": "Fixed or fallback rate",
+          "import_price_scale": "Price units"
+        },
+        "data_description": {
+          "import_rate_entity": "Entities carrying a list of forward rates, such as the Octopus Energy integration's rate events.",
+          "octopus_account": "Supply this with an API key and the tariff codes will be looked up for you.",
+          "import_tou_schedule": "For example 00:30-04:30=9.5,04:30-00:30=28.0 in local time.",
+          "import_fixed_rate": "Used as a fallback if the chosen source returns no prices."
+        }
+      },
+      "tariff_export": {
+        "title": "Export tariff",
+        "data": {
+          "export_rate_entity": "Rate entities",
+          "octopus_export_product": "Octopus product code",
+          "octopus_export_tariff": "Full tariff code (optional)",
+          "octopus_region": "Region",
+          "octopus_api_key": "Octopus API key (optional)",
+          "octopus_account": "Octopus account number (optional)",
+          "export_tou_schedule": "Time-of-use schedule",
+          "export_fixed_rate": "Fixed or fallback rate",
+          "export_price_scale": "Price units"
+        }
+      },
+      "forecast": {
+        "title": "Forecasting",
+        "description": "A solar forecast integration is optional. With one, its shape is trusted and a per-installation correction is learned; without one, generation is learned from your own history.",
+        "data": {
+          "solar_forecast_entities": "Solar forecast sensors",
+          "solar_peak_power_kw": "Array peak power",
+          "weather_entity": "Weather entity",
+          "outdoor_temp_entity": "Outdoor temperature sensor (optional)",
+          "pv_power_entity": "PV power sensor",
+          "load_power_entity": "House load power sensor",
+          "grid_power_entity": "Grid power sensor",
+          "default_daily_load_kwh": "Typical daily consumption"
+        },
+        "data_description": {
+          "solar_forecast_entities": "Solcast or Forecast.Solar sensors. Add both today and tomorrow to cover the whole horizon.",
+          "weather_entity": "Supplies cloud cover for solar and temperature for heating and cooling load.",
+          "load_power_entity": "Needed for the load model to learn. Without it, forecasts stay on the default profile.",
+          "default_daily_load_kwh": "Only used for slots not yet learned."
+        }
+      },
+      "optimiser": {
+        "title": "Optimiser",
+        "description": "Inverter control starts switched off, so you can watch the plan for a few days before letting it act. Arm it later with the \"Inverter control\" switch.",
+        "data": {
+          "horizon_hours": "Planning horizon",
+          "soc_levels": "State of charge resolution",
+          "terminal_value_mode": "Value of energy left at the end of the horizon",
+          "terminal_value_rate": "Fixed end-of-horizon value",
+          "allow_grid_charge": "Allow charging from the grid",
+          "allow_export": "Allow export",
+          "allow_battery_export": "Allow the battery to export",
+          "dry_run": "Start in advisory mode (recommended)"
+        },
+        "data_description": {
+          "horizon_hours": "Longer sees further ahead but relies more on extrapolated prices.",
+          "soc_levels": "Higher is more precise and slightly slower. 60 is plenty for a domestic battery.",
+          "terminal_value_mode": "Stops the optimiser dumping the battery into the final slot just because the horizon ends there.",
+          "dry_run": "Strongly recommended for a new install."
+        }
+      }
+    },
+    "error": {
+      "octopus_unreachable": "Could not reach the Octopus API. Check your network and try again.",
+      "octopus_no_rates": "That tariff returned no rates. Check the product code and region.",
+      "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
+      "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
+      "invalid_region": "Unknown Octopus region."
+    },
+    "abort": {
+      "already_configured": "This controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "AI ESS Controller",
+        "description": "Which section would you like to change?",
+        "menu_options": {
+          "battery": "Battery",
+          "inverter": "Inverter",
+          "entity_map": "Inverter entities",
+          "tariff": "Tariff sources",
+          "tariff_import": "Import tariff",
+          "tariff_export": "Export tariff",
+          "forecast": "Forecasting",
+          "optimiser": "Optimiser"
+        }
+      },
+      "battery": {
+        "title": "Battery",
+        "data": {
+          "battery_capacity_kwh": "Nameplate capacity",
+          "battery_soc_entity": "State of charge sensor",
+          "battery_capacity_entity": "Measured capacity sensor (optional)",
+          "battery_health_entity": "State of health sensor (optional)",
+          "battery_temperature_entity": "Battery temperature sensor (optional)",
+          "derate_capacity_by_soh": "Scale nameplate capacity by reported health",
+          "battery_min_soc": "Minimum state of charge the optimiser may plan to",
+          "battery_max_soc": "Maximum state of charge",
+          "battery_reserve_soc": "Emergency reserve written to the inverter",
+          "max_charge_power_kw": "Maximum charge power",
+          "max_discharge_power_kw": "Maximum discharge power",
+          "charge_efficiency": "Charge efficiency",
+          "discharge_efficiency": "Discharge efficiency",
+          "cycle_cost_per_kwh": "Battery wear allowance"
+        },
+        "data_description": {
+          "battery_min_soc": "Changing this here only affects new installs; use the Minimum state of charge entity to adjust a running system."
+        }
+      },
+      "inverter": {
+        "title": "Inverter",
+        "description": "Auto-discovered: {discovered}",
+        "data": {
+          "inverter_adapter": "Inverter type",
+          "inverter_entity_prefix": "Entity name prefix",
+          "nominal_voltage": "Nominal battery voltage",
+          "manage_export_limit": "Also manage the inverter's export limit",
+          "grid_import_limit_kw": "Grid import limit",
+          "grid_export_limit_kw": "Grid export limit"
+        }
+      },
+      "entity_map": {
+        "title": "Inverter entities",
+        "description": "Override any entity that was discovered incorrectly. Leave a field empty to keep using auto-discovery, or clear it to stop the controller touching that setting altogether.",
+        "data": {
+          "use_mode": "Working mode select",
+          "manual_mode": "Manual mode select",
+          "charge_limit": "Charge limit",
+          "discharge_limit": "Discharge limit",
+          "min_soc": "Inverter minimum state of charge",
+          "export_limit": "Export limit",
+          "lock": "Lock state",
+          "grid_charge": "Charge from grid toggle",
+          "soc": "State of charge sensor",
+          "battery_voltage": "Battery voltage sensor"
+        }
+      },
+      "tariff": {
+        "title": "Tariff sources",
+        "data": {
+          "import_provider": "Import price source",
+          "export_provider": "Export price source",
+          "currency": "Currency"
+        }
+      },
+      "tariff_import": {
+        "title": "Import tariff",
+        "data": {
+          "import_rate_entity": "Rate entities",
+          "octopus_import_product": "Octopus product code",
+          "octopus_import_tariff": "Full tariff code (optional)",
+          "octopus_region": "Region",
+          "octopus_api_key": "Octopus API key (optional)",
+          "octopus_account": "Octopus account number (optional)",
+          "import_tou_schedule": "Time-of-use schedule",
+          "import_fixed_rate": "Fixed or fallback rate",
+          "import_price_scale": "Price units"
+        }
+      },
+      "tariff_export": {
+        "title": "Export tariff",
+        "data": {
+          "export_rate_entity": "Rate entities",
+          "octopus_export_product": "Octopus product code",
+          "octopus_export_tariff": "Full tariff code (optional)",
+          "octopus_region": "Region",
+          "octopus_api_key": "Octopus API key (optional)",
+          "octopus_account": "Octopus account number (optional)",
+          "export_tou_schedule": "Time-of-use schedule",
+          "export_fixed_rate": "Fixed or fallback rate",
+          "export_price_scale": "Price units"
+        }
+      },
+      "forecast": {
+        "title": "Forecasting",
+        "data": {
+          "solar_forecast_entities": "Solar forecast sensors",
+          "solar_peak_power_kw": "Array peak power",
+          "weather_entity": "Weather entity",
+          "outdoor_temp_entity": "Outdoor temperature sensor (optional)",
+          "pv_power_entity": "PV power sensor",
+          "load_power_entity": "House load power sensor",
+          "grid_power_entity": "Grid power sensor",
+          "default_daily_load_kwh": "Typical daily consumption"
+        }
+      },
+      "optimiser": {
+        "title": "Optimiser",
+        "data": {
+          "horizon_hours": "Planning horizon",
+          "soc_levels": "State of charge resolution",
+          "terminal_value_mode": "Value of energy left at the end of the horizon",
+          "terminal_value_rate": "Fixed end-of-horizon value",
+          "allow_grid_charge": "Allow charging from the grid",
+          "allow_export": "Allow export",
+          "allow_battery_export": "Allow the battery to export",
+          "dry_run": "Start in advisory mode"
+        }
+      }
+    },
+    "error": {
+      "octopus_unreachable": "Could not reach the Octopus API. Check your network and try again.",
+      "octopus_no_rates": "That tariff returned no rates. Check the product code and region.",
+      "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
+      "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
+      "invalid_region": "Unknown Octopus region."
+    }
+  },
+  "selector": {
+    "adapter": {
+      "options": {
+        "solax_modbus": "SolaX (SolaX Modbus integration)",
+        "generic": "Generic — describe the entities yourself",
+        "none": "None — advisory only, never control"
+      }
+    },
+    "provider": {
+      "options": {
+        "none": "None",
+        "octopus_entity": "Octopus Energy integration",
+        "octopus_api": "Octopus API (direct)",
+        "entity": "Another integration's rate entity",
+        "fixed": "Fixed rate",
+        "tou": "Time-of-use schedule"
+      }
+    },
+    "price_scale": {
+      "options": {
+        "auto": "Detect automatically",
+        "minor": "Pence per kWh",
+        "major": "Pounds per kWh"
+      }
+    },
+    "terminal_mode": {
+      "options": {
+        "horizon_mean": "Average price over the horizon (recommended)",
+        "fixed": "A fixed value",
+        "zero": "Worthless"
+      }
+    },
+    "region": {
+      "options": {
+        "A": "A — Eastern England",
+        "B": "B — East Midlands",
+        "C": "C — London",
+        "D": "D — Merseyside & North Wales",
+        "E": "E — West Midlands",
+        "F": "F — North East England",
+        "G": "G — North West England",
+        "H": "H — Southern England",
+        "J": "J — South East England",
+        "K": "K — South Wales",
+        "L": "L — South West England",
+        "M": "M — Yorkshire",
+        "N": "N — Southern Scotland",
+        "P": "P — Northern Scotland"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "plan_action": {
+        "name": "Planned action",
+        "state": {
+          "charge": "Charging from grid",
+          "discharge": "Discharging",
+          "self_use": "Self use",
+          "idle": "Holding",
+          "charge_solar_only": "Charging from solar"
+        }
+      },
+      "next_action": {
+        "name": "Next action",
+        "state": {
+          "charge": "Charging from grid",
+          "discharge": "Discharging",
+          "self_use": "Self use",
+          "idle": "Holding",
+          "charge_solar_only": "Charging from solar"
+        }
+      },
+      "control_status": { "name": "Control status" },
+      "plan_cost": { "name": "Planned horizon cost" },
+      "plan_saving": { "name": "Planned saving vs self-use" },
+      "import_price": { "name": "Import price now" },
+      "export_price": { "name": "Export price now" },
+      "target_soc": { "name": "Target state of charge" },
+      "solar_forecast_today": { "name": "Solar forecast remaining today" },
+      "solar_forecast_tomorrow": { "name": "Solar forecast tomorrow" },
+      "load_forecast_today": { "name": "Load forecast remaining today" },
+      "load_forecast_tomorrow": { "name": "Load forecast tomorrow" },
+      "planned_grid_import": { "name": "Planned grid import" },
+      "planned_grid_export": { "name": "Planned grid export" },
+      "battery_soc": { "name": "Battery state of charge" },
+      "usable_capacity": { "name": "Usable battery capacity" },
+      "learning_progress": { "name": "Learning progress" },
+      "planned_charge_power": { "name": "Planned charge power" },
+      "planned_discharge_power": { "name": "Planned discharge power" }
+    },
+    "binary_sensor": {
+      "charging_planned": { "name": "Charging planned" },
+      "discharging_planned": { "name": "Discharging planned" },
+      "exporting_planned": { "name": "Exporting planned" },
+      "cheap_slot": { "name": "Cheap import slot" },
+      "control_active": { "name": "Control active" },
+      "inverter_available": { "name": "Inverter available" },
+      "plan_valid": { "name": "Plan problem" },
+      "write_verified": { "name": "Inverter write problem" }
+    },
+    "switch": {
+      "optimiser_enabled": { "name": "Optimiser enabled" },
+      "inverter_control": { "name": "Inverter control" },
+      "allow_grid_charge": { "name": "Allow grid charging" },
+      "allow_export": { "name": "Allow export" },
+      "allow_battery_export": { "name": "Allow battery export" }
+    },
+    "number": {
+      "min_soc": { "name": "Minimum state of charge" },
+      "max_soc": { "name": "Maximum state of charge" },
+      "reserve_soc": { "name": "Emergency reserve" },
+      "max_charge_power": { "name": "Maximum charge power" },
+      "max_discharge_power": { "name": "Maximum discharge power" },
+      "cycle_cost": { "name": "Battery wear allowance" },
+      "default_daily_load": { "name": "Typical daily consumption" },
+      "cooling_rate": { "name": "Cooling load per degree" },
+      "cooling_threshold": { "name": "Cooling threshold" },
+      "heating_rate": { "name": "Heating load per degree" },
+      "heating_threshold": { "name": "Heating threshold" }
+    },
+    "select": {
+      "strategy": {
+        "name": "Strategy",
+        "state": {
+          "auto": "Automatic (optimised)",
+          "self_use": "Self use only",
+          "force_charge": "Force charge",
+          "force_discharge": "Force discharge",
+          "idle": "Hold battery",
+          "off": "Off"
+        }
+      }
+    },
+    "button": {
+      "replan": { "name": "Re-plan now" },
+      "clear_override": { "name": "Clear override" },
+      "reset_learning": { "name": "Reset learned history" }
+    }
+  },
+  "services": {
+    "replan": {
+      "name": "Re-plan now",
+      "description": "Force an immediate re-optimisation.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    },
+    "set_override": {
+      "name": "Set manual override",
+      "description": "Force a behaviour for a period, overriding the plan.",
+      "fields": {
+        "action": { "name": "Action", "description": "What the inverter should do." },
+        "duration": { "name": "Duration", "description": "How long the override lasts." },
+        "power": { "name": "Power", "description": "Charge or discharge power in kW." },
+        "target_soc": {
+          "name": "Target state of charge",
+          "description": "End the override once this state of charge is reached."
+        },
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    },
+    "clear_override": {
+      "name": "Clear manual override",
+      "description": "Cancel any active override and return to the plan.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    },
+    "reset_learning": {
+      "name": "Reset learned history",
+      "description": "Discard learned solar and load history and start again.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    }
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from itertools import pairwise
 
 import pytest
 
@@ -298,5 +299,5 @@ class TestEdgeCases:
     def test_soc_trajectory_is_continuous(self):
         prices = [8.0] * 12 + [40.0] * 12 + [12.0] * 12
         plan = optimise(build_slots(prices, load=0.4), 30.0, make_battery(), make_grid())
-        for previous, following in zip(plan.slots, plan.slots[1:]):
+        for previous, following in pairwise(plan.slots):
             assert previous.soc_end == pytest.approx(following.soc_start)

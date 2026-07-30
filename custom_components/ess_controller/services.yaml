@@ -1,0 +1,96 @@
+replan:
+  name: Re-plan now
+  description: >-
+    Force an immediate re-optimisation instead of waiting for the next cycle.
+    Useful after changing a tariff or when a forecast has just updated.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to apply to all of them.
+      required: false
+      selector:
+        text:
+
+set_override:
+  name: Set manual override
+  description: >-
+    Force a specific behaviour for a period, taking precedence over both the
+    optimised plan and the strategy selector. The override expires on its own,
+    so a forgotten override cannot strand the battery indefinitely.
+  fields:
+    action:
+      name: Action
+      description: What the inverter should do for the duration.
+      required: true
+      selector:
+        select:
+          options:
+            - charge
+            - discharge
+            - idle
+            - self_use
+            - charge_solar_only
+    duration:
+      name: Duration
+      description: How long the override lasts.
+      required: false
+      default:
+        minutes: 60
+      selector:
+        duration:
+    power:
+      name: Power
+      description: >-
+        Charge or discharge power in kW. Defaults to the configured maximum for
+        the chosen action.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 0.1
+          unit_of_measurement: kW
+          mode: box
+    target_soc:
+      name: Target state of charge
+      description: Stop the override early once this state of charge is reached.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to apply to all of them.
+      required: false
+      selector:
+        text:
+
+clear_override:
+  name: Clear manual override
+  description: Cancel any active override and return to the optimised plan.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to apply to all of them.
+      required: false
+      selector:
+        text:
+
+reset_learning:
+  name: Reset learned history
+  description: >-
+    Discard everything learned about solar yield and household load and start
+    again. Use this after moving panels, adding an array, or a change in
+    occupancy that makes the learned load profile wrong. Forecasts fall back to
+    the configured defaults until new history accumulates.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to apply to all of them.
+      required: false
+      selector:
+        text:

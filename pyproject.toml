@@ -1,0 +1,29 @@
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # function calls in argument defaults are idiomatic for selectors
+    "RUF012",  # HA entity descriptions use mutable class attributes by design
+]
+
+[tool.ruff.lint.per-file-ignores]
+# dict(...) reads better than a literal in the test fixture builders.
+"tests/*" = ["B011", "SIM117", "C408"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]

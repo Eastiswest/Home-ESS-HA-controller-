@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 
 import pytest
 
@@ -29,7 +29,7 @@ from custom_components.ess_controller.tariff.octopus import (
     product_code_from_tariff,
 )
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 
 
@@ -71,9 +71,7 @@ class TestPriceSeries:
         assert series.price_at(datetime(2026, 1, 15, 5, 0, tzinfo=UTC)) is None
 
     def test_known_until_finds_end_of_contiguous_run(self):
-        series = PriceSeries(
-            [slot(12, 0, 10.0), slot(12, 30, 11.0), slot(13, 0, 12.0)]
-        )
+        series = PriceSeries([slot(12, 0, 10.0), slot(12, 30, 11.0), slot(13, 0, 12.0)])
         assert series.known_until(NOW) == datetime(2026, 1, 15, 13, 30, tzinfo=UTC)
 
     def test_known_until_stops_at_a_gap(self):
@@ -380,9 +378,7 @@ class TestTimeOfUse:
         ]
 
     def test_list_schedule(self):
-        windows = parse_tou_schedule(
-            [{"start": "23:30", "end": "05:30", "rate": 8.0}]
-        )
+        windows = parse_tou_schedule([{"start": "23:30", "end": "05:30", "rate": 8.0}])
         assert windows == [(time(23, 30), time(5, 30), 8.0)]
 
     def test_bad_entries_skipped(self):

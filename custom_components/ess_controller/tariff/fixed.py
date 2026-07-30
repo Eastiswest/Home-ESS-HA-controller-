@@ -121,7 +121,9 @@ class TimeOfUseTariffProvider(TariffProvider):
 
     name = "tou"
 
-    def __init__(self, schedule: Any, default_rate: float, tz: tzinfo | None = None) -> None:
+    def __init__(
+        self, schedule: Any, default_rate: float, tz: tzinfo | None = None
+    ) -> None:
         self._windows = parse_tou_schedule(schedule)
         self._default = float(default_rate)
         self._tz = tz

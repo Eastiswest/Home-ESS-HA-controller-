@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class SlotAction(str, Enum):
+class SlotAction(StrEnum):
     """What the controller intends to do during a single planning slot."""
 
     CHARGE = "charge"
@@ -29,9 +29,6 @@ class SlotAction(str, Enum):
 
     CHARGE_SOLAR_ONLY = "charge_solar_only"
     """Charge from surplus PV only; never pull charge energy from the grid."""
-
-    def __str__(self) -> str:  # pragma: no cover - convenience only
-        return self.value
 
 
 @dataclass(slots=True)
@@ -364,9 +361,7 @@ class ControlCommand:
             return True
         if abs(self.min_soc - other.min_soc) > 0.5:
             return True
-        if self.allow_grid_charge is not other.allow_grid_charge:
-            return True
-        return False
+        return self.allow_grid_charge is not other.allow_grid_charge
 
 
 @dataclass(slots=True)

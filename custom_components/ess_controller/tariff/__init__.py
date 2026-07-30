@@ -24,11 +24,11 @@ from .octopus import (
 )
 
 __all__ = [
+    "REGIONS",
+    "REGION_NAMES",
     "FixedTariffProvider",
     "OctopusApiError",
     "PriceSeries",
-    "REGIONS",
-    "REGION_NAMES",
     "TariffProvider",
     "TimeOfUseTariffProvider",
     "ZeroTariffProvider",
