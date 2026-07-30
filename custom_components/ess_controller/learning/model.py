@@ -11,9 +11,10 @@ drive the quantity, and each bucket holds an exponentially weighted mean.
   cloud cover). Because the key already pins season and half-hour, solar
   elevation is held roughly constant, so variation in UV within a bucket is
   mostly cloud attenuation -- which makes it a sound stand-in.
-* Load is keyed by ``day-type : hour : temperature bucket``. Temperature
-  binning is what captures A/C draw on hot afternoons (and resistive heating on
-  cold mornings) without needing an explicit model of either.
+* Load is keyed by ``season : day-type : hour : temperature bucket``.
+  Temperature binning is what captures A/C draw on hot afternoons (and resistive
+  heating on cold mornings) without needing an explicit model of either, while
+  season captures what temperature cannot -- chiefly day length, and so lighting.
 
 Buckets degrade gracefully: a specific bucket with too few samples falls back
 to a broader one, and ultimately to a caller-supplied default. This means the
@@ -225,6 +226,8 @@ class LoadObservation:
     weekday: int = 0
     is_holiday: bool = False
     temperature: float | None = None
+    month: int | None = None
+    """Time of year. Separates a dark December evening from a light June one."""
 
 
 class LearningModel:
@@ -280,14 +283,34 @@ class LearningModel:
         weekday: int,
         is_holiday: bool,
         temperature: float | None,
+        month: int | None = None,
     ) -> list[str]:
+        """Keys for one load slot, most specific first.
+
+        Season is the most specific level because temperature alone does not
+        separate a mild December evening from a cool June one: at 17:00 in
+        December the lights and cooking are on, in June they are not, and day
+        length -- not temperature -- is what drives that. Temperature still
+        carries the heating and cooling response.
+
+        Adding season multiplies the bucket count by four, which would slow
+        convergence if it were the only level. The fallback chain absorbs that:
+        until a seasonal bucket has enough samples the season-agnostic one
+        answers instead, so nothing is lost early on.
+        """
         slot = self._slot_index(hour, minute)
         dtype = day_type(weekday, is_holiday)
         tbucket = temperature_bucket(temperature)
+        season = self.season_of(month) if month is not None else None
+
         keys: list[str] = []
         if tbucket >= 0:
+            if season is not None:
+                keys.append(f"season{season}:{dtype}:s{slot}:t{tbucket}")
             keys.append(f"{dtype}:s{slot}:t{tbucket}")
             keys.append(f"any:s{slot}:t{tbucket}")
+        if season is not None:
+            keys.append(f"season{season}:{dtype}:s{slot}")
         keys.append(f"{dtype}:s{slot}")
         keys.append(f"any:s{slot}")
         return keys
@@ -316,7 +339,12 @@ class LearningModel:
     def observe_load(self, obs: LoadObservation) -> None:
         self.load_observations += 1
         for key in self.load_keys(
-            obs.hour, obs.minute, obs.weekday, obs.is_holiday, obs.temperature
+            obs.hour,
+            obs.minute,
+            obs.weekday,
+            obs.is_holiday,
+            obs.temperature,
+            obs.month,
         ):
             self.load.update(key, obs.kwh)
 
@@ -355,8 +383,9 @@ class LearningModel:
         is_holiday: bool = False,
         temperature: float | None = None,
         default_kwh: float = 0.25,
+        month: int | None = None,
     ) -> tuple[float, str]:
-        keys = self.load_keys(hour, minute, weekday, is_holiday, temperature)
+        keys = self.load_keys(hour, minute, weekday, is_holiday, temperature, month)
         value, source = self.load.lookup(keys, default=default_kwh)
         return max(value, 0.0), source
 

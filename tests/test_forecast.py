@@ -918,3 +918,101 @@ class TestSlotAccumulatorUv:
             completed = acc.add_sample(dt(12, minute), 1.0, 1.0, cloud_cover=20.0)
         assert completed[0].uv_index is None
         assert completed[0].cloud_cover == pytest.approx(20.0)
+
+
+class TestSeasonalLoadLearning:
+    """The stated requirement: "at this time of year, with this weather, we used
+    on average this much at this time"."""
+
+    def test_same_slot_and_temperature_split_by_season(self):
+        """A 12 degree December evening is not a 12 degree June evening: the
+        lights and cooking are on in one and not the other, and temperature
+        cannot tell them apart."""
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(
+                LoadObservation(
+                    hour=17, minute=0, kwh=1.6, weekday=1, temperature=12.0, month=12
+                )
+            )
+            model.observe_load(
+                LoadObservation(
+                    hour=17, minute=0, kwh=0.4, weekday=1, temperature=12.0, month=6
+                )
+            )
+        winter, winter_src = model.predict_load(
+            17, 0, weekday=1, temperature=12.0, month=12
+        )
+        summer, summer_src = model.predict_load(
+            17, 0, weekday=1, temperature=12.0, month=6
+        )
+        assert winter > summer * 2
+        assert "season" in winter_src
+        assert "season" in summer_src
+
+    def test_temperature_still_separates_within_a_season(self):
+        """A/C learning must survive the extra key level."""
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_load(
+                LoadObservation(
+                    hour=14, minute=0, kwh=0.35, weekday=1, temperature=17.0, month=7
+                )
+            )
+            model.observe_load(
+                LoadObservation(
+                    hour=14, minute=0, kwh=1.7, weekday=1, temperature=29.0, month=7
+                )
+            )
+        mild, _ = model.predict_load(14, 0, weekday=1, temperature=17.0, month=7)
+        hot, _ = model.predict_load(14, 0, weekday=1, temperature=29.0, month=7)
+        assert hot > mild * 3
+
+    def test_falls_back_to_season_agnostic_while_sparse(self):
+        """Adding season quadruples the buckets. Until a seasonal bucket has
+        enough samples the broader one must answer, so nothing is lost early."""
+        model = LearningModel()
+        # Plenty of history overall, but none in August specifically.
+        for _ in range(8):
+            model.observe_load(
+                LoadObservation(
+                    hour=18, minute=0, kwh=1.2, weekday=1, temperature=16.0, month=5
+                )
+            )
+        value, source = model.predict_load(18, 0, weekday=1, temperature=16.0, month=8)
+        assert value == pytest.approx(1.2, abs=0.15)
+        assert not source.startswith("season2")
+
+    def test_month_omitted_still_works(self):
+        """Callers that do not supply a month must keep working unchanged."""
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(LoadObservation(hour=8, minute=0, kwh=0.9, weekday=1))
+        value, source = model.predict_load(8, 0, weekday=1)
+        assert value == pytest.approx(0.9, abs=0.1)
+        assert source != "default"
+
+    def test_key_order_is_most_specific_first(self):
+        model = LearningModel()
+        keys = model.load_keys(
+            17, 0, weekday=1, is_holiday=False, temperature=12.0, month=12
+        )
+        assert keys[0] == "season0:weekday:s34:t3"
+        # Season drops out before temperature, then day type.
+        assert keys[1] == "weekday:s34:t3"
+        assert keys[-1] == "any:s34"
+
+    def test_forecaster_uses_the_slot_month(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(
+                LoadObservation(
+                    hour=17, minute=0, kwh=1.9, weekday=1, temperature=8.0, month=1
+                )
+            )
+        forecaster = LoadForecaster(model, daily_kwh=10.0)
+        january = forecaster.predict_slot(
+            datetime(2026, 1, 13, 17, 0, tzinfo=UTC), 0.5, temperature=8.0
+        )
+        assert january.kwh == pytest.approx(1.9, abs=0.2)
+        assert january.source != "profile"

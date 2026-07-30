@@ -179,6 +179,7 @@ class LoadForecaster:
             is_holiday=is_holiday,
             temperature=temperature,
             default_kwh=-1.0,
+            month=local_start.month,
         )
 
         if source == "default" or learned < 0.0:

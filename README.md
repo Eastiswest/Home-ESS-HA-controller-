@@ -58,13 +58,15 @@ stops there.
 Not an LLM, and not a black box. Observations are binned by the conditions that
 actually drive them, and each bin holds an exponentially weighted mean:
 
-- **Solar** — keyed by season, half-hour and cloud-cover bucket. "This weather,
-  this time of year, this hour → you generated this much."
-- **Load** — keyed by day type, half-hour and outdoor temperature bucket. The
-  temperature bucket is what makes **A/C visible to the planner**: after a few
+- **Solar** — keyed by season, half-hour and sky bucket. "This weather, this time
+  of year, this hour → you generated this much."
+- **Load** — keyed by season, day type, half-hour and outdoor temperature bucket.
+  The temperature bucket is what makes **A/C visible to the planner**: after a few
   hot afternoons, the 25–30 °C bucket for 14:00 carries a much higher mean than
   the 15–20 °C bucket, so a forecast hot day automatically produces a bigger
-  overnight charge.
+  overnight charge. Season captures what temperature cannot — chiefly day length,
+  so a 12 °C December evening (lights and cooking on) is not confused with a
+  12 °C June one.
 
 If you have a solar forecast integration (Solcast, Forecast.Solar), its *shape*
 is trusted and a **correction factor** is learned per season/hour/sky bucket.

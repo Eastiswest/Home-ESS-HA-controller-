@@ -434,6 +434,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     kwh=slot.load_kwh,
                     weekday=local.weekday(),
                     temperature=slot.temperature,
+                    month=local.month,
                 )
             )
             _LOGGER.debug(
