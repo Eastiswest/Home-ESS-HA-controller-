@@ -1,0 +1,714 @@
+"""Tests for the learning model and the solar/load/weather forecasters."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from custom_components.ess_controller.forecast.energy import EnergySeries, EnergySlot
+from custom_components.ess_controller.forecast.load import (
+    DIURNAL_WEIGHTS,
+    LoadForecaster,
+    default_slot_load,
+)
+from custom_components.ess_controller.forecast.solar import (
+    SolarForecaster,
+    build_forecast_series,
+    parse_solar_forecast_attributes,
+)
+from custom_components.ess_controller.forecast.weather import (
+    WeatherPoint,
+    WeatherSeries,
+)
+from custom_components.ess_controller.learning.model import (
+    BucketSet,
+    EwmaBucket,
+    LearningModel,
+    LoadObservation,
+    SolarObservation,
+    cloud_bucket,
+    day_type,
+    temperature_bucket,
+)
+from custom_components.ess_controller.sampling import SlotAccumulator, slot_start_for
+
+UTC = timezone.utc
+
+
+def dt(hour: int, minute: int = 0, day: int = 15, month: int = 7) -> datetime:
+    return datetime(2026, month, day, hour, minute, tzinfo=UTC)
+
+
+class TestBuckets:
+    def test_first_sample_becomes_the_mean(self):
+        bucket = EwmaBucket()
+        bucket.update(4.0)
+        assert bucket.mean == pytest.approx(4.0)
+        assert bucket.samples == 1
+
+    def test_converges_towards_repeated_value(self):
+        bucket = EwmaBucket()
+        for _ in range(30):
+            bucket.update(2.0)
+        assert bucket.mean == pytest.approx(2.0, abs=1e-6)
+
+    def test_tracks_a_step_change(self):
+        bucket = EwmaBucket()
+        for _ in range(20):
+            bucket.update(1.0)
+        for _ in range(20):
+            bucket.update(5.0)
+        # Should have moved most of the way to the new level.
+        assert bucket.mean > 4.0
+
+    def test_trusted_after_enough_samples(self):
+        bucket = EwmaBucket()
+        bucket.update(1.0)
+        assert not bucket.trusted
+        bucket.update(1.0)
+        bucket.update(1.0)
+        assert bucket.trusted
+
+    def test_roundtrip_serialisation(self):
+        bucket = EwmaBucket(mean=1.2345, samples=7)
+        restored = EwmaBucket.from_dict(bucket.as_dict())
+        assert restored.samples == 7
+        assert restored.mean == pytest.approx(1.2345, abs=1e-4)
+
+
+class TestBucketSetFallback:
+    def test_prefers_specific_trusted_bucket(self):
+        bucket_set = BucketSet()
+        for _ in range(5):
+            bucket_set.update("specific", 10.0)
+            bucket_set.update("broad", 99.0)
+        value, source = bucket_set.lookup(["specific", "broad"], default=0.0)
+        assert value == pytest.approx(10.0)
+        assert source == "specific"
+
+    def test_falls_back_when_specific_is_untrusted(self):
+        bucket_set = BucketSet()
+        bucket_set.update("specific", 10.0)  # only 1 sample
+        for _ in range(5):
+            bucket_set.update("broad", 99.0)
+        value, source = bucket_set.lookup(["specific", "broad"], default=0.0)
+        assert value == pytest.approx(99.0)
+        assert source == "broad"
+
+    def test_uses_untrusted_before_giving_up(self):
+        bucket_set = BucketSet()
+        bucket_set.update("specific", 10.0)
+        value, source = bucket_set.lookup(["specific", "broad"], default=0.0)
+        assert value == pytest.approx(10.0)
+        assert source.endswith("~")
+
+    def test_default_when_nothing_known(self):
+        value, source = BucketSet().lookup(["a", "b"], default=1.23)
+        assert value == 1.23
+        assert source == "default"
+
+
+class TestBinning:
+    def test_cloud_buckets(self):
+        assert cloud_bucket(0) == 0
+        assert cloud_bucket(19) == 0
+        assert cloud_bucket(20) == 1
+        assert cloud_bucket(100) == 4
+        assert cloud_bucket(150) == 4
+
+    def test_missing_cloud_maps_to_middle(self):
+        # Must not read as "clear sky", which would over-forecast solar.
+        assert cloud_bucket(None) == 2
+
+    def test_temperature_buckets_ordered(self):
+        assert temperature_bucket(-5) == 0
+        assert temperature_bucket(2) == 1
+        assert temperature_bucket(18) == 4
+        assert temperature_bucket(35) == 7
+        assert temperature_bucket(None) == -1
+
+    def test_day_type(self):
+        assert day_type(0) == "weekday"
+        assert day_type(4) == "weekday"
+        assert day_type(5) == "weekend"
+        assert day_type(6) == "weekend"
+        assert day_type(2, is_holiday=True) == "weekend"
+
+
+class TestSolarLearning:
+    def test_learns_absolute_yield_without_a_forecast(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.9, cloud_cover=10.0)
+            )
+        predicted, source = model.predict_solar(
+            month=7, hour=13, minute=0, cloud=10.0, forecast_kwh=None
+        )
+        assert predicted == pytest.approx(0.9, abs=0.05)
+        assert source != "default"
+
+    def test_cloud_cover_separates_predictions(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.95, cloud_cover=5.0)
+            )
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.15, cloud_cover=95.0)
+            )
+        clear, _ = model.predict_solar(7, 13, 0, cloud=5.0)
+        overcast, _ = model.predict_solar(7, 13, 0, cloud=95.0)
+        assert clear > overcast * 2
+
+    def test_learns_forecast_correction_factor(self):
+        # A forecast that consistently over-predicts by 25% (shading, soiling).
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=12, minute=0, kwh=0.75, cloud_cover=20.0,
+                    forecast_kwh=1.0,
+                )
+            )
+        predicted, source = model.predict_solar(
+            month=7, hour=12, minute=0, cloud=20.0, forecast_kwh=1.0
+        )
+        assert predicted == pytest.approx(0.75, abs=0.06)
+        assert "forecast*" in source
+
+    def test_ratio_correction_is_clamped(self):
+        model = LearningModel()
+        # Absurd observations should not create a runaway multiplier.
+        for _ in range(10):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=12, minute=0, kwh=50.0, cloud_cover=20.0,
+                    forecast_kwh=1.0,
+                )
+            )
+        predicted, _ = model.predict_solar(7, 12, 0, cloud=20.0, forecast_kwh=1.0)
+        assert predicted <= 2.0
+
+    def test_near_zero_forecast_does_not_train_ratio(self):
+        model = LearningModel()
+        for _ in range(5):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=4, minute=0, kwh=0.02, cloud_cover=50.0,
+                    forecast_kwh=0.001,
+                )
+            )
+        assert len(model.solar_ratio) == 0
+
+    def test_unknown_slot_returns_default(self):
+        model = LearningModel()
+        predicted, source = model.predict_solar(
+            1, 3, 0, cloud=50.0, forecast_kwh=None, default_kwh=0.0
+        )
+        assert predicted == 0.0
+        assert source == "default"
+
+
+class TestLoadLearning:
+    def test_learns_hourly_shape(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(LoadObservation(hour=18, minute=0, kwh=1.4, weekday=1))
+            model.observe_load(LoadObservation(hour=3, minute=0, kwh=0.15, weekday=1))
+        evening, _ = model.predict_load(18, 0, weekday=1)
+        night, _ = model.predict_load(3, 0, weekday=1)
+        assert evening > night * 5
+
+    def test_learns_air_conditioning_from_temperature(self):
+        """The headline behaviour: hot afternoons must predict higher load."""
+        model = LearningModel()
+        for _ in range(8):
+            # Mild afternoon: no cooling.
+            model.observe_load(
+                LoadObservation(hour=14, minute=0, kwh=0.35, weekday=1, temperature=17.0)
+            )
+            # Hot afternoon: A/C running hard.
+            model.observe_load(
+                LoadObservation(hour=14, minute=0, kwh=1.6, weekday=1, temperature=29.0)
+            )
+        mild, mild_src = model.predict_load(14, 0, weekday=1, temperature=17.0)
+        hot, hot_src = model.predict_load(14, 0, weekday=1, temperature=29.0)
+        assert hot > mild * 3
+        assert mild_src != "default" and hot_src != "default"
+        # And the temperature bucket must be what distinguished them.
+        assert "t" in hot_src
+
+    def test_weekday_and_weekend_are_separated(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(LoadObservation(hour=10, minute=0, kwh=0.2, weekday=1))
+            model.observe_load(LoadObservation(hour=10, minute=0, kwh=0.9, weekday=6))
+        weekday, _ = model.predict_load(10, 0, weekday=1)
+        weekend, _ = model.predict_load(10, 0, weekday=6)
+        assert weekend > weekday * 2
+
+    def test_half_hour_resolution_preserved(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(LoadObservation(hour=17, minute=0, kwh=0.4, weekday=1))
+            model.observe_load(LoadObservation(hour=17, minute=30, kwh=1.5, weekday=1))
+        first, _ = model.predict_load(17, 0, weekday=1)
+        second, _ = model.predict_load(17, 30, weekday=1)
+        assert second > first * 2
+
+
+class TestModelPersistence:
+    def test_roundtrip(self):
+        model = LearningModel()
+        for _ in range(4):
+            model.observe_solar(
+                SolarObservation(month=6, hour=12, minute=0, kwh=0.8, cloud_cover=10.0)
+            )
+            model.observe_load(
+                LoadObservation(hour=12, minute=0, kwh=0.5, weekday=2, temperature=20.0)
+            )
+        payload = model.as_dict()
+
+        restored = LearningModel()
+        restored.load_dict(payload)
+        assert restored.predict_solar(6, 12, 0, cloud=10.0)[0] == pytest.approx(
+            model.predict_solar(6, 12, 0, cloud=10.0)[0]
+        )
+        assert restored.predict_load(12, 0, weekday=2, temperature=20.0)[0] == (
+            pytest.approx(model.predict_load(12, 0, weekday=2, temperature=20.0)[0])
+        )
+
+    def test_load_dict_tolerates_garbage(self):
+        model = LearningModel()
+        model.load_dict({"solar_absolute": {"k": "not a dict"}, "bogus": 1})
+        assert len(model.solar_absolute) == 0
+
+    def test_reset_clears_everything(self):
+        model = LearningModel()
+        model.observe_load(LoadObservation(hour=1, minute=0, kwh=1.0))
+        model.reset()
+        assert model.load_samples == 0
+        assert model.solar_samples == 0
+
+    def test_confidence_reports_maturity(self):
+        model = LearningModel()
+        assert model.confidence()["load_maturity"] == 0.0
+        for _ in range(48 * 14):
+            model.observe_load(LoadObservation(hour=1, minute=0, kwh=1.0))
+        assert model.confidence()["load_maturity"] == pytest.approx(1.0)
+
+
+class TestEnergySeries:
+    def test_resamples_hourly_to_half_hourly(self):
+        series = EnergySeries(
+            [EnergySlot(start=dt(12), end=dt(13), kwh=1.0)]
+        )
+        assert series.energy_between(dt(12), dt(12, 30)) == pytest.approx(0.5)
+        assert series.energy_between(dt(12, 30), dt(13)) == pytest.approx(0.5)
+
+    def test_sums_across_windows(self):
+        series = EnergySeries(
+            [
+                EnergySlot(start=dt(12), end=dt(12, 30), kwh=0.4),
+                EnergySlot(start=dt(12, 30), end=dt(13), kwh=0.6),
+            ]
+        )
+        assert series.energy_between(dt(12), dt(13)) == pytest.approx(1.0)
+
+    def test_partial_overlap(self):
+        series = EnergySeries([EnergySlot(start=dt(12), end=dt(13), kwh=2.0)])
+        assert series.energy_between(dt(12, 45), dt(13, 30)) == pytest.approx(0.5)
+
+    def test_outside_range_is_zero(self):
+        series = EnergySeries([EnergySlot(start=dt(12), end=dt(13), kwh=2.0)])
+        assert series.energy_between(dt(20), dt(21)) == 0.0
+
+    def test_covers(self):
+        series = EnergySeries([EnergySlot(start=dt(12), end=dt(14), kwh=1.0)])
+        assert series.covers(dt(12, 30), dt(13))
+        assert not series.covers(dt(11), dt(13))
+
+    def test_empty_series(self):
+        series = EnergySeries()
+        assert not series
+        assert series.energy_between(dt(1), dt(2)) == 0.0
+
+
+class TestSolarForecastParsing:
+    def test_solcast_detailed_forecast(self):
+        attributes = {
+            "detailedForecast": [
+                {"period_start": "2026-07-15T11:00:00+00:00", "pv_estimate": 1.6},
+                {"period_start": "2026-07-15T11:30:00+00:00", "pv_estimate": 1.8},
+            ]
+        }
+        slots = parse_solar_forecast_attributes(attributes)
+        assert len(slots) == 2
+        # 1.6 kW average over half an hour is 0.8 kWh.
+        assert slots[0].kwh == pytest.approx(0.8)
+        assert slots[1].kwh == pytest.approx(0.9)
+
+    def test_forecast_solar_watt_hours_period(self):
+        attributes = {
+            "watt_hours_period": {
+                "2026-07-15T11:00:00+00:00": 800,
+                "2026-07-15T12:00:00+00:00": 950,
+            }
+        }
+        slots = parse_solar_forecast_attributes(attributes)
+        assert slots[0].kwh == pytest.approx(0.8)
+        assert slots[1].kwh == pytest.approx(0.95)
+
+    def test_forecast_solar_watts_treated_as_power(self):
+        attributes = {
+            "watts": {
+                "2026-07-15T11:00:00+00:00": 1000,
+                "2026-07-15T12:00:00+00:00": 2000,
+            }
+        }
+        slots = parse_solar_forecast_attributes(attributes)
+        # 1000 W held for an hour is 1 kWh.
+        assert slots[0].kwh == pytest.approx(1.0)
+
+    def test_hourly_forecast_periods_inferred(self):
+        attributes = {
+            "detailedHourly": [
+                {"period_start": "2026-07-15T11:00:00+00:00", "pv_estimate": 2.0},
+                {"period_start": "2026-07-15T12:00:00+00:00", "pv_estimate": 2.0},
+            ]
+        }
+        slots = parse_solar_forecast_attributes(attributes)
+        assert slots[0].duration_hours == pytest.approx(1.0)
+        assert slots[0].kwh == pytest.approx(2.0)
+
+    def test_unrecognised_attributes_yield_nothing(self):
+        assert parse_solar_forecast_attributes({"state": "1.0"}) == []
+
+    def test_merging_today_and_tomorrow_sensors(self):
+        today = {
+            "detailedForecast": [
+                {"period_start": "2026-07-15T11:00:00+00:00", "pv_estimate": 1.0}
+            ]
+        }
+        tomorrow = {
+            "detailedForecast": [
+                {"period_start": "2026-07-16T11:00:00+00:00", "pv_estimate": 2.0}
+            ]
+        }
+        series = build_forecast_series([today, tomorrow])
+        assert len(series) == 2
+        assert series.total() == pytest.approx(0.5 + 1.0)
+
+
+class TestWeatherSeries:
+    def test_interpolates_temperature(self):
+        series = WeatherSeries(
+            [
+                WeatherPoint(time=dt(12), temperature=20.0, cloud_coverage=0.0),
+                WeatherPoint(time=dt(14), temperature=30.0, cloud_coverage=100.0),
+            ]
+        )
+        assert series.temperature_at(dt(13)) == pytest.approx(25.0)
+        assert series.cloud_at(dt(13)) == pytest.approx(50.0)
+
+    def test_clamps_outside_range(self):
+        series = WeatherSeries([WeatherPoint(time=dt(12), temperature=20.0)])
+        assert series.temperature_at(dt(6)) == 20.0
+        assert series.temperature_at(dt(23)) == 20.0
+
+    def test_condition_used_when_cloud_missing(self):
+        series = WeatherSeries(
+            [WeatherPoint(time=dt(12), temperature=20.0, condition="sunny")]
+        )
+        assert series.cloud_at(dt(12)) == pytest.approx(5.0)
+
+    def test_from_ha_forecast_payload(self):
+        series = WeatherSeries.from_forecast(
+            [
+                {
+                    "datetime": "2026-07-15T12:00:00+00:00",
+                    "temperature": 28.0,
+                    "cloud_coverage": 10,
+                    "condition": "sunny",
+                },
+                {
+                    "datetime": "2026-07-15T13:00:00+00:00",
+                    "temperature": 30.0,
+                    "cloud_coverage": 20,
+                },
+            ]
+        )
+        assert len(series) == 2
+        assert series.max_temperature() == 30.0
+        assert series.temperature_at(dt(12, 30)) == pytest.approx(29.0)
+
+    def test_empty_series_is_falsy(self):
+        series = WeatherSeries.from_forecast([])
+        assert not series
+        assert series.cloud_at(dt(12)) is None
+
+    def test_malformed_entries_skipped(self):
+        series = WeatherSeries.from_forecast(
+            [{"temperature": 5}, "junk", {"datetime": "nope"}]
+        )
+        assert len(series) == 0
+
+
+class TestSolarForecaster:
+    def _local(self, moment: datetime) -> datetime:
+        return moment
+
+    def test_clamps_to_array_peak(self):
+        model = LearningModel()
+        forecaster = SolarForecaster(model, peak_power_kw=2.0)
+        prediction = forecaster.predict_slot(
+            dt(13), duration_hours=0.5, external_kwh=5.0, cloud=0.0
+        )
+        # 2 kW for half an hour cannot exceed 1 kWh.
+        assert prediction.kwh <= 1.0
+
+    def test_uses_forecast_when_model_is_empty(self):
+        forecaster = SolarForecaster(LearningModel(), peak_power_kw=2.0)
+        prediction = forecaster.predict_slot(
+            dt(13), duration_hours=0.5, external_kwh=0.6, cloud=30.0
+        )
+        assert prediction.kwh == pytest.approx(0.6)
+
+    def test_applies_learned_correction(self):
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=13, minute=0, kwh=0.4, cloud_cover=30.0,
+                    forecast_kwh=0.8,
+                )
+            )
+        forecaster = SolarForecaster(model, peak_power_kw=2.0)
+        prediction = forecaster.predict_slot(
+            dt(13), duration_hours=0.5, external_kwh=0.8, cloud=30.0
+        )
+        assert prediction.kwh < 0.6
+
+    def test_predict_series_over_horizon(self):
+        model = LearningModel()
+        forecaster = SolarForecaster(model, peak_power_kw=2.0)
+        external = EnergySeries(
+            [EnergySlot(start=dt(12), end=dt(13), kwh=1.6)]
+        )
+        weather = WeatherSeries([WeatherPoint(time=dt(12), cloud_coverage=10.0)])
+        slots = [(dt(12), dt(12, 30)), (dt(12, 30), dt(13))]
+        predictions = forecaster.predict_series(
+            slots, external, weather, self._local
+        )
+        assert len(predictions) == 2
+        assert predictions[0].kwh == pytest.approx(0.8)
+
+    def test_learning_disabled_passes_forecast_through(self):
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_solar(
+                SolarObservation(
+                    month=7, hour=13, minute=0, kwh=0.1, cloud_cover=30.0,
+                    forecast_kwh=0.8,
+                )
+            )
+        forecaster = SolarForecaster(model, peak_power_kw=2.0, use_learning=False)
+        prediction = forecaster.predict_slot(dt(13), 0.5, external_kwh=0.8, cloud=30.0)
+        assert prediction.kwh == pytest.approx(0.8)
+
+
+class TestLoadForecaster:
+    def _local(self, moment: datetime) -> datetime:
+        return moment
+
+    def test_default_profile_sums_to_daily_total(self):
+        total = sum(
+            default_slot_load(index // 2, (index % 2) * 30, 10.0)
+            for index in range(48)
+        )
+        assert total == pytest.approx(10.0)
+
+    def test_default_profile_has_evening_peak(self):
+        evening = default_slot_load(18, 0, 10.0)
+        night = default_slot_load(3, 0, 10.0)
+        assert evening > night * 2
+
+    def test_profile_used_before_learning(self):
+        forecaster = LoadForecaster(LearningModel(), daily_kwh=10.0)
+        prediction = forecaster.predict_slot(dt(18), 0.5)
+        assert prediction.source == "profile"
+        assert prediction.kwh == pytest.approx(default_slot_load(18, 0, 10.0))
+
+    def test_learned_value_overrides_profile(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(
+                LoadObservation(hour=18, minute=0, kwh=2.5, weekday=2, temperature=20.0)
+            )
+        forecaster = LoadForecaster(model, daily_kwh=10.0)
+        prediction = forecaster.predict_slot(dt(18), 0.5, temperature=20.0)
+        assert prediction.source != "profile"
+        assert prediction.kwh == pytest.approx(2.5, abs=0.15)
+
+    def test_cooling_uplift_applies_before_learning(self):
+        forecaster = LoadForecaster(
+            LearningModel(),
+            daily_kwh=10.0,
+            cooling_threshold_c=22.0,
+            cooling_kwh_per_degree_hour=0.1,
+        )
+        mild = forecaster.predict_slot(dt(14), 0.5, temperature=18.0)
+        hot = forecaster.predict_slot(dt(14), 0.5, temperature=32.0)
+        # 10 degrees over threshold * 0.1 kWh/degree/hour * 0.5 h = 0.5 kWh.
+        assert hot.kwh - mild.kwh == pytest.approx(0.5)
+        assert hot.climate_uplift_kwh == pytest.approx(0.5)
+
+    def test_cooling_uplift_not_double_counted_once_learned(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_load(
+                LoadObservation(hour=14, minute=0, kwh=1.5, weekday=2, temperature=32.0)
+            )
+        forecaster = LoadForecaster(
+            model,
+            daily_kwh=10.0,
+            cooling_threshold_c=22.0,
+            cooling_kwh_per_degree_hour=0.1,
+        )
+        prediction = forecaster.predict_slot(dt(14), 0.5, temperature=32.0)
+        assert prediction.climate_uplift_kwh == 0.0
+        assert prediction.kwh == pytest.approx(1.5, abs=0.15)
+
+    def test_partial_slot_scaled_down(self):
+        forecaster = LoadForecaster(LearningModel(), daily_kwh=10.0)
+        full = forecaster.predict_slot(dt(18), 0.5)
+        partial = forecaster.predict_slot(dt(18), 0.25)
+        assert partial.kwh == pytest.approx(full.kwh / 2)
+
+    def test_predict_series_uses_weather_temperature(self):
+        model = LearningModel()
+        for _ in range(8):
+            model.observe_load(
+                LoadObservation(hour=14, minute=0, kwh=0.3, weekday=2, temperature=16.0)
+            )
+            model.observe_load(
+                LoadObservation(hour=14, minute=0, kwh=1.9, weekday=2, temperature=30.0)
+            )
+        forecaster = LoadForecaster(model, daily_kwh=10.0)
+        weather = WeatherSeries([WeatherPoint(time=dt(14), temperature=30.0)])
+        predictions = forecaster.predict_series(
+            [(dt(14), dt(14, 30))], weather, self._local
+        )
+        assert predictions[0].kwh > 1.0
+
+
+class TestSlotAccumulator:
+    def test_floors_to_slot_boundary(self):
+        assert slot_start_for(dt(12, 17)) == dt(12, 0)
+        assert slot_start_for(dt(12, 47)) == dt(12, 30)
+
+    def test_integrates_power_into_energy(self):
+        acc = SlotAccumulator()
+        # 1 kW held from 12:00 to 12:30 is 0.5 kWh.
+        acc.add_sample(dt(12, 0), 1.0, 2.0)
+        for minute in (5, 10, 15, 20, 25, 30):
+            completed = acc.add_sample(dt(12, minute), 1.0, 2.0)
+        assert len(completed) == 1
+        slot = completed[0]
+        assert slot.start == dt(12, 0)
+        assert slot.pv_kwh == pytest.approx(0.5, abs=0.01)
+        assert slot.load_kwh == pytest.approx(1.0, abs=0.02)
+
+    def test_splits_interval_across_slot_boundary(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 25), 2.0, 0.0)
+        # A sample at 12:35 spans the boundary: 5 minutes belong to each slot.
+        completed = acc.add_sample(dt(12, 35), 2.0, 0.0)
+        assert len(completed) == 0  # coverage too low to commit
+        assert acc.current_coverage == pytest.approx(5 / 30, abs=0.01)
+
+    def test_low_coverage_slot_discarded(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 25), 5.0, 5.0)
+        acc.add_sample(dt(12, 29), 5.0, 5.0)
+        completed = acc.add_sample(dt(12, 31), 5.0, 5.0)
+        # Only ~5 of 30 minutes observed, so the slot must not be committed.
+        assert completed == []
+
+    def test_long_gap_not_bridged(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 0), 3.0, 3.0)
+        # A 45-minute gap means HA was asleep; do not invent energy.
+        acc.add_sample(dt(12, 45), 3.0, 3.0)
+        assert acc.current_coverage == 0.0
+
+    def test_partial_coverage_scaled_up(self):
+        acc = SlotAccumulator()
+        # Observe 12:00-12:18 at 1 kW (60% of the slot), then Home Assistant
+        # goes away until 13:05. The gap is too long to integrate across, so the
+        # 12:00 slot commits on only the coverage it actually saw.
+        acc.add_sample(dt(12, 0), 1.0, 1.0)
+        for minute in (6, 12, 18):
+            acc.add_sample(dt(12, minute), 1.0, 1.0)
+        completed = acc.add_sample(dt(13, 5), 1.0, 1.0)
+        assert len(completed) == 1
+        # 0.3 kWh measured over 60% coverage scales to a 0.5 kWh half hour.
+        assert completed[0].coverage == pytest.approx(0.6, abs=0.02)
+        assert completed[0].pv_kwh == pytest.approx(0.5, abs=0.02)
+
+    def test_full_coverage_when_a_sample_bridges_the_boundary(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 0), 1.0, 1.0)
+        for minute in (6, 12, 18, 24):
+            acc.add_sample(dt(12, minute), 1.0, 1.0)
+        # This sample credits 12:24-12:30 to the old slot before rolling over,
+        # so the slot is fully covered.
+        completed = acc.add_sample(dt(12, 31), 1.0, 1.0)
+        assert len(completed) == 1
+        assert completed[0].coverage == pytest.approx(1.0, abs=0.02)
+        assert completed[0].pv_kwh == pytest.approx(0.5, abs=0.01)
+
+    def test_averages_weather_over_the_slot(self):
+        acc = SlotAccumulator()
+        acc.add_sample(dt(12, 0), 1.0, 1.0, cloud_cover=0.0, temperature=20.0)
+        for minute in (10, 20, 30):
+            completed = acc.add_sample(
+                dt(12, minute), 1.0, 1.0, cloud_cover=60.0, temperature=26.0
+            )
+        assert len(completed) == 1
+        assert completed[0].cloud_cover == pytest.approx(40.0)
+        assert completed[0].temperature == pytest.approx(24.0)
+
+
+class TestEndToEndLearning:
+    """Feed simulated days through the accumulator into the model."""
+
+    def test_two_weeks_of_hot_afternoons_teaches_ac_load(self):
+        model = LearningModel()
+        # Simulate 14 days: mild until day 7, then a heatwave.
+        for day in range(1, 15):
+            temperature = 17.0 if day <= 7 else 31.0
+            load = 0.3 if day <= 7 else 1.7
+            model.observe_load(
+                LoadObservation(
+                    hour=14, minute=0, kwh=load, weekday=(day % 7), temperature=temperature
+                )
+            )
+        cool, _ = model.predict_load(14, 0, weekday=1, temperature=17.0)
+        hot, _ = model.predict_load(14, 0, weekday=1, temperature=31.0)
+        assert hot > cool * 2
+
+    def test_summer_solar_learned_separately_from_winter(self):
+        model = LearningModel()
+        for _ in range(6):
+            model.observe_solar(
+                SolarObservation(month=7, hour=13, minute=0, kwh=0.95, cloud_cover=10.0)
+            )
+            model.observe_solar(
+                SolarObservation(month=1, hour=13, minute=0, kwh=0.25, cloud_cover=10.0)
+            )
+        summer, _ = model.predict_solar(7, 13, 0, cloud=10.0)
+        winter, _ = model.predict_solar(1, 13, 0, cloud=10.0)
+        assert summer > winter * 2
