@@ -185,9 +185,7 @@ def _price_delta(
         # to cover the house. The headroom never materialised and the plan
         # silently failed to do the one thing it had decided to do.
         action = (
-            SlotAction.DISCHARGE
-            if discharge_ac > deficit + EPS
-            else SlotAction.SELF_USE
+            SlotAction.DISCHARGE if discharge_ac > deficit + EPS else SlotAction.SELF_USE
         )
     else:
         action = SlotAction.IDLE

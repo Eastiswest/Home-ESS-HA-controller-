@@ -139,10 +139,77 @@ NUMBERS: tuple[EssNumberDescription, ...] = (
             "description": (
                 "Cost charged against each kWh cycled through the battery. This is "
                 "the single most useful dial: raise it and the optimiser only takes "
-                "big price spreads, lower it and it cycles more aggressively. Set "
-                "it to roughly (pack cost / expected lifetime kWh)."
+                "big price spreads, lower it and it cycles more aggressively. "
+                "Ignored while 'Derive wear from battery cost' is on."
             ),
+            "in_use": not c.settings.derive_wear_from_cost,
+            "effective_cycle_cost": round(c.wear_estimate().cycle_cost, 3),
             "spread_needed_to_cycle": round(c.battery_spec().spread_needed_to_cycle(), 2),
+        },
+    ),
+    EssNumberDescription(
+        key="battery_cost",
+        translation_key="battery_cost",
+        name="Battery cost",
+        icon="mdi:cash-multiple",
+        native_min_value=0,
+        native_max_value=100000,
+        native_step=10,
+        mode=NumberMode.BOX,
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.battery_cost,
+        field="battery_cost",
+        attributes=lambda c: {
+            "description": (
+                "What the pack cost you. With 'Derive wear from battery cost' on, "
+                "the wear allowance is worked out from this, the usable capacity "
+                "and the expected cycle life."
+            ),
+            **c.wear_estimate().as_dict(),
+        },
+    ),
+    EssNumberDescription(
+        key="battery_expected_cycles",
+        translation_key="battery_expected_cycles",
+        name="Expected cycle life",
+        icon="mdi:battery-sync-outline",
+        native_min_value=0,
+        native_max_value=20000,
+        native_step=50,
+        mode=NumberMode.BOX,
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.battery_expected_cycles,
+        field="battery_expected_cycles",
+        attributes=lambda c: {
+            "description": (
+                "Equivalent full cycles the pack is expected to deliver over the "
+                "SoC window you have configured -- not the headline number quoted "
+                "at a shallower depth of discharge."
+            ),
+            "usable_kwh_per_cycle": round(c.usable_kwh(), 2),
+            "lifetime_throughput_kwh": round(
+                c.wear_estimate().lifetime_throughput_kwh, 0
+            ),
+        },
+    ),
+    EssNumberDescription(
+        key="battery_residual_value",
+        translation_key="battery_residual_value",
+        name="Battery residual value",
+        icon="mdi:cash-refund",
+        native_min_value=0,
+        native_max_value=100000,
+        native_step=10,
+        mode=NumberMode.BOX,
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.battery_residual_value,
+        field="battery_residual_value",
+        attributes=lambda c: {
+            "description": (
+                "What the pack will still be worth at end of life. Subtracted "
+                "from the cost before the wear allowance is worked out. Leave at "
+                "zero for a salvage pack."
+            )
         },
     ),
     EssNumberDescription(

@@ -104,6 +104,23 @@ SWITCHES: tuple[EssSwitchDescription, ...] = (
 
 FEATURE_SWITCHES: tuple[EssSwitchDescription, ...] = (
     EssSwitchDescription(
+        key="derive_wear_from_cost",
+        translation_key="derive_wear_from_cost",
+        name="Derive wear from battery cost",
+        icon="mdi:calculator-variant-outline",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.derive_wear_from_cost,
+        setter=lambda on: {"derive_wear_from_cost": on},
+        attributes=lambda c: {
+            "description": (
+                "On: the wear allowance is calculated from the pack cost, usable "
+                "capacity and expected cycle life. Off: the wear allowance number "
+                "is used as entered."
+            ),
+            **c.wear_estimate().as_dict(),
+        },
+    ),
+    EssSwitchDescription(
         key="sessions_enabled",
         translation_key="sessions_enabled",
         name="Act on grid sessions",

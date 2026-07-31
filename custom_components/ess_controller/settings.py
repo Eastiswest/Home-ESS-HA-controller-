@@ -29,17 +29,24 @@ from .const import (
     CONF_ALLOW_BATTERY_EXPORT,
     CONF_ALLOW_EXPORT,
     CONF_ALLOW_GRID_CHARGE,
+    CONF_BATTERY_COST,
+    CONF_BATTERY_EXPECTED_CYCLES,
     CONF_BATTERY_MAX_SOC,
     CONF_BATTERY_MIN_SOC,
     CONF_BATTERY_RESERVE_SOC,
+    CONF_BATTERY_RESIDUAL_VALUE,
     CONF_CYCLE_COST,
     CONF_DEFAULT_DAILY_LOAD,
+    CONF_DERIVE_WEAR_FROM_COST,
     CONF_DRY_RUN,
     CONF_MAX_CHARGE_POWER,
     CONF_MAX_DISCHARGE_POWER,
     CONF_OUTAGE_ENABLED,
     CONF_SESSIONS_ENABLED,
     CONF_SHIFTING_ENABLED,
+    DEFAULT_BATTERY_COST,
+    DEFAULT_BATTERY_EXPECTED_CYCLES,
+    DEFAULT_BATTERY_RESIDUAL_VALUE,
     DEFAULT_CYCLE_COST,
     DEFAULT_DAILY_LOAD,
     DEFAULT_MAX_CHARGE_POWER,
@@ -94,6 +101,14 @@ class RuntimeSettings:
     max_charge_kw: float = DEFAULT_MAX_CHARGE_POWER
     max_discharge_kw: float = DEFAULT_MAX_DISCHARGE_POWER
     cycle_cost: float = DEFAULT_CYCLE_COST
+    """Manually entered wear allowance, used unless derivation is enabled."""
+
+    # -- wear allowance derivation ---------------------------------------
+    derive_wear_from_cost: bool = False
+    battery_cost: float = DEFAULT_BATTERY_COST
+    """What the pack cost, in major currency units."""
+    battery_expected_cycles: float = DEFAULT_BATTERY_EXPECTED_CYCLES
+    battery_residual_value: float = DEFAULT_BATTERY_RESIDUAL_VALUE
 
     # -- forecasting ----------------------------------------------------
     default_daily_load: float = DEFAULT_DAILY_LOAD
@@ -127,12 +142,37 @@ class RuntimeSettings:
         self.max_charge_kw = _clamp(self.max_charge_kw, 0.0, 100.0)
         self.max_discharge_kw = _clamp(self.max_discharge_kw, 0.0, 100.0)
         self.cycle_cost = _clamp(self.cycle_cost, 0.0, 100.0)
+        self.battery_cost = _clamp(self.battery_cost, 0.0, 1_000_000.0)
+        self.battery_residual_value = _clamp(
+            self.battery_residual_value, 0.0, max(self.battery_cost, 0.0)
+        )
+        self.battery_expected_cycles = _clamp(self.battery_expected_cycles, 0.0, 20_000.0)
         self.default_daily_load = _clamp(self.default_daily_load, 0.0, 500.0)
         self.cooling_rate = _clamp(self.cooling_rate, 0.0, 10.0)
         self.heating_rate = _clamp(self.heating_rate, 0.0, 10.0)
         if self.strategy not in STRATEGIES:
             self.strategy = STRATEGY_AUTO
         return self
+
+    def wear_estimate(self, usable_kwh: float):
+        """Resolve the wear allowance actually in force.
+
+        Derivation needs the usable window, which lives with the battery spec, so
+        the caller supplies it rather than this object reaching for it.
+        """
+        from .wear import manual_wear, wear_from_cost
+
+        if self.derive_wear_from_cost and self.battery_cost > 0:
+            return wear_from_cost(
+                pack_cost=self.battery_cost,
+                usable_kwh=usable_kwh,
+                cycles=self.battery_expected_cycles,
+                residual_value=self.battery_residual_value,
+            )
+        return manual_wear(self.cycle_cost)
+
+    def effective_cycle_cost(self, usable_kwh: float) -> float:
+        return self.wear_estimate(usable_kwh).cycle_cost
 
     @property
     def may_write(self) -> bool:
@@ -176,6 +216,16 @@ class RuntimeSettings:
             options.get(CONF_MAX_DISCHARGE_POWER, self.max_discharge_kw)
         )
         self.cycle_cost = float(options.get(CONF_CYCLE_COST, self.cycle_cost))
+        self.derive_wear_from_cost = bool(
+            options.get(CONF_DERIVE_WEAR_FROM_COST, self.derive_wear_from_cost)
+        )
+        self.battery_cost = float(options.get(CONF_BATTERY_COST, self.battery_cost))
+        self.battery_expected_cycles = float(
+            options.get(CONF_BATTERY_EXPECTED_CYCLES, self.battery_expected_cycles)
+        )
+        self.battery_residual_value = float(
+            options.get(CONF_BATTERY_RESIDUAL_VALUE, self.battery_residual_value)
+        )
         self.default_daily_load = float(
             options.get(CONF_DEFAULT_DAILY_LOAD, self.default_daily_load)
         )

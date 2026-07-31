@@ -33,16 +33,20 @@ from .const import (
     CONF_ALLOW_GRID_CHARGE,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_CAPACITY_ENTITY,
+    CONF_BATTERY_COST,
+    CONF_BATTERY_EXPECTED_CYCLES,
     CONF_BATTERY_HEALTH_ENTITY,
     CONF_BATTERY_MAX_SOC,
     CONF_BATTERY_MIN_SOC,
     CONF_BATTERY_RESERVE_SOC,
+    CONF_BATTERY_RESIDUAL_VALUE,
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_TEMPERATURE_ENTITY,
     CONF_CHARGE_EFFICIENCY,
     CONF_CURRENCY,
     CONF_CYCLE_COST,
     CONF_DEFAULT_DAILY_LOAD,
+    CONF_DERIVE_WEAR_FROM_COST,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_DRY_RUN,
     CONF_ENTITY_MAP,
@@ -101,6 +105,9 @@ from .const import (
     CONF_TERMINAL_VALUE_RATE,
     CONF_WEATHER_ENTITY,
     DEFAULT_BATTERY_CAPACITY,
+    DEFAULT_BATTERY_COST,
+    DEFAULT_BATTERY_EXPECTED_CYCLES,
+    DEFAULT_BATTERY_RESIDUAL_VALUE,
     DEFAULT_CHARGE_EFFICIENCY,
     DEFAULT_CURRENCY,
     DEFAULT_CYCLE_COST,
@@ -276,6 +283,22 @@ class EssFlowMixin:
                     CONF_DISCHARGE_EFFICIENCY,
                     DEFAULT_DISCHARGE_EFFICIENCY,
                 ): _number(0.5, 1.0, 0.01),
+                _suggest(
+                    current, CONF_DERIVE_WEAR_FROM_COST, False
+                ): selector.BooleanSelector(),
+                _suggest(current, CONF_BATTERY_COST, DEFAULT_BATTERY_COST): _number(
+                    0, 100000, 10
+                ),
+                _suggest(
+                    current,
+                    CONF_BATTERY_EXPECTED_CYCLES,
+                    DEFAULT_BATTERY_EXPECTED_CYCLES,
+                ): _number(0, 20000, 50),
+                _suggest(
+                    current,
+                    CONF_BATTERY_RESIDUAL_VALUE,
+                    DEFAULT_BATTERY_RESIDUAL_VALUE,
+                ): _number(0, 100000, 10),
                 _suggest(current, CONF_CYCLE_COST, DEFAULT_CYCLE_COST): _number(
                     0, 50, 0.5, "p/kWh"
                 ),

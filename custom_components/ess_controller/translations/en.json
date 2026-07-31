@@ -18,12 +18,19 @@
           "max_discharge_power_kw": "Maximum discharge power",
           "charge_efficiency": "Charge efficiency",
           "discharge_efficiency": "Discharge efficiency",
-          "cycle_cost_per_kwh": "Battery wear allowance"
+          "cycle_cost_per_kwh": "Battery wear allowance",
+          "derive_wear_from_cost": "Work the wear allowance out from the pack cost",
+          "battery_cost": "What the pack cost",
+          "battery_expected_cycles": "Expected cycle life",
+          "battery_residual_value": "Residual value at end of life"
         },
         "data_description": {
           "battery_soc_entity": "Leave empty to use the inverter's own reading. A separate BMS figure is usually more accurate.",
           "battery_min_soc": "The floor for planning. The emergency reserve sits below this.",
-          "cycle_cost_per_kwh": "Roughly pack cost divided by expected lifetime throughput. Higher values make the optimiser cycle less."
+          "cycle_cost_per_kwh": "Ignored when the allowance is being derived from cost. Watch the 'Wear allowance in use' sensor to see which figure is in force.",
+          "derive_wear_from_cost": "On: the allowance is (cost − residual) ÷ (cycles × usable kWh). Off: the wear allowance below is used as entered.",
+          "battery_expected_cycles": "Equivalent full cycles over the SoC window you configured above — not the headline figure quoted at a shallower depth of discharge. 1000–2000 is realistic for a used EV pack worked hard.",
+          "battery_residual_value": "Leave at zero for a salvage pack."
         }
       },
       "inverter": {
@@ -235,10 +242,18 @@
           "max_discharge_power_kw": "Maximum discharge power",
           "charge_efficiency": "Charge efficiency",
           "discharge_efficiency": "Discharge efficiency",
-          "cycle_cost_per_kwh": "Battery wear allowance"
+          "cycle_cost_per_kwh": "Battery wear allowance",
+          "derive_wear_from_cost": "Work the wear allowance out from the pack cost",
+          "battery_cost": "What the pack cost",
+          "battery_expected_cycles": "Expected cycle life",
+          "battery_residual_value": "Residual value at end of life"
         },
         "data_description": {
-          "battery_min_soc": "Changing this here only affects new installs; use the Minimum state of charge entity to adjust a running system."
+          "battery_min_soc": "Changing this here only affects new installs; use the Minimum state of charge entity to adjust a running system.",
+          "derive_wear_from_cost": "On: the allowance is (cost − residual) ÷ (cycles × usable kWh). Off: the wear allowance below is used as entered.",
+          "battery_expected_cycles": "Equivalent full cycles over the SoC window you configured above — not the headline figure quoted at a shallower depth of discharge. 1000–2000 is realistic for a used EV pack worked hard.",
+          "battery_residual_value": "Leave at zero for a salvage pack.",
+          "cycle_cost_per_kwh": "Ignored when the allowance is being derived from cost. Watch the 'Wear allowance in use' sensor to see which figure is in force."
         }
       },
       "inverter": {
@@ -535,6 +550,9 @@
       },
       "tariff_recommendation": {
         "name": "Tariff recommendation"
+      },
+      "wear_allowance": {
+        "name": "Wear allowance in use"
       }
     },
     "binary_sensor": {
@@ -599,6 +617,9 @@
       },
       "outage_protection": {
         "name": "Outage protection"
+      },
+      "derive_wear_from_cost": {
+        "name": "Derive wear from battery cost"
       }
     },
     "number": {
@@ -634,6 +655,15 @@
       },
       "heating_threshold": {
         "name": "Heating threshold"
+      },
+      "battery_cost": {
+        "name": "Battery cost"
+      },
+      "battery_expected_cycles": {
+        "name": "Expected cycle life"
+      },
+      "battery_residual_value": {
+        "name": "Battery residual value"
       }
     },
     "select": {

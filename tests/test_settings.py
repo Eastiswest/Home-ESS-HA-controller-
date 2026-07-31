@@ -9,6 +9,13 @@ import pytest
 
 from custom_components.ess_controller.sampling import slot_boundaries
 from custom_components.ess_controller.settings import RuntimeSettings
+from custom_components.ess_controller.wear import (
+    MAX_SENSIBLE_WEAR,
+    manual_wear,
+    negative_price_threshold,
+    spread_needed,
+    wear_from_cost,
+)
 
 
 def dt(hour: int, minute: int = 0, second: int = 0) -> datetime:
@@ -159,3 +166,145 @@ class TestSlotBoundaries:
         start, end = boundaries[0]
         assert (end - start) == timedelta(minutes=20)
         assert pytest.approx((end - start).total_seconds() / 3600) == 1 / 3
+
+
+class TestWearFromCost:
+    """Deriving the wear allowance from what the pack actually cost."""
+
+    def test_reference_pack(self):
+        """A 500 pack with a 17.6 kWh usable window over 1500 cycles has
+        26,400 kWh of throughput in it, so about 1.9p per kWh cycled."""
+        estimate = wear_from_cost(pack_cost=500.0, usable_kwh=17.6, cycles=1500.0)
+        assert estimate.lifetime_throughput_kwh == pytest.approx(26400.0)
+        assert estimate.cycle_cost == pytest.approx(1.894, abs=0.01)
+        assert estimate.warning is None
+
+    def test_cheaper_pack_cycles_more_freely(self):
+        dear = wear_from_cost(5000.0, 17.6, 1500.0).cycle_cost
+        cheap = wear_from_cost(500.0, 17.6, 1500.0).cycle_cost
+        assert cheap == pytest.approx(dear / 10, abs=0.01)
+
+    def test_longer_life_lowers_the_allowance(self):
+        short = wear_from_cost(500.0, 17.6, 1000.0).cycle_cost
+        long = wear_from_cost(500.0, 17.6, 3000.0).cycle_cost
+        assert long == pytest.approx(short / 3, abs=0.01)
+
+    def test_bigger_usable_window_lowers_the_allowance(self):
+        """A wider SoC window puts more kWh through the same pack."""
+        narrow = wear_from_cost(500.0, 8.8, 1500.0).cycle_cost
+        wide = wear_from_cost(500.0, 17.6, 1500.0).cycle_cost
+        assert wide == pytest.approx(narrow / 2, abs=0.01)
+
+    def test_residual_value_reduces_the_net_cost(self):
+        full = wear_from_cost(500.0, 17.6, 1500.0).cycle_cost
+        with_residual = wear_from_cost(
+            500.0, 17.6, 1500.0, residual_value=250.0
+        ).cycle_cost
+        assert with_residual == pytest.approx(full / 2, abs=0.01)
+
+    def test_residual_above_cost_does_not_go_negative(self):
+        estimate = wear_from_cost(500.0, 17.6, 1500.0, residual_value=900.0)
+        assert estimate.cycle_cost == 0.0
+        assert estimate.net_cost == 0.0
+
+    def test_zero_cycles_is_reported_not_divided_by(self):
+        estimate = wear_from_cost(500.0, 17.6, 0.0)
+        assert estimate.cycle_cost == 0.0
+        assert estimate.source == "unavailable"
+        assert estimate.warning is not None
+
+    def test_zero_usable_capacity_is_reported(self):
+        estimate = wear_from_cost(500.0, 0.0, 1500.0)
+        assert estimate.source == "unavailable"
+        assert estimate.warning is not None
+
+    def test_implausible_result_clamped_and_warned(self):
+        # A tiny pack with a huge price would otherwise give a silly allowance.
+        estimate = wear_from_cost(pack_cost=50000.0, usable_kwh=0.5, cycles=10.0)
+        assert estimate.cycle_cost == MAX_SENSIBLE_WEAR
+        assert estimate.warning is not None
+
+    def test_manual_wear_passthrough(self):
+        assert manual_wear(3.5).cycle_cost == pytest.approx(3.5)
+        assert manual_wear(3.5).source == "entered manually"
+
+    def test_manual_wear_clamped(self):
+        assert manual_wear(-5.0).cycle_cost == 0.0
+        assert manual_wear(1e6).cycle_cost == MAX_SENSIBLE_WEAR
+
+
+class TestWearThresholds:
+    def test_spread_needed_accounts_for_losses(self):
+        # 2p of wear over a 90% round trip needs a 2.22p spread to clear.
+        assert spread_needed(2.0, 0.9) == pytest.approx(2.222, abs=0.01)
+
+    def test_negative_price_threshold(self):
+        """Dumping to re-import pays once import goes below this."""
+        assert negative_price_threshold(2.0, 0.95) == pytest.approx(-1.9)
+        assert negative_price_threshold(8.0, 0.95) == pytest.approx(-7.6)
+
+    def test_zero_wear_means_any_negative_price_pays(self):
+        assert negative_price_threshold(0.0, 0.95) == pytest.approx(0.0)
+
+
+class TestSettingsWearResolution:
+    def test_manual_by_default(self):
+        settings = RuntimeSettings(cycle_cost=3.0)
+        assert settings.effective_cycle_cost(17.6) == pytest.approx(3.0)
+        assert settings.wear_estimate(17.6).source == "entered manually"
+
+    def test_derived_when_enabled(self):
+        settings = RuntimeSettings(
+            derive_wear_from_cost=True,
+            battery_cost=500.0,
+            battery_expected_cycles=1500.0,
+        )
+        assert settings.effective_cycle_cost(17.6) == pytest.approx(1.894, abs=0.01)
+        assert "derived" in settings.wear_estimate(17.6).source
+
+    def test_derivation_ignored_without_a_cost(self):
+        """Switching derivation on with no cost entered must not silently drop the
+        allowance to zero and let the optimiser cycle freely."""
+        settings = RuntimeSettings(
+            derive_wear_from_cost=True, battery_cost=0.0, cycle_cost=4.0
+        )
+        assert settings.effective_cycle_cost(17.6) == pytest.approx(4.0)
+
+    def test_manual_value_preserved_while_derived(self):
+        """Turning derivation off again must restore what was typed."""
+        settings = RuntimeSettings(
+            derive_wear_from_cost=True, battery_cost=500.0, cycle_cost=7.0
+        )
+        assert settings.effective_cycle_cost(17.6) != pytest.approx(7.0)
+        settings.derive_wear_from_cost = False
+        assert settings.effective_cycle_cost(17.6) == pytest.approx(7.0)
+
+    def test_sanitiser_clamps_residual_to_cost(self):
+        settings = RuntimeSettings(
+            battery_cost=500.0, battery_residual_value=900.0
+        ).sanitised()
+        assert settings.battery_residual_value == 500.0
+
+    def test_seeds_wear_settings_from_options(self):
+        settings = RuntimeSettings()
+        settings.seed_from_options(
+            {
+                "derive_wear_from_cost": True,
+                "battery_cost": 500.0,
+                "battery_expected_cycles": 1200.0,
+                "battery_residual_value": 50.0,
+            }
+        )
+        assert settings.derive_wear_from_cost is True
+        assert settings.battery_cost == 500.0
+        assert settings.battery_expected_cycles == 1200.0
+        assert settings.battery_residual_value == 50.0
+
+    def test_roundtrip_persists_wear_settings(self):
+        settings = RuntimeSettings(
+            derive_wear_from_cost=True, battery_cost=500.0, battery_expected_cycles=1800.0
+        )
+        restored = RuntimeSettings.from_dict(settings.as_dict())
+        assert restored.derive_wear_from_cost is True
+        assert restored.battery_cost == 500.0
+        assert restored.battery_expected_cycles == 1800.0

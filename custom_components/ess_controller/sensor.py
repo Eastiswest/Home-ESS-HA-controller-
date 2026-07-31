@@ -406,6 +406,24 @@ SENSORS: tuple[EssSensorDescription, ...] = (
 )
 
 
+def _wear_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    """Show the workings, and what the allowance means in practice."""
+    from .wear import negative_price_threshold
+
+    estimate = coordinator.wear_estimate()
+    spec = coordinator.battery_spec()
+    return {
+        **estimate.as_dict(),
+        "derived": coordinator.settings.derive_wear_from_cost,
+        "manual_cycle_cost": coordinator.settings.cycle_cost,
+        # What the number actually means, in terms a user can check.
+        "spread_needed_to_cycle": round(spec.spread_needed_to_cycle(), 2),
+        "negative_price_to_dump_and_reimport": round(
+            negative_price_threshold(estimate.cycle_cost, spec.charge_efficiency), 2
+        ),
+    }
+
+
 def _session_state(coordinator: EssCoordinator) -> str:
     active = coordinator.active_session()
     if active is not None:
@@ -450,6 +468,17 @@ def _recommendation_state(coordinator: EssCoordinator) -> str | None:
 
 
 SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
+    EssSensorDescription(
+        key="wear_allowance",
+        translation_key="wear_allowance",
+        name="Wear allowance in use",
+        icon="mdi:battery-heart-outline",
+        native_unit_of_measurement=PRICE_UNIT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        value=lambda c: round(c.wear_estimate().cycle_cost, 3),
+        attributes=lambda c: _wear_attributes(c),
+    ),
     EssSensorDescription(
         key="grid_session",
         translation_key="grid_session",

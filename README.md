@@ -103,14 +103,9 @@ paid to take it back. It pays whenever
 |negative import price|  >  wear allowance × charge efficiency
 ```
 
-which at the 2p/kWh default and 95% efficiency is any price below about −1.9p —
-a low bar that Agile clears fairly often. At 8p/kWh wear it needs about −7.6p and
-so happens rarely. The **battery wear allowance** is therefore the dial that
-governs this entirely; set it to roughly *pack cost ÷ expected lifetime
-throughput* and the behaviour follows. Two things the linear wear model does not
-capture, which are reasons not to set it too low: depth-of-discharge effects, and
-that repeated deep cycling for a couple of pence is a poor trade on a pack you
-would rather keep.
+which at a 2p/kWh allowance and 95% efficiency is any price below about −1.9p —
+a low bar that Agile clears fairly often. At 8p/kWh it needs about −7.6p and so
+happens rarely. The **wear allowance** therefore governs this entirely.
 
 Note also that what leaves the property is capped by your **export limit**, and
 only *generation* can be curtailed — battery discharge has to go somewhere. So on
@@ -119,6 +114,47 @@ a sunny day the array is turned down before the battery is asked to stop.
 One caveat worth knowing: **`Allow battery export` off roughly halves what you can
 capture**, because the battery can then only empty into the house, so it cannot
 make much headroom before the window arrives.
+
+### Setting the wear allowance
+
+The wear allowance is the most influential number in the whole system: it sets how
+big a price spread must be before cycling is worth it, and how negative import has
+to go before the battery is emptied to make room. You can set it two ways.
+
+**Enter it directly** in p/kWh, if you already know your figure.
+
+**Or turn on `Derive wear from battery cost`** and give it what the pack cost,
+its expected cycle life, and optionally a residual value. It then computes
+
+```
+wear per kWh = (pack cost − residual) ÷ (expected cycles × usable kWh)
+```
+
+For a £500 22 kWh pack over a 15–95% window (17.6 kWh usable):
+
+| Expected cycles | Wear allowance | Lifetime throughput | Dump-to-reimport pays below |
+|---|---|---|---|
+| 800 | 3.55 p/kWh | 14,080 kWh | −3.37p |
+| 1,000 | 2.84 p/kWh | 17,600 kWh | −2.70p |
+| 1,500 | 1.89 p/kWh | 26,400 kWh | −1.80p |
+| 2,000 | 1.42 p/kWh | 35,200 kWh | −1.35p |
+| 3,000 | 0.95 p/kWh | 52,800 kWh | −0.90p |
+
+The **cycle life figure must be for the SoC window you have configured**, not the
+headline number a datasheet quotes at a shallower depth of discharge. Narrowing
+the window raises the per-kWh cost (fewer kWh per cycle) but usually buys more
+cycles, so the two partly cancel — which is why the window is worth experimenting
+with once the rest is settled.
+
+The `Wear allowance in use` sensor always shows which figure is actually in force,
+derived or manual, with the workings and both practical thresholds — the spread
+needed to cycle, and how negative import must go before dumping to re-import pays
+— in its attributes.
+
+Two things the linear model does not capture, and reasons not to set the allowance
+too keenly: **depth-of-discharge effects** (95%→15% repeatedly is harder on a pack
+than the same kWh shuffled round the middle) and **calendar ageing** (a pack that
+dies of old age before its throughput is spent cost more per kWh than this says).
 
 ### Grid incentive sessions
 

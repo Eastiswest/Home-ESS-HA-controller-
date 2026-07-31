@@ -289,11 +289,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # unusable rather than merely conservative.
         return min(floor, self.settings.max_soc - 1.0)
 
+    def nominal_capacity_kwh(self) -> float:
+        """Capacity in force: measured if a BMS reports it, else nameplate."""
+        return self.battery.capacity_kwh or float(
+            self.options.get(CONF_BATTERY_CAPACITY, DEFAULT_BATTERY_CAPACITY)
+        )
+
+    def usable_kwh(self) -> float:
+        """The configured usable window, used to derive the wear allowance.
+
+        Deliberately the *configured* floor rather than the outage-boosted one:
+        holding extra charge back for a storm should not change what a cycle is
+        reckoned to cost.
+        """
+        capacity = max(self.nominal_capacity_kwh(), 0.1)
+        return capacity * (self.settings.max_soc - self.settings.min_soc) / 100.0
+
+    def wear_estimate(self):
+        return self.settings.wear_estimate(self.usable_kwh())
+
     def battery_spec(self) -> BatterySpec:
         options = self.options
-        capacity = self.battery.capacity_kwh or float(
-            options.get(CONF_BATTERY_CAPACITY, DEFAULT_BATTERY_CAPACITY)
-        )
+        capacity = self.nominal_capacity_kwh()
         return BatterySpec(
             capacity_kwh=max(capacity, 0.1),
             min_soc=self.effective_min_soc,
@@ -306,7 +323,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             discharge_efficiency=float(
                 options.get(CONF_DISCHARGE_EFFICIENCY, DEFAULT_DISCHARGE_EFFICIENCY)
             ),
-            cycle_cost_per_kwh=self.settings.cycle_cost,
+            cycle_cost_per_kwh=self.wear_estimate().cycle_cost,
             reserve_soc=self.settings.reserve_soc,
         )
 
@@ -1219,6 +1236,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "spread_needed_to_cycle": round(
                     self.battery_spec().spread_needed_to_cycle(), 3
                 ),
+                "wear": self.wear_estimate().as_dict(),
             },
             "grid": {
                 "import_limit_kw": self.grid_spec().import_limit_kw,
