@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+)
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -20,6 +26,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAR_OVERRIDE,
+    SERVICE_RECOMMEND_TARIFFS,
     SERVICE_REPLAN,
     SERVICE_RESET_LEARNING,
     SERVICE_SET_OVERRIDE,
@@ -131,6 +138,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
         for coordinator in _coordinators(hass, call):
             await coordinator.async_reset_learning()
 
+    async def async_recommend_tariffs(call: ServiceCall) -> ServiceResponse:
+        results: dict[str, Any] = {}
+        for coordinator in _coordinators(hass, call):
+            recommendation = await coordinator.async_recommend_tariffs()
+            if recommendation is not None:
+                results[coordinator.entry.entry_id] = recommendation.as_dict()
+        return {"recommendations": results}
+
     hass.services.async_register(
         DOMAIN, SERVICE_REPLAN, async_replan, schema=ENTRY_ONLY_SCHEMA
     )
@@ -142,4 +157,12 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_LEARNING, async_reset_learning, schema=ENTRY_ONLY_SCHEMA
+    )
+    # Returns the ranked comparison, so it is a response-aware service.
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECOMMEND_TARIFFS,
+        async_recommend_tariffs,
+        schema=ENTRY_ONLY_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )

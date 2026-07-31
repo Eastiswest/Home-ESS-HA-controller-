@@ -51,6 +51,7 @@ from .const import (
     CONF_EXPORT_PROVIDER,
     CONF_EXPORT_RATE_ENTITY,
     CONF_EXPORT_TOU_SCHEDULE,
+    CONF_FREE_SESSION_ENTITIES,
     CONF_GRID_EXPORT_LIMIT,
     CONF_GRID_IMPORT_LIMIT,
     CONF_GRID_POWER_ENTITY,
@@ -72,8 +73,27 @@ from .const import (
     CONF_OCTOPUS_IMPORT_PRODUCT,
     CONF_OCTOPUS_IMPORT_TARIFF,
     CONF_OCTOPUS_REGION,
+    CONF_ONLY_JOINED_SESSIONS,
+    CONF_OUTAGE_CALENDAR,
+    CONF_OUTAGE_ENABLED,
+    CONF_OUTAGE_HIGH_RESERVE_SOC,
+    CONF_OUTAGE_LOOKAHEAD_HOURS,
+    CONF_OUTAGE_RESERVE_SOC,
+    CONF_OUTAGE_RISK_ENTITY,
+    CONF_OUTAGE_WIND_HIGH_THRESHOLD,
+    CONF_OUTAGE_WIND_THRESHOLD,
     CONF_OUTDOOR_TEMP_ENTITY,
     CONF_PV_POWER_ENTITY,
+    CONF_RECOMMEND_ENABLED,
+    CONF_RECOMMEND_EXPORT_PRODUCTS,
+    CONF_RECOMMEND_IMPORT_PRODUCTS,
+    CONF_RECOMMEND_WINDOW_HOURS,
+    CONF_SAVING_SESSION_ENTITIES,
+    CONF_SAVING_SESSION_RATE,
+    CONF_SESSION_REWARD_EXPORT,
+    CONF_SESSIONS_ENABLED,
+    CONF_SHIFTABLE_LOADS,
+    CONF_SHIFTING_ENABLED,
     CONF_SOC_LEVELS,
     CONF_SOLAR_FORECAST_ENTITIES,
     CONF_SOLAR_PEAK_POWER,
@@ -95,7 +115,14 @@ from .const import (
     DEFAULT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_SOC,
     DEFAULT_MIN_SOC,
+    DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
+    DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
+    DEFAULT_OUTAGE_RESERVE_SOC,
+    DEFAULT_OUTAGE_WIND_HIGH_THRESHOLD,
+    DEFAULT_OUTAGE_WIND_THRESHOLD,
+    DEFAULT_RECOMMEND_WINDOW_HOURS,
     DEFAULT_RESERVE_SOC,
+    DEFAULT_SAVING_SESSION_RATE,
     DEFAULT_SOC_LEVELS,
     DEFAULT_SOLAR_PEAK_POWER,
     DOMAIN,
@@ -375,6 +402,96 @@ class EssFlowMixin:
             }
         )
 
+    def _sessions_schema(self, current: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                _suggest(current, CONF_SESSIONS_ENABLED, True): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(current, CONF_SAVING_SESSION_ENTITIES, None): _entity(
+                    ["event", "binary_sensor", "sensor"], multiple=True
+                ),
+                _suggest(current, CONF_FREE_SESSION_ENTITIES, None): _entity(
+                    ["event", "binary_sensor", "sensor"], multiple=True
+                ),
+                _suggest(
+                    current, CONF_SAVING_SESSION_RATE, DEFAULT_SAVING_SESSION_RATE
+                ): _number(0, 1000, 1, "p/kWh"),
+                _suggest(current, CONF_ONLY_JOINED_SESSIONS, True): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(current, CONF_SESSION_REWARD_EXPORT, True): (
+                    selector.BooleanSelector()
+                ),
+            }
+        )
+
+    def _outage_schema(self, current: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                _suggest(current, CONF_OUTAGE_ENABLED, False): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(current, CONF_OUTAGE_RISK_ENTITY, None): _entity(
+                    ["binary_sensor", "input_boolean"]
+                ),
+                _suggest(current, CONF_OUTAGE_CALENDAR, None): _entity(["calendar"]),
+                _suggest(
+                    current, CONF_OUTAGE_WIND_THRESHOLD, DEFAULT_OUTAGE_WIND_THRESHOLD
+                ): _number(0, 250, 1),
+                _suggest(
+                    current,
+                    CONF_OUTAGE_WIND_HIGH_THRESHOLD,
+                    DEFAULT_OUTAGE_WIND_HIGH_THRESHOLD,
+                ): _number(0, 250, 1),
+                _suggest(
+                    current, CONF_OUTAGE_RESERVE_SOC, DEFAULT_OUTAGE_RESERVE_SOC
+                ): _number(0, 100, 1, "%"),
+                _suggest(
+                    current,
+                    CONF_OUTAGE_HIGH_RESERVE_SOC,
+                    DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
+                ): _number(0, 100, 1, "%"),
+                _suggest(
+                    current,
+                    CONF_OUTAGE_LOOKAHEAD_HOURS,
+                    DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
+                ): _number(1, 48, 1, "h"),
+            }
+        )
+
+    def _shifting_schema(self, current: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                _suggest(current, CONF_SHIFTING_ENABLED, False): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(current, CONF_SHIFTABLE_LOADS, None): selector.TextSelector(
+                    selector.TextSelectorConfig(multiline=True)
+                ),
+            }
+        )
+
+    def _recommend_schema(self, current: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                _suggest(current, CONF_RECOMMEND_ENABLED, True): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(
+                    current, CONF_RECOMMEND_IMPORT_PRODUCTS, None
+                ): selector.TextSelector(),
+                _suggest(
+                    current, CONF_RECOMMEND_EXPORT_PRODUCTS, None
+                ): selector.TextSelector(),
+                _suggest(
+                    current,
+                    CONF_RECOMMEND_WINDOW_HOURS,
+                    DEFAULT_RECOMMEND_WINDOW_HOURS,
+                ): _number(6, 48, 1, "h"),
+            }
+        )
+
     def _optimiser_schema(self, current: dict[str, Any]) -> vol.Schema:
         return vol.Schema(
             {
@@ -573,9 +690,39 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_optimiser()
+            return await self.async_step_sessions()
         return self.async_show_form(
             step_id="forecast", data_schema=self._forecast_schema(self._data)
+        )
+
+    async def async_step_sessions(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update(_clean(user_input))
+            return await self.async_step_shifting()
+        return self.async_show_form(
+            step_id="sessions", data_schema=self._sessions_schema(self._data)
+        )
+
+    async def async_step_shifting(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update(_clean(user_input))
+            return await self.async_step_outage()
+        return self.async_show_form(
+            step_id="shifting", data_schema=self._shifting_schema(self._data)
+        )
+
+    async def async_step_outage(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._data.update(_clean(user_input))
+            return await self.async_step_optimiser()
+        return self.async_show_form(
+            step_id="outage", data_schema=self._outage_schema(self._data)
         )
 
     async def async_step_optimiser(
@@ -625,6 +772,10 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
                 "tariff_import",
                 "tariff_export",
                 "forecast",
+                "sessions",
+                "shifting",
+                "outage",
+                "recommend",
                 "optimiser",
             ],
         )
@@ -729,6 +880,54 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
             return self._save()
         return self.async_show_form(
             step_id="forecast", data_schema=self._forecast_schema(self.current)
+        )
+
+    async def async_step_sessions(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self.current.update(_clean(user_input))
+            return self._save()
+        return self.async_show_form(
+            step_id="sessions", data_schema=self._sessions_schema(self.current)
+        )
+
+    async def async_step_shifting(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            # A cleared load list must actually clear, so this field bypasses the
+            # empty-means-unset rule that protects the other optional fields.
+            self.current[CONF_SHIFTABLE_LOADS] = user_input.get(CONF_SHIFTABLE_LOADS, "")
+            self.current[CONF_SHIFTING_ENABLED] = bool(
+                user_input.get(CONF_SHIFTING_ENABLED, False)
+            )
+            return self._save()
+        return self.async_show_form(
+            step_id="shifting", data_schema=self._shifting_schema(self.current)
+        )
+
+    async def async_step_outage(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self.current.update(_clean(user_input))
+            self.current[CONF_OUTAGE_ENABLED] = bool(
+                user_input.get(CONF_OUTAGE_ENABLED, False)
+            )
+            return self._save()
+        return self.async_show_form(
+            step_id="outage", data_schema=self._outage_schema(self.current)
+        )
+
+    async def async_step_recommend(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self.current.update(_clean(user_input))
+            return self._save()
+        return self.async_show_form(
+            step_id="recommend", data_schema=self._recommend_schema(self.current)
         )
 
     async def async_step_optimiser(

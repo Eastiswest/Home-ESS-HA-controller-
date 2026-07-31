@@ -81,6 +81,79 @@ a broader one, then to a sensible default — so the plans are reasonable on day
 one and sharpen over a few weeks. The `Learning progress` sensor tells you where
 you are; expect roughly two weeks to settle.
 
+### Grid incentive sessions
+
+Two Octopus schemes are worth real money, and both are handled by repricing the
+tariff before optimisation — so the existing planner does the right thing without
+any special-case logic.
+
+- **Power Up / free electricity sessions** → import price is overridden to zero
+  for the window, so the battery fills up.
+- **Saving Sessions (National Grid Demand Flexibility Service)** → the reward
+  rate is *added* to the import price for the window.
+
+That second one is exact, not an approximation. DFS pays
+`(baseline − actual) × rate`, and your baseline is fixed and exogenous, so
+maximising the payment is identical to minimising `actual × rate` — which is
+precisely an import price uplift. The optimiser then pre-charges before the
+window, discharges through it, and refuses to import, because that is now the
+cheapest path. Export counts towards reduction too, so the same uplift is applied
+to the export price.
+
+By default it acts **only on sessions you have joined** — discharging hard for a
+session you never opted into earns nothing.
+
+### Flexible load shifting
+
+Moving a dishwasher or immersion heater into a cheap slot often beats battery
+arbitrage outright, because the energy is bought cheaply *and* never pays
+round-trip losses. Define loads as
+`Dishwasher=1.2kWh@2kW,22:00-06:00; Immersion=3kWh@3kW` and they are scheduled
+into the cheapest feasible windows.
+
+The pricing is subtler than "lowest import price". Each window is costed against
+the **marginal** cost of extra consumption given the current battery plan: in a
+slot the plan already exports, extra load costs you the forgone *export* revenue;
+in a slot the plan is spilling surplus PV, extra load is free. Loads are then
+folded into the load forecast and the battery re-plans around them, so it
+pre-charges for the immersion heater rather than being surprised by it. Largest
+load is placed first, and the connection limit stops two of them stacking.
+
+Drive your actual switches from `binary_sensor.*_flexible_load_scheduled_now`, or
+read the per-load schedule from `sensor.*_scheduled_flexible_loads`.
+
+### Power cut anticipation
+
+Holds extra charge back when an outage looks likely, by raising the planning
+floor — the mechanism the optimiser already respects. It can **only** raise the
+floor, never lower one you set deliberately.
+
+Three signals: forecast wind gusts (already in the weather data being fetched,
+and gusts rather than mean wind because gusts bring lines down), any binary
+sensor you nominate (a weather-warning integration, a DNO scraper, a manual
+toggle), and a planned-outage calendar for DNO interruption notices.
+
+Wind thresholds are in whatever unit your weather entity reports, which varies.
+Check the `max_wind` attribute on `sensor.*_outage_risk` for a few days and set
+the thresholds from what you actually see.
+
+### Tariff comparison
+
+A comparison site asks what an *average* house would pay. That is the wrong
+question for a house with a battery: a tariff with a deep overnight trough and an
+expensive peak is *better* for you and worse for someone without storage.
+
+So the `Compare tariffs` button runs the actual optimiser against each candidate
+tariff, using your learned load and solar profile, and ranks by projected cost
+including standing charges. Same profile for every candidate, so the comparison
+isolates the tariff. The `ess_controller.recommend_tariffs` service returns the
+ranked table as response data.
+
+Limits, stated on the result itself: Agile publishes only 24–48 hours ahead, so
+the window is short and a few cheap days are not an annual saving. The wear
+allowance is applied, so a tariff that only wins by cycling the pack twice as
+hard does not look artificially good.
+
 ---
 
 ## Installation
@@ -110,6 +183,8 @@ directory and restart.
 | A PV power sensor | The solar model cannot learn without it | Strongly recommended |
 | A weather entity | Sky condition for solar, temperature for A/C load | Recommended |
 | A solar forecast integration | Better day-ahead solar than history alone | Optional |
+| The Octopus Energy integration | Saving Session and Power Up windows | Optional |
+| A calendar / warning entity | Planned and storm-related outage anticipation | Optional |
 
 For a Solax inverter, install
 [wills106/homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus)
@@ -257,7 +332,9 @@ minimum price spread that currently justifies a cycle.
 
 ## Entities
 
-**Sensors** — `planned_action`, `next_action`, `control_status`,
+**Sensors** — `grid_incentive_session`, `outage_risk`,
+`scheduled_flexible_loads`, `tariff_recommendation`, `planned_action`,
+`next_action`, `control_status`,
 `planned_horizon_cost`, `planned_saving_vs_self_use`, `import_price_now`,
 `export_price_now`, `target_state_of_charge`, solar and load forecast for the
 rest of today and tomorrow, `planned_grid_import` / `planned_grid_export`,
@@ -282,17 +359,19 @@ ApexCharts card directly.
 > ```
 
 **Binary sensors** — `charging_planned`, `discharging_planned`,
-`exporting_planned`, `cheap_import_slot` (handy for scheduling a dishwasher or an
-EV charge), `control_active`, `inverter_available`, `plan_problem`,
+`exporting_planned`, `cheap_import_slot`, `grid_session_active`,
+`free_electricity_now`, `outage_risk`, `flexible_load_scheduled_now`,
+`control_active`, `inverter_available`, `plan_problem`,
 `inverter_write_problem`.
 
 **Controls** — `Optimiser enabled`, `Inverter control`, `Allow grid charging`,
-`Allow export`, `Allow battery export`; numbers for the SoC window, power limits,
+`Allow export`, `Allow battery export`, `Act on grid sessions`,
+`Shift flexible loads`, `Outage protection`; numbers for the SoC window, power limits,
 wear allowance, typical daily load and the heating/cooling sensitivities; a
 `Strategy` select; and buttons to re-plan, clear an override or reset learning.
 
 **Services** — `ess_controller.replan`, `set_override`, `clear_override`,
-`reset_learning`.
+`reset_learning`, `recommend_tariffs`.
 
 Overrides beat the strategy lock, which beats the plan. An override always
 expires on its own, so a forgotten one cannot strand the battery:
@@ -332,7 +411,16 @@ default profile forever and the plans will be noticeably worse.
 persistence — the same time of day, yesterday. It preserves the shape but will be
 wrong on magnitude. Shorten the horizon if that bothers you.
 
-**Not tested against live hardware.** The logic has 298 automated tests,
+**Saving Session rewards are not always published.** When the supplier does not
+expose a rate for a session, the configured fallback is used; with no fallback the
+session is ignored rather than guessed at. Historic DFS rates have been well above
+100p/kWh, so this is worth setting.
+
+**Tariff comparison is a snapshot.** It scores a 24–48 hour window because that is
+all Agile publishes. Treat it as "which tariff suits my system's shape", not a
+guaranteed annual figure.
+
+**Not tested against live hardware.** The logic has 410 automated tests,
 including adapter tests against a simulated Solax entity set covering the
 dropped-write failure mode. That is not the same as having run on a real
 inverter. Start in advisory mode.
@@ -363,6 +451,10 @@ custom_components/ess_controller/
 ├── forecast/              # solar, load, weather, resampling
 ├── tariff/                # Octopus API, entity readers, fixed, time-of-use
 ├── inverter/              # roles, discovery, Solax + generic adapters, battery
+├── adjustments.py         # session repricing (Saving Sessions, Power Up)
+├── shifting.py            # flexible load placement
+├── outage.py              # power cut anticipation
+├── recommend.py           # tariff comparison
 ├── coordinator.py         # the planning loop
 ├── settings.py            # live-tunable settings (HA-free)
 └── config_flow.py         # setup and options

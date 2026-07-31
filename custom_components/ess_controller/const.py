@@ -100,6 +100,34 @@ CONF_OCTOPUS_REGION: Final = "octopus_region"
 CONF_OCTOPUS_API_KEY: Final = "octopus_api_key"
 CONF_OCTOPUS_ACCOUNT: Final = "octopus_account"
 
+# Grid incentive schemes (Saving Sessions, free electricity / Power Up)
+CONF_SESSIONS_ENABLED: Final = "sessions_enabled"
+CONF_SAVING_SESSION_ENTITIES: Final = "saving_session_entities"
+CONF_FREE_SESSION_ENTITIES: Final = "free_session_entities"
+CONF_SAVING_SESSION_RATE: Final = "saving_session_rate"
+CONF_ONLY_JOINED_SESSIONS: Final = "only_joined_sessions"
+CONF_SESSION_REWARD_EXPORT: Final = "session_reward_export"
+
+# Power cut anticipation
+CONF_OUTAGE_ENABLED: Final = "outage_enabled"
+CONF_OUTAGE_RISK_ENTITY: Final = "outage_risk_entity"
+CONF_OUTAGE_CALENDAR: Final = "outage_calendar"
+CONF_OUTAGE_WIND_THRESHOLD: Final = "outage_wind_threshold"
+CONF_OUTAGE_WIND_HIGH_THRESHOLD: Final = "outage_wind_high_threshold"
+CONF_OUTAGE_RESERVE_SOC: Final = "outage_reserve_soc"
+CONF_OUTAGE_HIGH_RESERVE_SOC: Final = "outage_high_reserve_soc"
+CONF_OUTAGE_LOOKAHEAD_HOURS: Final = "outage_lookahead_hours"
+
+# Flexible load shifting
+CONF_SHIFTING_ENABLED: Final = "shifting_enabled"
+CONF_SHIFTABLE_LOADS: Final = "shiftable_loads"
+
+# Tariff recommendations
+CONF_RECOMMEND_ENABLED: Final = "recommend_enabled"
+CONF_RECOMMEND_IMPORT_PRODUCTS: Final = "recommend_import_products"
+CONF_RECOMMEND_EXPORT_PRODUCTS: Final = "recommend_export_products"
+CONF_RECOMMEND_WINDOW_HOURS: Final = "recommend_window_hours"
+
 # Optimiser tuning
 CONF_HORIZON_HOURS: Final = "horizon_hours"
 CONF_SOC_LEVELS: Final = "soc_levels"
@@ -194,6 +222,14 @@ DEFAULT_CURRENCY: Final = "GBP"
 DEFAULT_IMPORT_FIXED_RATE: Final = 25.0
 DEFAULT_EXPORT_FIXED_RATE: Final = 15.0
 
+DEFAULT_SAVING_SESSION_RATE: Final = 0.0
+DEFAULT_OUTAGE_WIND_THRESHOLD: Final = 0.0
+DEFAULT_OUTAGE_WIND_HIGH_THRESHOLD: Final = 0.0
+DEFAULT_OUTAGE_RESERVE_SOC: Final = 50.0
+DEFAULT_OUTAGE_HIGH_RESERVE_SOC: Final = 80.0
+DEFAULT_OUTAGE_LOOKAHEAD_HOURS: Final = 12
+DEFAULT_RECOMMEND_WINDOW_HOURS: Final = 24
+
 SLOT_MINUTES: Final = 30
 
 # ---------------------------------------------------------------------------
@@ -205,6 +241,7 @@ SERVICE_SET_OVERRIDE: Final = "set_override"
 SERVICE_CLEAR_OVERRIDE: Final = "clear_override"
 SERVICE_RESET_LEARNING: Final = "reset_learning"
 SERVICE_LEARN_FROM_HISTORY: Final = "learn_from_history"
+SERVICE_RECOMMEND_TARIFFS: Final = "recommend_tariffs"
 
 ATTR_ACTION: Final = "action"
 ATTR_DURATION: Final = "duration"

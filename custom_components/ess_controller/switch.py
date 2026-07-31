@@ -102,11 +102,67 @@ SWITCHES: tuple[EssSwitchDescription, ...] = (
 )
 
 
+FEATURE_SWITCHES: tuple[EssSwitchDescription, ...] = (
+    EssSwitchDescription(
+        key="sessions_enabled",
+        translation_key="sessions_enabled",
+        name="Act on grid sessions",
+        icon="mdi:hand-coin-outline",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.sessions_enabled,
+        setter=lambda on: {"sessions_enabled": on},
+        attributes=lambda c: {
+            "description": (
+                "Reprice Saving Session and free-electricity windows so the plan "
+                "avoids importing when reduction is paid, and fills the battery "
+                "when import is free."
+            ),
+            "known_sessions": len(c.sessions),
+        },
+    ),
+    EssSwitchDescription(
+        key="shifting_enabled",
+        translation_key="shifting_enabled",
+        name="Shift flexible loads",
+        icon="mdi:calendar-clock",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.shifting_enabled,
+        setter=lambda on: {"shifting_enabled": on},
+        attributes=lambda c: {
+            "description": (
+                "Schedule the flexible loads you have defined into the cheapest "
+                "windows, and re-plan the battery around them."
+            ),
+            "defined_loads": len(c.shiftable_loads()),
+        },
+    ),
+    EssSwitchDescription(
+        key="outage_protection",
+        translation_key="outage_protection",
+        name="Outage protection",
+        icon="mdi:transmission-tower-off",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.outage_protection,
+        setter=lambda on: {"outage_protection": on},
+        attributes=lambda c: {
+            "description": (
+                "Hold extra charge back when a power cut looks likely. Can only "
+                "raise the planning floor, never lower it."
+            ),
+            "risk": c.outage.level,
+        },
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: EssCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(EssSwitch(coordinator, description) for description in SWITCHES)
+    async_add_entities(
+        EssSwitch(coordinator, description)
+        for description in (*SWITCHES, *FEATURE_SWITCHES)
+    )
 
 
 class EssSwitch(EssEntity, SwitchEntity):

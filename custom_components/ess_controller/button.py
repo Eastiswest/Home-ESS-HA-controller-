@@ -37,6 +37,13 @@ BUTTONS: tuple[EssButtonDescription, ...] = (
         action=lambda c: c.async_clear_override(),
     ),
     EssButtonDescription(
+        key="recommend_tariffs",
+        translation_key="recommend_tariffs",
+        name="Compare tariffs",
+        icon="mdi:swap-horizontal",
+        action=lambda c: c.async_recommend_tariffs(),
+    ),
+    EssButtonDescription(
         key="reset_learning",
         translation_key="reset_learning",
         name="Reset learned history",

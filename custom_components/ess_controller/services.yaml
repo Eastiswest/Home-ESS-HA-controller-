@@ -94,3 +94,18 @@ reset_learning:
       required: false
       selector:
         text:
+
+recommend_tariffs:
+  name: Compare tariffs
+  description: >-
+    Score candidate tariffs by running the optimiser against your learned load
+    and solar profile, including standing charges. Returns the ranked comparison.
+    A generic comparison asks what an average house would pay; this asks what
+    your battery can actually exploit, which is a different answer.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to apply to all of them.
+      required: false
+      selector:
+        text:

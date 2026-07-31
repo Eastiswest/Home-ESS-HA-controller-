@@ -21,9 +21,23 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import outage as outage_mod
+from . import recommend
+from .adjustments import (
+    KIND_FREE_ELECTRICITY,
+    KIND_SAVING_SESSION,
+    AdjustmentResult,
+    SessionEvent,
+    active_session,
+    adjustments_from_sessions,
+    apply_adjustments,
+    next_session,
+    parse_session_events,
+)
 from .const import (
     ADAPTER_GENERIC,
     ADAPTER_SOLAX_MODBUS,
@@ -35,6 +49,7 @@ from .const import (
     CONF_CHARGE_EFFICIENCY,
     CONF_DISCHARGE_EFFICIENCY,
     CONF_ENTITY_MAP,
+    CONF_FREE_SESSION_ENTITIES,
     CONF_GRID_EXPORT_LIMIT,
     CONF_GRID_IMPORT_LIMIT,
     CONF_GRID_POWER_ENTITY,
@@ -42,8 +57,24 @@ from .const import (
     CONF_INVERTER_ADAPTER,
     CONF_INVERTER_PREFIX,
     CONF_LOAD_POWER_ENTITY,
+    CONF_OCTOPUS_IMPORT_PRODUCT,
+    CONF_OCTOPUS_REGION,
+    CONF_ONLY_JOINED_SESSIONS,
+    CONF_OUTAGE_CALENDAR,
+    CONF_OUTAGE_HIGH_RESERVE_SOC,
+    CONF_OUTAGE_LOOKAHEAD_HOURS,
+    CONF_OUTAGE_RESERVE_SOC,
+    CONF_OUTAGE_RISK_ENTITY,
+    CONF_OUTAGE_WIND_HIGH_THRESHOLD,
+    CONF_OUTAGE_WIND_THRESHOLD,
     CONF_OUTDOOR_TEMP_ENTITY,
     CONF_PV_POWER_ENTITY,
+    CONF_RECOMMEND_IMPORT_PRODUCTS,
+    CONF_RECOMMEND_WINDOW_HOURS,
+    CONF_SAVING_SESSION_ENTITIES,
+    CONF_SAVING_SESSION_RATE,
+    CONF_SESSION_REWARD_EXPORT,
+    CONF_SHIFTABLE_LOADS,
     CONF_SOC_LEVELS,
     CONF_SOLAR_FORECAST_ENTITIES,
     CONF_SOLAR_PEAK_POWER,
@@ -56,6 +87,13 @@ from .const import (
     DEFAULT_GRID_EXPORT_LIMIT,
     DEFAULT_GRID_IMPORT_LIMIT,
     DEFAULT_HORIZON_HOURS,
+    DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
+    DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
+    DEFAULT_OUTAGE_RESERVE_SOC,
+    DEFAULT_OUTAGE_WIND_HIGH_THRESHOLD,
+    DEFAULT_OUTAGE_WIND_THRESHOLD,
+    DEFAULT_RECOMMEND_WINDOW_HOURS,
+    DEFAULT_SAVING_SESSION_RATE,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SOC_LEVELS,
     DEFAULT_SOLAR_PEAK_POWER,
@@ -104,8 +142,16 @@ from .models import (
 from .optimiser.dp import OptimiserSettings, optimise
 from .runtime import RuntimeSettings, RuntimeStore
 from .sampling import SlotAccumulator, slot_boundaries
+from .shifting import (
+    LoadPlacement,
+    add_placements_to_slots,
+    describe_placements,
+    parse_shiftable_loads,
+    place_loads,
+)
 from .tariff.base import PriceSeries
 from .tariff.factory import build_provider
+from .tariff.octopus import OctopusApiError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -150,6 +196,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._export_prices = PriceSeries()
         self._diagnostics: dict[str, Any] = {}
         self._plan_error: str | None = None
+        self.sessions: list[SessionEvent] = []
+        self.adjustment_result: AdjustmentResult | None = None
+        self.outage: outage_mod.OutageAssessment = outage_mod.OutageAssessment()
+        self.placements: list[LoadPlacement] = []
+        self.recommendation = None
+        self._raw_import_prices = PriceSeries()
 
     # ------------------------------------------------------------------
     # Setup
@@ -223,6 +275,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Specs derived from settings
     # ------------------------------------------------------------------
 
+    @property
+    def effective_min_soc(self) -> float:
+        """The floor the optimiser plans to, after outage protection.
+
+        Outage protection can only raise this, never lower it, so a user's
+        deliberate setting is always respected as a minimum.
+        """
+        floor = self.settings.min_soc
+        if self.settings.outage_protection and self.outage.at_risk:
+            floor = max(floor, self.outage.reserve_soc)
+        # Never invert the window: a boost above max_soc would make the battery
+        # unusable rather than merely conservative.
+        return min(floor, self.settings.max_soc - 1.0)
+
     def battery_spec(self) -> BatterySpec:
         options = self.options
         capacity = self.battery.capacity_kwh or float(
@@ -230,7 +296,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return BatterySpec(
             capacity_kwh=max(capacity, 0.1),
-            min_soc=self.settings.min_soc,
+            min_soc=self.effective_min_soc,
             max_soc=self.settings.max_soc,
             max_charge_kw=self.settings.max_charge_kw,
             max_discharge_kw=self.settings.max_discharge_kw,
@@ -290,6 +356,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self._build_data(now, site)
 
         await self._async_refresh_forecasts(now)
+        self._read_sessions(now)
+        self._assess_outage(now)
         slots, price_note = await self._async_build_horizon(now)
 
         if not slots:
@@ -306,6 +374,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.optimiser_settings(),
                 now,
             )
+            await self._async_shift_loads(now, slots, site.soc)
 
         command = self._resolve_command(now)
         if command is not None:
@@ -540,6 +609,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             note = f"{extended} slots extrapolated"
         export_series.extend_by_persistence(horizon_end, now)
 
+        # Keep the real tariff before incentives so the UI can show both.
+        self._raw_import_prices = import_series
+
+        adjustments = self._session_adjustments()
+        self.adjustment_result = apply_adjustments(
+            import_series, export_series, adjustments
+        )
+        import_series = self.adjustment_result.import_series
+        export_series = self.adjustment_result.export_series
+        if self.adjustment_result.applied:
+            reasons = ", ".join(a.reason for a in self.adjustment_result.applied)
+            note = f"{note + '; ' if note else ''}{reasons}"
+
         self._import_prices = import_series
         self._export_prices = export_series
 
@@ -594,6 +676,306 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "load_sources": [p.source for p in load_predictions[:8]],
         }
         return slots, note
+
+    # ------------------------------------------------------------------
+    # Grid incentives, outage risk and flexible loads
+    # ------------------------------------------------------------------
+
+    def _read_sessions(self, now: datetime) -> None:
+        """Collect supplier incentive windows from the configured entities."""
+        self.sessions = []
+        if not self.settings.sessions_enabled:
+            return
+
+        options = self.options
+        default_rate = float(
+            options.get(CONF_SAVING_SESSION_RATE, DEFAULT_SAVING_SESSION_RATE) or 0.0
+        )
+        for entity_ids, kind, rate in (
+            (
+                _as_list(options.get(CONF_SAVING_SESSION_ENTITIES)),
+                KIND_SAVING_SESSION,
+                default_rate,
+            ),
+            (
+                _as_list(options.get(CONF_FREE_SESSION_ENTITIES)),
+                KIND_FREE_ELECTRICITY,
+                None,
+            ),
+        ):
+            for entity_id in entity_ids:
+                state = self.hass.states.get(entity_id)
+                if state is None:
+                    continue
+                found = parse_session_events(state.attributes, kind, rate)
+                if found:
+                    self.sessions.extend(found)
+
+        # Drop windows already behind us so the sensors show what is coming.
+        self.sessions = [s for s in self.sessions if s.end > now - timedelta(hours=6)]
+        if self.sessions:
+            _LOGGER.debug("Known incentive windows: %s", len(self.sessions))
+
+    def _session_adjustments(self) -> list:
+        options = self.options
+        return adjustments_from_sessions(
+            self.sessions,
+            only_joined=bool(options.get(CONF_ONLY_JOINED_SESSIONS, True)),
+            saving_session_rate=float(
+                options.get(CONF_SAVING_SESSION_RATE, DEFAULT_SAVING_SESSION_RATE) or 0.0
+            ),
+            reward_export=bool(options.get(CONF_SESSION_REWARD_EXPORT, True)),
+        )
+
+    def _assess_outage(self, now: datetime) -> None:
+        """Work out whether to hold extra charge back for a likely power cut."""
+        if not self.settings.outage_protection:
+            self.outage = outage_mod.OutageAssessment(
+                reserve_soc=self.settings.min_soc, reason="outage protection disabled"
+            )
+            return
+
+        options = self.options
+        risk_entity = options.get(CONF_OUTAGE_RISK_ENTITY)
+        risk_on = False
+        if risk_entity:
+            state = self.hass.states.get(risk_entity)
+            risk_on = state is not None and state.state == "on"
+
+        self.outage = outage_mod.assess(
+            now,
+            base_reserve_soc=self.settings.min_soc,
+            wind_series=outage_mod.wind_series_from_weather(self._weather),
+            wind_threshold=float(
+                options.get(CONF_OUTAGE_WIND_THRESHOLD, DEFAULT_OUTAGE_WIND_THRESHOLD)
+                or 0.0
+            ),
+            wind_high_threshold=float(
+                options.get(
+                    CONF_OUTAGE_WIND_HIGH_THRESHOLD,
+                    DEFAULT_OUTAGE_WIND_HIGH_THRESHOLD,
+                )
+                or 0.0
+            ),
+            risk_entity_on=risk_on,
+            planned_outages=self._planned_outages(),
+            boost_soc=float(
+                options.get(CONF_OUTAGE_RESERVE_SOC, DEFAULT_OUTAGE_RESERVE_SOC)
+            ),
+            high_boost_soc=float(
+                options.get(CONF_OUTAGE_HIGH_RESERVE_SOC, DEFAULT_OUTAGE_HIGH_RESERVE_SOC)
+            ),
+            lookahead=timedelta(
+                hours=float(
+                    options.get(
+                        CONF_OUTAGE_LOOKAHEAD_HOURS, DEFAULT_OUTAGE_LOOKAHEAD_HOURS
+                    )
+                )
+            ),
+        )
+
+    def _planned_outages(self) -> list[tuple[datetime, datetime, str]]:
+        """Planned interruptions from a calendar entity's current event.
+
+        Only the calendar's active/next event is available from its state, which
+        is enough: a planned outage further out than that does not need action
+        yet, and the next refresh will pick it up.
+        """
+        entity_id = self.options.get(CONF_OUTAGE_CALENDAR)
+        if not entity_id:
+            return []
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return []
+        start = _parse_attr_dt(state.attributes.get("start_time"))
+        end = _parse_attr_dt(state.attributes.get("end_time"))
+        if start is None or end is None:
+            return []
+        summary = str(state.attributes.get("message") or "planned outage")
+        return [(start, end, summary)]
+
+    def shiftable_loads(self) -> list:
+        return parse_shiftable_loads(self.options.get(CONF_SHIFTABLE_LOADS))
+
+    async def _async_shift_loads(
+        self, now: datetime, slots: list[HorizonSlot], start_soc: float
+    ) -> None:
+        """Place flexible loads, then re-plan the battery around them.
+
+        Two passes: the first places loads against the battery-only plan, the
+        second re-places them against a plan that already knows about them. That
+        is enough to converge in practice, and each pass is one optimiser run.
+        """
+        self.placements = []
+        if not self.settings.shifting_enabled:
+            return
+        loads = self.shiftable_loads()
+        if not loads:
+            return
+
+        grid = self.grid_spec()
+        battery = self.battery_spec()
+        settings = self.optimiser_settings()
+
+        placements = place_loads(
+            loads, slots, self.plan, dt_util.as_local, grid.import_limit_kw
+        )
+        if not placements:
+            return
+
+        for _ in range(2):
+            combined = add_placements_to_slots(slots, placements)
+            plan = await self.hass.async_add_executor_job(
+                optimise, combined, start_soc, battery, grid, settings, now
+            )
+            revised = place_loads(
+                loads, slots, plan, dt_util.as_local, grid.import_limit_kw
+            )
+            self.plan = plan
+            self.placements = placements
+            if [p.start for p in revised] == [p.start for p in placements]:
+                break
+            placements = revised
+
+        if self.plan is not None and self.placements:
+            self.plan.reason = (
+                f"{self.plan.reason} {describe_placements(self.placements)}."
+            )
+
+    async def async_recommend_tariffs(self) -> Any:
+        """Score candidate tariffs against this system's learned profile.
+
+        Deliberately on demand rather than every cycle: it makes a request per
+        candidate, and the answer changes on the timescale of weeks.
+        """
+        options = self.options
+        region = options.get(CONF_OCTOPUS_REGION)
+        if not region:
+            _LOGGER.warning("Tariff comparison needs an Octopus region")
+            return None
+
+        now = dt_util.utcnow()
+        await self._async_refresh_forecasts(now)
+        template_slots, _ = await self._async_build_horizon(now)
+        window = float(
+            options.get(CONF_RECOMMEND_WINDOW_HOURS, DEFAULT_RECOMMEND_WINDOW_HOURS)
+        )
+        template = recommend.build_comparison_template(template_slots, window)
+        if not template:
+            _LOGGER.warning("No forecast horizon available for tariff comparison")
+            return None
+
+        import_codes = _as_list(options.get(CONF_RECOMMEND_IMPORT_PRODUCTS)) or list(
+            recommend.DEFAULT_IMPORT_PRODUCTS
+        )
+        current_code = options.get(CONF_OCTOPUS_IMPORT_PRODUCT)
+        if current_code and current_code not in import_codes:
+            import_codes.insert(0, current_code)
+
+        candidates = recommend.candidates_from_codes(import_codes, region, "import")
+        session = async_get_clientsession(self.hass)
+        export_series = self._export_prices
+        battery = self.battery_spec()
+        grid = self.grid_spec()
+        settings = self.optimiser_settings()
+        start_soc = self.battery.soc if self.battery.valid else 50.0
+
+        scores: list[recommend.TariffScore] = []
+        for candidate in candidates:
+            try:
+                prices, standing = await self._async_fetch_candidate(
+                    session, candidate, now, window
+                )
+            except OctopusApiError as err:
+                scores.append(
+                    recommend.TariffScore(
+                        candidate=candidate,
+                        optimised_cost=0.0,
+                        self_use_cost=0.0,
+                        standing_charge=0.0,
+                        hours=0.0,
+                        slots=0,
+                        mean_price=0.0,
+                        min_price=0.0,
+                        max_price=0.0,
+                        error=str(err),
+                    )
+                )
+                continue
+
+            score = await self.hass.async_add_executor_job(
+                recommend.score_tariff,
+                candidate,
+                prices,
+                export_series,
+                template,
+                start_soc,
+                battery,
+                grid,
+                settings,
+                standing,
+                candidate.product_code == current_code,
+            )
+            scores.append(score)
+
+        self.recommendation = recommend.Recommendation(
+            created=now,
+            scores=scores,
+            window_hours=sum(s.duration_hours for s in template),
+            note=(
+                "Scored by running the optimiser on your learned load and solar "
+                "profile over the window below, including standing charges. A "
+                "short window is a snapshot, not an annual projection."
+            ),
+        )
+        self.async_update_listeners()
+        return self.recommendation
+
+    async def _async_fetch_candidate(
+        self,
+        session: Any,
+        candidate: Any,
+        now: datetime,
+        window_hours: float,
+    ) -> tuple[PriceSeries, float]:
+        """Fetch one candidate's unit rates and standing charge."""
+        from .tariff.octopus import (
+            API_BASE,
+            async_get_json,
+            parse_unit_rates,
+        )
+
+        horizon_end = now + timedelta(hours=window_hours)
+        base = (
+            f"{API_BASE}/products/{candidate.product_code}"
+            f"/electricity-tariffs/{candidate.tariff_code}"
+        )
+        rates = await async_get_json(
+            session,
+            f"{base}/standard-unit-rates/",
+            {
+                "period_from": now.isoformat(),
+                "period_to": horizon_end.isoformat(),
+                "page_size": "1500",
+            },
+        )
+        slots = parse_unit_rates(rates, fallback_end=horizon_end)
+        standing = 0.0
+        try:
+            charges = await async_get_json(
+                session, f"{base}/standing-charges/", {"page_size": "10"}
+            )
+            standing = recommend.parse_standing_charge(charges)
+        except OctopusApiError as err:
+            # A missing standing charge is a comparison inaccuracy, not a failure.
+            _LOGGER.debug("No standing charge for %s: %s", candidate.tariff_code, err)
+        return PriceSeries(slots), standing
+
+    def active_session(self, now: datetime | None = None) -> SessionEvent | None:
+        return active_session(self.sessions, now or dt_util.utcnow())
+
+    def next_session(self, now: datetime | None = None) -> SessionEvent | None:
+        return next_session(self.sessions, now or dt_util.utcnow())
 
     # ------------------------------------------------------------------
     # Deciding what to do now
@@ -748,6 +1130,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "settings": self.settings,
             "error": self._plan_error,
             "learning": self.learning_store.model.confidence(),
+            "sessions": self.sessions,
+            "outage": self.outage,
+            "placements": self.placements,
         }
 
     def forecast_totals(self) -> dict[str, Any]:
@@ -866,6 +1251,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_apply": self.last_apply.as_dict() if self.last_apply else None,
             "override": self.override.as_dict() if self.override else None,
             "error": self._plan_error,
+            "effective_min_soc": self.effective_min_soc,
+            "sessions": [s.as_dict() for s in self.sessions],
+            "adjustments": (
+                self.adjustment_result.as_dict() if self.adjustment_result else {}
+            ),
+            "outage": self.outage.as_dict(),
+            "shiftable_loads": [load.as_dict() for load in self.shiftable_loads()],
+            "placements": [p.as_dict() for p in self.placements],
+            "raw_import_prices": self._raw_import_prices.as_dict_list()[:96],
+            "recommendation": (
+                self.recommendation.as_dict() if self.recommendation else None
+            ),
         }
 
 
@@ -877,6 +1274,22 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+def _parse_attr_dt(value: Any) -> datetime | None:
+    """Parse a datetime from an entity attribute, which may already be one."""
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    for text in (value, value.replace(" ", "T")):
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        # Calendar attributes are local wall-clock without an offset.
+        return parsed if parsed.tzinfo else dt_util.as_utc(parsed)
+    return None
 
 
 def _state_float(hass: HomeAssistant, entity_id: str | None) -> float | None:

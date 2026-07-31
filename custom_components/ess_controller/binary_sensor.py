@@ -128,6 +128,62 @@ BINARY_SENSORS: tuple[EssBinarySensorDescription, ...] = (
 )
 
 
+INCENTIVE_BINARY_SENSORS: tuple[EssBinarySensorDescription, ...] = (
+    EssBinarySensorDescription(
+        key="session_active",
+        translation_key="session_active",
+        name="Grid session active",
+        icon="mdi:hand-coin",
+        value=lambda c: c.active_session() is not None,
+        attributes=lambda c: {
+            "session": (c.active_session().as_dict() if c.active_session() else None),
+            "next": c.next_session().as_dict() if c.next_session() else None,
+        },
+    ),
+    EssBinarySensorDescription(
+        key="free_electricity_now",
+        translation_key="free_electricity_now",
+        name="Free electricity now",
+        icon="mdi:gift-outline",
+        value=lambda c: (
+            (session := c.active_session()) is not None
+            and session.kind == "free_electricity"
+        ),
+    ),
+    EssBinarySensorDescription(
+        key="outage_risk_active",
+        translation_key="outage_risk_active",
+        name="Outage risk",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        icon="mdi:weather-windy",
+        value=lambda c: c.settings.outage_protection and c.outage.at_risk,
+        attributes=lambda c: c.outage.as_dict(),
+    ),
+    EssBinarySensorDescription(
+        key="flexible_load_running",
+        translation_key="flexible_load_running",
+        name="Flexible load scheduled now",
+        icon="mdi:washing-machine",
+        value=lambda c: _load_running(c),
+        attributes=lambda c: {
+            "running": [p.name for p in c.placements if p.running_at(_now())],
+            "placements": [p.as_dict() for p in c.placements],
+        },
+    ),
+)
+
+
+def _now():
+    from homeassistant.util import dt as dt_util
+
+    return dt_util.utcnow()
+
+
+def _load_running(coordinator: EssCoordinator) -> bool:
+    moment = _now()
+    return any(p.running_at(moment) for p in coordinator.placements)
+
+
 def _cheap_now(coordinator: EssCoordinator) -> bool | None:
     stats = coordinator.price_stats("import")
     price = coordinator.price_now("import")
@@ -145,7 +201,8 @@ async def async_setup_entry(
 ) -> None:
     coordinator: EssCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        EssBinarySensor(coordinator, description) for description in BINARY_SENSORS
+        EssBinarySensor(coordinator, description)
+        for description in (*BINARY_SENSORS, *INCENTIVE_BINARY_SENSORS)
     )
 
 

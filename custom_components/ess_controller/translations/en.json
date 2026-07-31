@@ -126,6 +126,66 @@
           "terminal_value_mode": "Stops the optimiser dumping the battery into the final slot just because the horizon ends there.",
           "dry_run": "Strongly recommended for a new install."
         }
+      },
+      "sessions": {
+        "title": "Grid incentive sessions",
+        "description": "Octopus Saving Sessions pay you per kWh of reduction against your usual usage, and Power Up sessions make import free for a window. Point these at the Octopus Energy integration's session entities and the planner will reprice those windows automatically.",
+        "data": {
+          "sessions_enabled": "Act on incentive sessions",
+          "saving_session_entities": "Saving Session entities",
+          "free_session_entities": "Free electricity / Power Up entities",
+          "saving_session_rate": "Fallback reward rate",
+          "only_joined_sessions": "Only act on sessions you have joined",
+          "session_reward_export": "Count export towards the reduction"
+        },
+        "data_description": {
+          "saving_session_entities": "The events or binary sensors carrying session windows, e.g. the Octopus Energy integration's Octoplus saving session entities.",
+          "saving_session_rate": "Used only when the supplier does not publish a rate for the session. Historic Demand Flexibility rates have been well above 100p/kWh.",
+          "only_joined_sessions": "Strongly recommended. Discharging hard for a session you have not opted into earns nothing."
+        }
+      },
+      "outage": {
+        "title": "Power cut anticipation",
+        "description": "Holds extra charge back when a power cut looks likely. This can only raise the planning floor, never lower it. Check the Outage risk sensor's max_wind attribute to pick thresholds that suit your location and the units your weather entity reports.",
+        "data": {
+          "outage_enabled": "Enable outage protection",
+          "outage_risk_entity": "Outage risk entity (optional)",
+          "outage_calendar": "Planned outage calendar (optional)",
+          "outage_wind_threshold": "Wind gust threshold",
+          "outage_wind_high_threshold": "Severe wind gust threshold",
+          "outage_reserve_soc": "Reserve to hold when risk is elevated",
+          "outage_high_reserve_soc": "Reserve to hold when risk is high",
+          "outage_lookahead_hours": "How far ahead to act"
+        },
+        "data_description": {
+          "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
+          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind."
+        }
+      },
+      "shifting": {
+        "title": "Flexible loads",
+        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them. Expose the schedule with the 'Flexible load scheduled now' sensor and drive your switches from it.",
+        "data": {
+          "shifting_enabled": "Schedule flexible loads",
+          "shiftable_loads": "Load definitions"
+        },
+        "data_description": {
+          "shiftable_loads": "Semicolon separated, e.g. Dishwasher=1.2kWh@2kW,22:00-06:00; Immersion=3kWh@3kW. The time window is optional and may wrap midnight."
+        }
+      },
+      "recommend": {
+        "title": "Tariff comparison",
+        "description": "Compares tariffs by running the optimiser on your own learned profile, so the ranking reflects what your battery can actually exploit. Run it from the 'Compare tariffs' button.",
+        "data": {
+          "recommend_enabled": "Enable tariff comparison",
+          "recommend_import_products": "Import products to compare",
+          "recommend_export_products": "Export products to compare",
+          "recommend_window_hours": "Comparison window"
+        },
+        "data_description": {
+          "recommend_import_products": "Comma separated Octopus product codes. Leave empty for a sensible default set.",
+          "recommend_window_hours": "Agile publishes only 24-48 hours ahead, so a longer window is not necessarily better."
+        }
       }
     },
     "error": {
@@ -152,7 +212,11 @@
           "tariff_import": "Import tariff",
           "tariff_export": "Export tariff",
           "forecast": "Forecasting",
-          "optimiser": "Optimiser"
+          "optimiser": "Optimiser",
+          "sessions": "Grid incentive sessions",
+          "outage": "Power cut anticipation",
+          "shifting": "Flexible loads",
+          "recommend": "Tariff comparison"
         }
       },
       "battery": {
@@ -266,6 +330,66 @@
           "allow_battery_export": "Allow the battery to export",
           "dry_run": "Start in advisory mode"
         }
+      },
+      "sessions": {
+        "title": "Grid incentive sessions",
+        "description": "Octopus Saving Sessions pay you per kWh of reduction against your usual usage, and Power Up sessions make import free for a window. Point these at the Octopus Energy integration's session entities and the planner will reprice those windows automatically.",
+        "data": {
+          "sessions_enabled": "Act on incentive sessions",
+          "saving_session_entities": "Saving Session entities",
+          "free_session_entities": "Free electricity / Power Up entities",
+          "saving_session_rate": "Fallback reward rate",
+          "only_joined_sessions": "Only act on sessions you have joined",
+          "session_reward_export": "Count export towards the reduction"
+        },
+        "data_description": {
+          "saving_session_entities": "The events or binary sensors carrying session windows, e.g. the Octopus Energy integration's Octoplus saving session entities.",
+          "saving_session_rate": "Used only when the supplier does not publish a rate for the session. Historic Demand Flexibility rates have been well above 100p/kWh.",
+          "only_joined_sessions": "Strongly recommended. Discharging hard for a session you have not opted into earns nothing."
+        }
+      },
+      "outage": {
+        "title": "Power cut anticipation",
+        "description": "Holds extra charge back when a power cut looks likely. This can only raise the planning floor, never lower it. Check the Outage risk sensor's max_wind attribute to pick thresholds that suit your location and the units your weather entity reports.",
+        "data": {
+          "outage_enabled": "Enable outage protection",
+          "outage_risk_entity": "Outage risk entity (optional)",
+          "outage_calendar": "Planned outage calendar (optional)",
+          "outage_wind_threshold": "Wind gust threshold",
+          "outage_wind_high_threshold": "Severe wind gust threshold",
+          "outage_reserve_soc": "Reserve to hold when risk is elevated",
+          "outage_high_reserve_soc": "Reserve to hold when risk is high",
+          "outage_lookahead_hours": "How far ahead to act"
+        },
+        "data_description": {
+          "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
+          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind."
+        }
+      },
+      "shifting": {
+        "title": "Flexible loads",
+        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them. Expose the schedule with the 'Flexible load scheduled now' sensor and drive your switches from it.",
+        "data": {
+          "shifting_enabled": "Schedule flexible loads",
+          "shiftable_loads": "Load definitions"
+        },
+        "data_description": {
+          "shiftable_loads": "Semicolon separated, e.g. Dishwasher=1.2kWh@2kW,22:00-06:00; Immersion=3kWh@3kW. The time window is optional and may wrap midnight."
+        }
+      },
+      "recommend": {
+        "title": "Tariff comparison",
+        "description": "Compares tariffs by running the optimiser on your own learned profile, so the ranking reflects what your battery can actually exploit. Run it from the 'Compare tariffs' button.",
+        "data": {
+          "recommend_enabled": "Enable tariff comparison",
+          "recommend_import_products": "Import products to compare",
+          "recommend_export_products": "Export products to compare",
+          "recommend_window_hours": "Comparison window"
+        },
+        "data_description": {
+          "recommend_import_products": "Comma separated Octopus product codes. Leave empty for a sensible default set.",
+          "recommend_window_hours": "Agile publishes only 24-48 hours ahead, so a longer window is not necessarily better."
+        }
       }
     },
     "error": {
@@ -349,53 +473,168 @@
           "charge_solar_only": "Charging from solar"
         }
       },
-      "control_status": { "name": "Control status" },
-      "plan_cost": { "name": "Planned horizon cost" },
-      "plan_saving": { "name": "Planned saving vs self-use" },
-      "import_price": { "name": "Import price now" },
-      "export_price": { "name": "Export price now" },
-      "target_soc": { "name": "Target state of charge" },
-      "solar_forecast_today": { "name": "Solar forecast remaining today" },
-      "solar_forecast_tomorrow": { "name": "Solar forecast tomorrow" },
-      "load_forecast_today": { "name": "Load forecast remaining today" },
-      "load_forecast_tomorrow": { "name": "Load forecast tomorrow" },
-      "planned_grid_import": { "name": "Planned grid import" },
-      "planned_grid_export": { "name": "Planned grid export" },
-      "battery_soc": { "name": "Battery state of charge" },
-      "usable_capacity": { "name": "Usable battery capacity" },
-      "learning_progress": { "name": "Learning progress" },
-      "planned_charge_power": { "name": "Planned charge power" },
-      "planned_discharge_power": { "name": "Planned discharge power" }
+      "control_status": {
+        "name": "Control status"
+      },
+      "plan_cost": {
+        "name": "Planned horizon cost"
+      },
+      "plan_saving": {
+        "name": "Planned saving vs self-use"
+      },
+      "import_price": {
+        "name": "Import price now"
+      },
+      "export_price": {
+        "name": "Export price now"
+      },
+      "target_soc": {
+        "name": "Target state of charge"
+      },
+      "solar_forecast_today": {
+        "name": "Solar forecast remaining today"
+      },
+      "solar_forecast_tomorrow": {
+        "name": "Solar forecast tomorrow"
+      },
+      "load_forecast_today": {
+        "name": "Load forecast remaining today"
+      },
+      "load_forecast_tomorrow": {
+        "name": "Load forecast tomorrow"
+      },
+      "planned_grid_import": {
+        "name": "Planned grid import"
+      },
+      "planned_grid_export": {
+        "name": "Planned grid export"
+      },
+      "battery_soc": {
+        "name": "Battery state of charge"
+      },
+      "usable_capacity": {
+        "name": "Usable battery capacity"
+      },
+      "learning_progress": {
+        "name": "Learning progress"
+      },
+      "planned_charge_power": {
+        "name": "Planned charge power"
+      },
+      "planned_discharge_power": {
+        "name": "Planned discharge power"
+      },
+      "grid_session": {
+        "name": "Grid incentive session"
+      },
+      "outage_risk": {
+        "name": "Outage risk"
+      },
+      "shifted_loads": {
+        "name": "Scheduled flexible loads"
+      },
+      "tariff_recommendation": {
+        "name": "Tariff recommendation"
+      }
     },
     "binary_sensor": {
-      "charging_planned": { "name": "Charging planned" },
-      "discharging_planned": { "name": "Discharging planned" },
-      "exporting_planned": { "name": "Exporting planned" },
-      "cheap_slot": { "name": "Cheap import slot" },
-      "control_active": { "name": "Control active" },
-      "inverter_available": { "name": "Inverter available" },
-      "plan_valid": { "name": "Plan problem" },
-      "write_verified": { "name": "Inverter write problem" }
+      "charging_planned": {
+        "name": "Charging planned"
+      },
+      "discharging_planned": {
+        "name": "Discharging planned"
+      },
+      "exporting_planned": {
+        "name": "Exporting planned"
+      },
+      "cheap_slot": {
+        "name": "Cheap import slot"
+      },
+      "control_active": {
+        "name": "Control active"
+      },
+      "inverter_available": {
+        "name": "Inverter available"
+      },
+      "plan_valid": {
+        "name": "Plan problem"
+      },
+      "write_verified": {
+        "name": "Inverter write problem"
+      },
+      "session_active": {
+        "name": "Grid session active"
+      },
+      "free_electricity_now": {
+        "name": "Free electricity now"
+      },
+      "outage_risk_active": {
+        "name": "Outage risk"
+      },
+      "flexible_load_running": {
+        "name": "Flexible load scheduled now"
+      }
     },
     "switch": {
-      "optimiser_enabled": { "name": "Optimiser enabled" },
-      "inverter_control": { "name": "Inverter control" },
-      "allow_grid_charge": { "name": "Allow grid charging" },
-      "allow_export": { "name": "Allow export" },
-      "allow_battery_export": { "name": "Allow battery export" }
+      "optimiser_enabled": {
+        "name": "Optimiser enabled"
+      },
+      "inverter_control": {
+        "name": "Inverter control"
+      },
+      "allow_grid_charge": {
+        "name": "Allow grid charging"
+      },
+      "allow_export": {
+        "name": "Allow export"
+      },
+      "allow_battery_export": {
+        "name": "Allow battery export"
+      },
+      "sessions_enabled": {
+        "name": "Act on grid sessions"
+      },
+      "shifting_enabled": {
+        "name": "Shift flexible loads"
+      },
+      "outage_protection": {
+        "name": "Outage protection"
+      }
     },
     "number": {
-      "min_soc": { "name": "Minimum state of charge" },
-      "max_soc": { "name": "Maximum state of charge" },
-      "reserve_soc": { "name": "Emergency reserve" },
-      "max_charge_power": { "name": "Maximum charge power" },
-      "max_discharge_power": { "name": "Maximum discharge power" },
-      "cycle_cost": { "name": "Battery wear allowance" },
-      "default_daily_load": { "name": "Typical daily consumption" },
-      "cooling_rate": { "name": "Cooling load per degree" },
-      "cooling_threshold": { "name": "Cooling threshold" },
-      "heating_rate": { "name": "Heating load per degree" },
-      "heating_threshold": { "name": "Heating threshold" }
+      "min_soc": {
+        "name": "Minimum state of charge"
+      },
+      "max_soc": {
+        "name": "Maximum state of charge"
+      },
+      "reserve_soc": {
+        "name": "Emergency reserve"
+      },
+      "max_charge_power": {
+        "name": "Maximum charge power"
+      },
+      "max_discharge_power": {
+        "name": "Maximum discharge power"
+      },
+      "cycle_cost": {
+        "name": "Battery wear allowance"
+      },
+      "default_daily_load": {
+        "name": "Typical daily consumption"
+      },
+      "cooling_rate": {
+        "name": "Cooling load per degree"
+      },
+      "cooling_threshold": {
+        "name": "Cooling threshold"
+      },
+      "heating_rate": {
+        "name": "Heating load per degree"
+      },
+      "heating_threshold": {
+        "name": "Heating threshold"
+      }
     },
     "select": {
       "strategy": {
@@ -411,9 +650,18 @@
       }
     },
     "button": {
-      "replan": { "name": "Re-plan now" },
-      "clear_override": { "name": "Clear override" },
-      "reset_learning": { "name": "Reset learned history" }
+      "replan": {
+        "name": "Re-plan now"
+      },
+      "clear_override": {
+        "name": "Clear override"
+      },
+      "reset_learning": {
+        "name": "Reset learned history"
+      },
+      "recommend_tariffs": {
+        "name": "Compare tariffs"
+      }
     }
   },
   "services": {
@@ -431,9 +679,18 @@
       "name": "Set manual override",
       "description": "Force a behaviour for a period, overriding the plan.",
       "fields": {
-        "action": { "name": "Action", "description": "What the inverter should do." },
-        "duration": { "name": "Duration", "description": "How long the override lasts." },
-        "power": { "name": "Power", "description": "Charge or discharge power in kW." },
+        "action": {
+          "name": "Action",
+          "description": "What the inverter should do."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "How long the override lasts."
+        },
+        "power": {
+          "name": "Power",
+          "description": "Charge or discharge power in kW."
+        },
         "target_soc": {
           "name": "Target state of charge",
           "description": "End the override once this state of charge is reached."
@@ -457,6 +714,16 @@
     "reset_learning": {
       "name": "Reset learned history",
       "description": "Discard learned solar and load history and start again.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    },
+    "recommend_tariffs": {
+      "name": "Compare tariffs",
+      "description": "Score candidate tariffs by running the optimiser against your learned load and solar profile.",
       "fields": {
         "entry_id": {
           "name": "Entry ID",

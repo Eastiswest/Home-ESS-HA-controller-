@@ -406,11 +406,99 @@ SENSORS: tuple[EssSensorDescription, ...] = (
 )
 
 
+def _session_state(coordinator: EssCoordinator) -> str:
+    active = coordinator.active_session()
+    if active is not None:
+        return active.kind
+    upcoming = coordinator.next_session()
+    return "upcoming" if upcoming is not None else "none"
+
+
+def _session_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    active = coordinator.active_session()
+    upcoming = coordinator.next_session()
+    adjustments = coordinator.adjustment_result
+    return {
+        "active": active.as_dict() if active else None,
+        "next": upcoming.as_dict() if upcoming else None,
+        "known": [s.as_dict() for s in coordinator.sessions],
+        "applied_to_plan": (
+            [a.as_dict() for a in adjustments.applied] if adjustments else []
+        ),
+        "slots_repriced": adjustments.slots_changed if adjustments else 0,
+        "enabled": coordinator.settings.sessions_enabled,
+    }
+
+
+def _shifted_loads_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    return {
+        "placements": [p.as_dict() for p in coordinator.placements],
+        "defined": [load.as_dict() for load in coordinator.shiftable_loads()],
+        "enabled": coordinator.settings.shifting_enabled,
+        "total_saving": round(
+            sum(p.saving_vs_worst or 0.0 for p in coordinator.placements), 2
+        ),
+    }
+
+
+def _recommendation_state(coordinator: EssCoordinator) -> str | None:
+    from . import recommend as recommend_mod
+
+    if coordinator.recommendation is None:
+        return None
+    return recommend_mod.summarise(coordinator.recommendation)
+
+
+SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
+    EssSensorDescription(
+        key="grid_session",
+        translation_key="grid_session",
+        name="Grid incentive session",
+        icon="mdi:hand-coin-outline",
+        value=_session_state,
+        attributes=_session_attributes,
+    ),
+    EssSensorDescription(
+        key="outage_risk",
+        translation_key="outage_risk",
+        name="Outage risk",
+        icon="mdi:transmission-tower-off",
+        value=lambda c: c.outage.level,
+        attributes=lambda c: {
+            **c.outage.as_dict(),
+            "effective_min_soc": round(c.effective_min_soc, 1),
+            "enabled": c.settings.outage_protection,
+        },
+    ),
+    EssSensorDescription(
+        key="shifted_loads",
+        translation_key="shifted_loads",
+        name="Scheduled flexible loads",
+        icon="mdi:calendar-clock",
+        value=lambda c: len(c.placements),
+        attributes=_shifted_loads_attributes,
+    ),
+    EssSensorDescription(
+        key="tariff_recommendation",
+        translation_key="tariff_recommendation",
+        name="Tariff recommendation",
+        icon="mdi:swap-horizontal",
+        value=_recommendation_state,
+        attributes=lambda c: (
+            c.recommendation.as_dict() if c.recommendation else {"note": "not yet run"}
+        ),
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: EssCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(EssSensor(coordinator, description) for description in SENSORS)
+    async_add_entities(
+        EssSensor(coordinator, description)
+        for description in (*SENSORS, *SESSION_SENSORS)
+    )
 
 
 class EssSensor(EssEntity, SensorEntity):

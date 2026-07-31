@@ -37,6 +37,9 @@ from .const import (
     CONF_DRY_RUN,
     CONF_MAX_CHARGE_POWER,
     CONF_MAX_DISCHARGE_POWER,
+    CONF_OUTAGE_ENABLED,
+    CONF_SESSIONS_ENABLED,
+    CONF_SHIFTING_ENABLED,
     DEFAULT_CYCLE_COST,
     DEFAULT_DAILY_LOAD,
     DEFAULT_MAX_CHARGE_POWER,
@@ -66,6 +69,15 @@ class RuntimeSettings:
     Defaults to true on purpose: a new install should be watched for a few days
     before being trusted with real money and a real battery.
     """
+
+    # -- feature toggles -------------------------------------------------
+    sessions_enabled: bool = True
+    """Act on supplier incentive windows (Saving Sessions, free electricity)."""
+    shifting_enabled: bool = False
+    """Schedule flexible loads. Off by default: it only does something once
+    loads have actually been defined."""
+    outage_protection: bool = False
+    """Hold extra charge back when an outage looks likely."""
 
     # -- permissions ----------------------------------------------------
     allow_grid_charge: bool = True
@@ -175,6 +187,15 @@ class RuntimeSettings:
             options.get(CONF_ALLOW_BATTERY_EXPORT, self.allow_battery_export)
         )
         self.dry_run = bool(options.get(CONF_DRY_RUN, self.dry_run))
+        self.sessions_enabled = bool(
+            options.get(CONF_SESSIONS_ENABLED, self.sessions_enabled)
+        )
+        self.shifting_enabled = bool(
+            options.get(CONF_SHIFTING_ENABLED, self.shifting_enabled)
+        )
+        self.outage_protection = bool(
+            options.get(CONF_OUTAGE_ENABLED, self.outage_protection)
+        )
         self.seeded = True
         self.sanitised()
 

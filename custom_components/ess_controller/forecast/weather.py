@@ -27,6 +27,13 @@ TEMP_KEYS: tuple[str, ...] = ("temperature", "temp", "native_temperature")
 # cloud cover. The UK Met Office integration is the notable example: its hourly
 # forecast carries condition, temperature and uv_index but no cloud coverage.
 UV_KEYS: tuple[str, ...] = ("uv_index", "uv", "uvi")
+# Wind feeds outage anticipation rather than the solar or load models.
+WIND_KEYS: tuple[str, ...] = ("wind_speed", "native_wind_speed", "windspeed")
+GUST_KEYS: tuple[str, ...] = (
+    "wind_gust_speed",
+    "native_wind_gust_speed",
+    "wind_gust",
+)
 
 # Weather conditions mapped to an approximate cloud cover, used when a provider
 # reports a condition but no numeric cloud coverage (Met Office, some others).
@@ -78,6 +85,8 @@ class WeatherPoint:
     cloud_coverage: float | None = None
     condition: str | None = None
     uv_index: float | None = None
+    wind_speed: float | None = None
+    wind_gust_speed: float | None = None
 
     @property
     def effective_cloud(self) -> float | None:
@@ -145,6 +154,8 @@ class WeatherSeries:
                     cloud_coverage=_as_float(cloud),
                     condition=entry.get("condition"),
                     uv_index=_as_float(_pick(entry, UV_KEYS)),
+                    wind_speed=_as_float(_pick(entry, WIND_KEYS)),
+                    wind_gust_speed=_as_float(_pick(entry, GUST_KEYS)),
                 )
             )
         return cls(points)
@@ -215,6 +226,21 @@ class WeatherSeries:
     def has_uv_index(self) -> bool:
         return any(p.uv_index is not None for p in self._points)
 
+    def has_wind(self) -> bool:
+        return any(
+            p.wind_gust_speed is not None or p.wind_speed is not None
+            for p in self._points
+        )
+
+    def max_wind(self) -> float | None:
+        """Strongest forecast gust, falling back to mean wind speed."""
+        speeds = [
+            p.wind_gust_speed if p.wind_gust_speed is not None else p.wind_speed
+            for p in self._points
+        ]
+        usable = [s for s in speeds if s is not None]
+        return max(usable) if usable else None
+
     def temperature_at(self, moment: datetime) -> float | None:
         return self._interpolate(moment, "temperature")
 
@@ -245,6 +271,8 @@ class WeatherSeries:
             "max_temperature": self.max_temperature(),
             "has_measured_cloud": self.has_measured_cloud(),
             "has_uv_index": self.has_uv_index(),
+            "has_wind": self.has_wind(),
+            "max_wind": self.max_wind(),
             "sky_signal": self.sky_signal_kind(),
         }
 
