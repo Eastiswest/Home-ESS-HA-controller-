@@ -327,11 +327,34 @@ class TestNegativePricePreparation:
 
     def test_makes_room_even_with_no_export_tariff(self):
         """With export worth nothing, dumping charge earns nothing -- but the
-        headroom it buys is still worth more than the energy thrown away."""
+        headroom it buys is still worth more than the energy given away.
+
+        The surplus leaves as unpaid export, not curtailment: you can turn an
+        array down, but battery discharge has to go somewhere.
+        """
         grid = make_grid(allow_export=False)
         plan = optimise(self._horizon(0.0), 90.0, make_battery(), grid)
         assert plan.slots[5].soc_end < 75.0
-        assert sum(s.curtailed_kwh for s in plan.slots) > 0.5
+        assert sum(s.grid_export_kwh for s in plan.slots) > 0.5
+        # No PV in this horizon, so nothing is curtailable and nothing should be
+        # reported as curtailed.
+        assert sum(s.curtailed_kwh for s in plan.slots) == pytest.approx(0.0)
+        # And it earns nothing for that export.
+        assert all(s.export_price == 0.0 for s in plan.slots)
+
+    def test_free_export_respects_the_connection_limit(self):
+        """Regression: with export earning nothing the limit was not applied at
+        all, so the plan could push 5.6 kW out of a 3.68 kW connection. The
+        inverter would clamp it and the planned SoC would never be reached."""
+        prices = [-20.0] * 8
+        slots = build_slots(prices, export=[0.0] * 8, load=0.3, pv=0.0)
+        grid = make_grid(export_limit_kw=1.0, allow_export=False)
+        plan = optimise(slots, 90.0, make_battery(), grid)
+        for slot in plan.slots:
+            # 1 kW for half an hour is 0.5 kWh of deliverable export.
+            assert slot.grid_export_kwh <= 0.5 + 1e-6
+            # Discharge cannot exceed what the house takes plus what can leave.
+            assert slot.discharge_ac_kwh <= slot.load_kwh + 0.5 + 1e-6
 
     def test_pre_emptive_dump_is_labelled_discharge_not_self_use(self):
         """Regression: discharging beyond the household load was labelled
@@ -397,10 +420,11 @@ class TestTerminalValueClamp:
         cheap_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=2.0), grid)
         dear_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=8.0), grid)
 
-        # 2p/kWh wear against an 8p/kWh reward: worth cycling for.
-        assert sum(s.curtailed_kwh for s in cheap_wear.slots) > 1.0
+        # 2p/kWh wear against an 8p/kWh reward: worth cycling for. The dumped
+        # energy leaves as unpaid export.
+        assert sum(s.grid_export_kwh for s in cheap_wear.slots) > 1.0
         # 8p/kWh wear: no longer worth it, so it simply fills and holds.
-        assert sum(s.curtailed_kwh for s in dear_wear.slots) == pytest.approx(0.0)
+        assert sum(s.grid_export_kwh for s in dear_wear.slots) == pytest.approx(0.0)
         # Either way it ends full, because import is being paid for.
         assert dear_wear.slots[-1].soc_end > 90.0
 

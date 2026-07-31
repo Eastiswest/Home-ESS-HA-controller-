@@ -89,17 +89,32 @@ without any special-case code, because emptying the battery beforehand is simply
 the cheapest path through the horizon:
 
 - It **discharges ahead of the window** to make room — into the house, into
-  export if that pays, and if neither, it will spill surplus, because the
-  headroom is worth more than the kWh thrown away.
+  export if that pays, and if neither, it will export for nothing, because the
+  headroom is worth more than the kWh given away.
 - It **imports at full power throughout**, capped by your charge power and grid
   import limits.
 - It **ends the window full**, ready for the expensive evening.
 
 At a deeply negative price, dumping a kWh purely to re-import it is genuine
-arbitrage: it earns the negative rate and costs only wear. Whether that is worth
-doing is decided by the **battery wear allowance** — at 2p/kWh against an 8p/kWh
-negative price it cycles, at 8p/kWh it stops and simply fills up. That is the
-dial to reach for if it cycles harder than you would like.
+arbitrage even with **no export payment at all**: you give the kWh away, then get
+paid to take it back. It pays whenever
+
+```
+|negative import price|  >  wear allowance × charge efficiency
+```
+
+which at the 2p/kWh default and 95% efficiency is any price below about −1.9p —
+a low bar that Agile clears fairly often. At 8p/kWh wear it needs about −7.6p and
+so happens rarely. The **battery wear allowance** is therefore the dial that
+governs this entirely; set it to roughly *pack cost ÷ expected lifetime
+throughput* and the behaviour follows. Two things the linear wear model does not
+capture, which are reasons not to set it too low: depth-of-discharge effects, and
+that repeated deep cycling for a couple of pence is a poor trade on a pack you
+would rather keep.
+
+Note also that what leaves the property is capped by your **export limit**, and
+only *generation* can be curtailed — battery discharge has to go somewhere. So on
+a sunny day the array is turned down before the battery is asked to stop.
 
 One caveat worth knowing: **`Allow battery export` off roughly halves what you can
 capture**, because the battery can then only empty into the house, so it cannot

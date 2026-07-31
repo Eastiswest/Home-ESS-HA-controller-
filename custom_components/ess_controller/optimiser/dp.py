@@ -132,15 +132,38 @@ def _price_delta(
     grid_import = net if net > 0.0 else 0.0
     raw_export = -net if net < 0.0 else 0.0
 
-    if raw_export > 0.0 and grid.allow_export and slot.export_price > 0.0:
-        grid_export = min(raw_export, grid.export_limit_kw * hours)
-    else:
-        # No export tariff, export disabled, or a negative export price: the
-        # rational move is to spill rather than pay to give energy away.
-        grid_export = 0.0
-    curtailed = raw_export - grid_export
+    # Grid outflow is capped by the connection limit whether or not it earns
+    # anything, and only *generation* can be curtailed: turning the array down is
+    # possible, but battery discharge has to go somewhere. So the surplus a slot
+    # cannot deliver must be absorbable by backing off PV, or the transition is
+    # simply not achievable.
+    export_capacity = max(grid.export_limit_kw * hours, 0.0)
+    export_price = slot.export_price if grid.allow_export else 0.0
 
-    cost = grid_import * slot.import_price - grid_export * slot.export_price
+    if raw_export <= 0.0:
+        grid_export = 0.0
+        curtailed = 0.0
+    else:
+        if export_price < 0.0:
+            # Being charged to export: shed as much as the array allows and only
+            # deliver what cannot be shed.
+            curtailed = min(raw_export, pv)
+            grid_export = raw_export - curtailed
+        else:
+            # Earning, or earning nothing. Either way the energy leaves, up to
+            # the connection limit; the remainder has to come off the array.
+            grid_export = min(raw_export, export_capacity)
+            curtailed = raw_export - grid_export
+        if grid_export > export_capacity + EPS:
+            return None
+        if curtailed > pv + EPS:
+            # More surplus than the array could account for, which means the
+            # battery is being asked to discharge past the export limit.
+            return None
+
+    # A negative export price makes this a cost rather than revenue, which the
+    # sign handles on its own.
+    cost = grid_import * slot.import_price - grid_export * export_price
     # Wear allowance. Half is charged in each direction so that a full
     # round-trip of X kWh costs X * cycle_cost_per_kwh, which is how users
     # think about "cost per kWh cycled".
