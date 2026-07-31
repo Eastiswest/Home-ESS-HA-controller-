@@ -153,9 +153,17 @@ def _price_delta(
             else SlotAction.CHARGE
         )
     elif discharge_ac > EPS:
+        # Anything beyond the household's own shortfall needs a *forced*
+        # discharge, whether or not the surplus earns anything. Requiring
+        # grid_export here was a real bug: ahead of a negative-price window the
+        # plan legitimately dumps charge to make headroom, and with no export
+        # tariff that energy earns nothing -- so the slot was labelled self-use,
+        # the inverter was left in self-use mode, and it discharged only enough
+        # to cover the house. The headroom never materialised and the plan
+        # silently failed to do the one thing it had decided to do.
         action = (
             SlotAction.DISCHARGE
-            if grid_export > EPS and discharge_ac > deficit + EPS
+            if discharge_ac > deficit + EPS
             else SlotAction.SELF_USE
         )
     else:
@@ -179,14 +187,20 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
     because energy has no value once the horizon stops. Valuing the remainder
     at the horizon's mean import price is a neutral choice: it neither hoards
     nor dumps.
+
+    Clamped at zero. On a heavily negative day the horizon mean can itself go
+    negative, which would make stored energy a *liability* and drive the plan to
+    empty the pack at the horizon end for no reason. Energy in a battery is never
+    worth less than nothing: you are never obliged to pay to keep it.
     """
     if settings.terminal_mode == TERMINAL_MODE_ZERO:
         return 0.0
     if settings.terminal_mode == TERMINAL_MODE_FIXED:
-        return settings.terminal_rate
+        return max(settings.terminal_rate, 0.0)
     if not slots:
         return 0.0
-    return sum(s.import_price for s in slots) / len(slots)
+    mean = sum(s.import_price for s in slots) / len(slots)
+    return max(mean, 0.0)
 
 
 def optimise(
@@ -258,6 +272,14 @@ def optimise(
                 if k < 0 or k > levels:
                     continue
                 candidate = cost + future[k]
+                # Strictly ``<``, which breaks exact ties towards the more
+                # discharged state. That is deliberate. At a flat price the
+                # terminal value of holding a kWh exactly equals the import it
+                # would avoid, so the two are a true tie -- and ``total_cost``
+                # excludes terminal value, so preferring to hold would report a
+                # cost worse than plain self-consumption while quietly banking
+                # energy. Any real preference for holding charge belongs in the
+                # wear allowance or the reserve, where the user can see it.
                 if candidate < best:
                     best = candidate
                     best_k = k

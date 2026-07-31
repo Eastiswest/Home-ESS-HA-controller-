@@ -301,3 +301,115 @@ class TestEdgeCases:
         plan = optimise(build_slots(prices, load=0.4), 30.0, make_battery(), make_grid())
         for previous, following in pairwise(plan.slots):
             assert previous.soc_end == pytest.approx(following.soc_start)
+
+
+class TestNegativePricePreparation:
+    """Ahead of a paid-to-import window the battery must make headroom, so it can
+    soak up as much as possible while being paid to take it."""
+
+    def _horizon(self, export_price: float = 0.0):
+        prices = [20.0] * 6 + [-10.0] * 4 + [30.0] * 6
+        return build_slots(prices, export=[export_price] * 16, load=0.3)
+
+    def test_discharges_before_a_negative_window(self):
+        plan = optimise(self._horizon(5.0), 90.0, make_battery(), make_grid())
+        entering = plan.slots[5].soc_end
+        # Started at 90%; must have made meaningful room.
+        assert entering < 75.0
+
+    def test_imports_hard_through_the_negative_window(self):
+        plan = optimise(self._horizon(5.0), 90.0, make_battery(), make_grid())
+        negative = [s for s in plan.slots if s.import_price < 0]
+        # 3.6 kW for four half-hours is 7.2 kWh of charging headroom used.
+        assert sum(s.charge_ac_kwh for s in negative) > 5.5
+        # And it earns money doing so.
+        assert sum(s.cost for s in negative) < 0
+
+    def test_makes_room_even_with_no_export_tariff(self):
+        """With export worth nothing, dumping charge earns nothing -- but the
+        headroom it buys is still worth more than the energy thrown away."""
+        grid = make_grid(allow_export=False)
+        plan = optimise(self._horizon(0.0), 90.0, make_battery(), grid)
+        assert plan.slots[5].soc_end < 75.0
+        assert sum(s.curtailed_kwh for s in plan.slots) > 0.5
+
+    def test_pre_emptive_dump_is_labelled_discharge_not_self_use(self):
+        """Regression: discharging beyond the household load was labelled
+        self-use whenever the surplus earned nothing, so the adapter left the
+        inverter in self-use mode and it only covered the house. The headroom
+        never appeared and the plan silently failed."""
+        grid = make_grid(allow_export=False)
+        plan = optimise(self._horizon(0.0), 90.0, make_battery(), grid)
+        dumping = [
+            s
+            for s in plan.slots
+            if s.discharge_ac_kwh > s.load_kwh + 1e-6 and s.import_price > 0
+        ]
+        assert dumping, "expected slots discharging beyond household load"
+        for slot in dumping:
+            assert slot.action is SlotAction.DISCHARGE
+
+    def test_ends_the_negative_window_full(self):
+        plan = optimise(self._horizon(5.0), 90.0, make_battery(), make_grid())
+        assert plan.slots[9].soc_end > 90.0
+
+    def test_battery_export_disabled_limits_the_headroom(self):
+        """Documented consequence: if the battery may not push to the grid it can
+        only empty into the house, so it captures far less."""
+        free = optimise(self._horizon(5.0), 90.0, make_battery(), make_grid())
+        restricted = optimise(
+            self._horizon(5.0),
+            90.0,
+            make_battery(),
+            make_grid(allow_battery_export=False),
+        )
+        negative_free = sum(s.charge_ac_kwh for s in free.slots if s.import_price < 0)
+        negative_restricted = sum(
+            s.charge_ac_kwh for s in restricted.slots if s.import_price < 0
+        )
+        assert negative_restricted < negative_free
+        assert restricted.slots[5].soc_end > free.slots[5].soc_end
+
+
+class TestTerminalValueClamp:
+    def test_negative_horizon_mean_does_not_make_energy_a_liability(self):
+        """Regression: an all-negative horizon gave a negative terminal rate, so
+        stored energy was penalised and the plan threw the pack away at the end.
+
+        Being paid to import should fill the battery; it should certainly not
+        end at the floor.
+        """
+        slots = build_slots([-8.0] * 16, load=0.3)
+        battery = make_battery(cycle_cost_per_kwh=2.0)
+        plan = optimise(slots, 60.0, battery, make_grid(allow_export=False))
+        assert plan.slots[-1].soc_end > 90.0
+        assert sum(s.charge_ac_kwh for s in plan.slots) > 3.0
+
+    def test_wear_allowance_governs_spill_to_reimport(self):
+        """At a deeply negative price, dumping a kWh to re-import it is real
+        arbitrage: it earns the negative rate and costs only wear. The wear
+        allowance is what decides whether that is worth doing, so it is the dial
+        to reach for if the plan cycles harder than you want.
+        """
+        slots = build_slots([-8.0] * 16, load=0.3)
+        grid = make_grid(allow_export=False)
+
+        cheap_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=2.0), grid)
+        dear_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=8.0), grid)
+
+        # 2p/kWh wear against an 8p/kWh reward: worth cycling for.
+        assert sum(s.curtailed_kwh for s in cheap_wear.slots) > 1.0
+        # 8p/kWh wear: no longer worth it, so it simply fills and holds.
+        assert sum(s.curtailed_kwh for s in dear_wear.slots) == pytest.approx(0.0)
+        # Either way it ends full, because import is being paid for.
+        assert dear_wear.slots[-1].soc_end > 90.0
+
+    def test_negative_fixed_terminal_rate_clamped(self):
+        """A negative rate would penalise holding charge, making the plan pay
+        wear costs to empty the pack for no gain. Clamped, it simply holds."""
+        slots = build_slots([25.0] * 12, load=0.0)
+        settings = OptimiserSettings(terminal_mode="fixed", terminal_rate=-50.0)
+        battery = make_battery(cycle_cost_per_kwh=2.0)
+        plan = optimise(slots, 70.0, battery, make_grid(allow_export=False), settings)
+        assert plan.slots[-1].soc_end >= 70.0 - 2.0
+        assert sum(s.curtailed_kwh for s in plan.slots) == pytest.approx(0.0)

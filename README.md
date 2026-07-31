@@ -81,6 +81,30 @@ a broader one, then to a sensible default — so the plans are reasonable on day
 one and sharpen over a few weeks. The `Learning progress` sensor tells you where
 you are; expect roughly two weeks to settle.
 
+### Negative prices
+
+Agile goes negative often enough to matter, and being paid to import is only
+worth as much as the headroom you have to absorb it. The optimiser handles this
+without any special-case code, because emptying the battery beforehand is simply
+the cheapest path through the horizon:
+
+- It **discharges ahead of the window** to make room — into the house, into
+  export if that pays, and if neither, it will spill surplus, because the
+  headroom is worth more than the kWh thrown away.
+- It **imports at full power throughout**, capped by your charge power and grid
+  import limits.
+- It **ends the window full**, ready for the expensive evening.
+
+At a deeply negative price, dumping a kWh purely to re-import it is genuine
+arbitrage: it earns the negative rate and costs only wear. Whether that is worth
+doing is decided by the **battery wear allowance** — at 2p/kWh against an 8p/kWh
+negative price it cycles, at 8p/kWh it stops and simply fills up. That is the
+dial to reach for if it cycles harder than you would like.
+
+One caveat worth knowing: **`Allow battery export` off roughly halves what you can
+capture**, because the battery can then only empty into the house, so it cannot
+make much headroom before the window arrives.
+
 ### Grid incentive sessions
 
 Two Octopus schemes are worth real money, and both are handled by repricing the
