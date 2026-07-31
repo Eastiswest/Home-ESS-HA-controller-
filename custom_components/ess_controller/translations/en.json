@@ -171,13 +171,15 @@
       },
       "shifting": {
         "title": "Flexible loads",
-        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them. Expose the schedule with the 'Flexible load scheduled now' sensor and drive your switches from it.",
+        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them.\n\nNo smart appliances needed: leave the switch entity off a load and it is scheduled and published as advice, which you read off the 'Scheduled flexible loads' sensor and act on yourself. Give a load a switch entity and it can be driven automatically instead.",
         "data": {
           "shifting_enabled": "Schedule flexible loads",
-          "shiftable_loads": "Load definitions"
+          "shiftable_loads": "Load definitions",
+          "appliance_control": "Switch appliances automatically"
         },
         "data_description": {
-          "shiftable_loads": "Semicolon separated, e.g. Dishwasher=1.2kWh@2kW,22:00-06:00; Immersion=3kWh@3kW. The time window is optional and may wrap midnight."
+          "shiftable_loads": "One per line: Dishwasher=1.2kWh@2kW,22:00-06:00 -- name, energy, power and the local window it must run inside. Add a third field to have it switched for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion.",
+          "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
         }
       },
       "recommend": {
@@ -383,13 +385,15 @@
       },
       "shifting": {
         "title": "Flexible loads",
-        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them. Expose the schedule with the 'Flexible load scheduled now' sensor and drive your switches from it.",
+        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them.\n\nNo smart appliances needed: leave the switch entity off a load and it is scheduled and published as advice, which you read off the 'Scheduled flexible loads' sensor and act on yourself. Give a load a switch entity and it can be driven automatically instead.",
         "data": {
           "shifting_enabled": "Schedule flexible loads",
-          "shiftable_loads": "Load definitions"
+          "shiftable_loads": "Load definitions",
+          "appliance_control": "Switch appliances automatically"
         },
         "data_description": {
-          "shiftable_loads": "Semicolon separated, e.g. Dishwasher=1.2kWh@2kW,22:00-06:00; Immersion=3kWh@3kW. The time window is optional and may wrap midnight."
+          "shiftable_loads": "One per line: Dishwasher=1.2kWh@2kW,22:00-06:00 -- name, energy, power and the local window it must run inside. Add a third field to have it switched for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion.",
+          "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
         }
       },
       "recommend": {
@@ -620,6 +624,9 @@
       },
       "derive_wear_from_cost": {
         "name": "Derive wear from battery cost"
+      },
+      "appliance_control": {
+        "name": "Switch appliances"
       }
     },
     "number": {

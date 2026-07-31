@@ -53,12 +53,26 @@ class ShiftableLoad:
     enabled: bool = True
     must_run_daily: bool = True
     """Whether it needs to run every day, or only when explicitly requested."""
+    switch_entity: str | None = None
+    """Optional entity to switch on for the scheduled window.
+
+    Most people's dishwasher has a dial and a door, not an API, so this is
+    deliberately optional: with it empty the load is still scheduled and
+    published, and you read the time off the sensor and press the button
+    yourself. Fill it in only if the appliance (or the plug it is on) actually
+    appears in Home Assistant as something switchable.
+    """
 
     def __post_init__(self) -> None:
         if self.energy_kwh <= 0:
             raise ValueError(f"{self.name}: energy_kwh must be positive")
         if self.power_kw <= 0:
             raise ValueError(f"{self.name}: power_kw must be positive")
+        self.switch_entity = _clean_entity_id(self.switch_entity, self.name)
+
+    @property
+    def controllable(self) -> bool:
+        return self.switch_entity is not None
 
     @property
     def duration_hours(self) -> float:
@@ -73,6 +87,7 @@ class ShiftableLoad:
             "earliest": self.earliest.isoformat() if self.earliest else None,
             "latest": self.latest.isoformat() if self.latest else None,
             "enabled": self.enabled,
+            "switch": self.switch_entity,
         }
 
 
@@ -89,6 +104,8 @@ class LoadPlacement:
     """Estimated marginal cost of running here, in minor units."""
     best_alternative_cost: float | None = None
     """Cost of the most expensive feasible window, for showing the saving."""
+    switch_entity: str | None = None
+    """Carried through from the load, so the caller can drive it if it has one."""
 
     @property
     def saving_vs_worst(self) -> float | None:
@@ -117,6 +134,7 @@ class LoadPlacement:
                 if self.saving_vs_worst is not None
                 else None
             ),
+            "switch": self.switch_entity,
         }
 
 
@@ -274,6 +292,7 @@ def place_load(
         power_kw=load.power_kw,
         cost=cost,
         best_alternative_cost=dearest[0],
+        switch_entity=load.switch_entity,
     )
 
 
@@ -355,7 +374,14 @@ def parse_shiftable_loads(raw: Any) -> list[ShiftableLoad]:
 
     entries: list[Any]
     if isinstance(raw, str):
-        entries = [chunk.strip() for chunk in raw.split(";") if chunk.strip()]
+        # The config flow offers a multiline box, so a newline is the separator
+        # people actually reach for; semicolons stay supported for one-liners.
+        entries = [
+            chunk.strip()
+            for line in raw.splitlines()
+            for chunk in line.split(";")
+            if chunk.strip()
+        ]
     elif isinstance(raw, list):
         entries = raw
     else:
@@ -381,17 +407,23 @@ def _parse_mapping(entry: Any) -> ShiftableLoad:
         latest=_parse_time(entry.get("latest")),
         enabled=bool(entry.get("enabled", True)),
         must_run_daily=bool(entry.get("must_run_daily", True)),
+        switch_entity=entry.get("switch") or entry.get("switch_entity"),
     )
 
 
 def _parse_compact(text: str) -> ShiftableLoad:
+    """Parse ``Dishwasher=1.2kWh@2kW,22:00-06:00,switch.dishwasher``.
+
+    Both trailing fields are optional, and an empty window may be left in place
+    to reach the switch: ``Dishwasher=1.2kWh@2kW,,switch.dishwasher``.
+    """
     name, _, rest = text.partition("=")
-    spec, _, window = rest.partition(",")
+    spec, window, switch = (part.strip() for part in _three_fields(rest))
     energy_text, _, power_text = spec.partition("@")
     energy = float(energy_text.strip().lower().removesuffix("kwh"))
     power = float(power_text.strip().lower().removesuffix("kw"))
     earliest = latest = None
-    if window.strip():
+    if window:
         start_text, _, end_text = window.partition("-")
         earliest = _parse_time(start_text)
         latest = _parse_time(end_text)
@@ -401,7 +433,37 @@ def _parse_compact(text: str) -> ShiftableLoad:
         power_kw=power,
         earliest=earliest,
         latest=latest,
+        switch_entity=switch or None,
     )
+
+
+def _three_fields(text: str) -> tuple[str, str, str]:
+    parts = text.split(",", 2)
+    parts += [""] * (3 - len(parts))
+    return parts[0], parts[1], parts[2]
+
+
+def _clean_entity_id(value: Any, load_name: str) -> str | None:
+    """Validate an optional entity id, warning rather than failing.
+
+    A typo here should cost the user their appliance automation, not their whole
+    load definition -- the placement is still worth publishing so they can run
+    the thing by hand.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    domain, _, object_id = text.partition(".")
+    if not domain or not object_id or "." in object_id:
+        _LOGGER.warning(
+            "%s: %r is not an entity id, so the load will be advisory only",
+            load_name,
+            value,
+        )
+        return None
+    return text
 
 
 def _parse_time(value: Any) -> time | None:
@@ -434,6 +496,54 @@ def describe_placements(placements: list[LoadPlacement]) -> str:
 
 def total_shifted_energy(placements: list[LoadPlacement]) -> float:
     return math.fsum(p.energy_kwh for p in placements)
+
+
+def next_placement(
+    placements: list[LoadPlacement], moment: datetime
+) -> LoadPlacement | None:
+    """The next placement due to start, ignoring any already under way."""
+    upcoming = [p for p in placements if p.start > moment]
+    return min(upcoming, key=lambda p: p.start) if upcoming else None
+
+
+def schedule_advice(placements: list[LoadPlacement], moment: datetime, to_local) -> str:
+    """Plain-language instruction for a load you have to start yourself.
+
+    This is the whole feature for anyone without smart appliances: the schedule
+    is worth just as much read off a dashboard and acted on by hand.
+    """
+    if not placements:
+        return "nothing scheduled"
+
+    running = sorted((p for p in placements if p.running_at(moment)), key=lambda p: p.end)
+    if running:
+        names = ", ".join(p.name for p in running)
+        until = to_local(max(p.end for p in running)).strftime("%H:%M")
+        return f"run {names} now, until {until}"
+
+    upcoming = next_placement(placements, moment)
+    if upcoming is None:
+        return "all scheduled loads have finished"
+    start = to_local(upcoming.start)
+    return f"start {upcoming.name} at {start.strftime('%H:%M')}"
+
+
+def appliance_targets(
+    placements: list[LoadPlacement], moment: datetime
+) -> dict[str, bool]:
+    """Desired on/off state at ``moment`` for each placement that has a switch.
+
+    Two loads may legitimately share one switch -- a single smart plug feeding a
+    machine that runs two cycles -- so the states are OR'ed rather than the last
+    one winning.
+    """
+    targets: dict[str, bool] = {}
+    for placement in placements:
+        entity_id = placement.switch_entity
+        if not entity_id:
+            continue
+        targets[entity_id] = targets.get(entity_id, False) or placement.running_at(moment)
+    return targets
 
 
 def cheapest_action_for(plan: Plan | None, moment: datetime) -> SlotAction | None:

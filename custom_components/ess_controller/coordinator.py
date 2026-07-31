@@ -145,6 +145,7 @@ from .sampling import SlotAccumulator, slot_boundaries
 from .shifting import (
     LoadPlacement,
     add_placements_to_slots,
+    appliance_targets,
     describe_placements,
     parse_shiftable_loads,
     place_loads,
@@ -200,6 +201,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.adjustment_result: AdjustmentResult | None = None
         self.outage: outage_mod.OutageAssessment = outage_mod.OutageAssessment()
         self.placements: list[LoadPlacement] = []
+        self._appliance_until: dict[str, datetime] = {}
+        self._appliance_notes: list[str] = []
         self.recommendation = None
         self._raw_import_prices = PriceSeries()
 
@@ -393,6 +396,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             await self._async_shift_loads(now, slots, site.soc)
 
+        await self._async_drive_appliances(now)
+
         command = self._resolve_command(now)
         if command is not None:
             self.last_command = command
@@ -429,6 +434,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dry_run=not self.settings.may_write,
             verify=False,
         )
+        await self._async_drive_appliances(now)
 
     # ------------------------------------------------------------------
     # Live readings
@@ -858,6 +864,105 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.plan.reason = (
                 f"{self.plan.reason} {describe_placements(self.placements)}."
             )
+
+    # ------------------------------------------------------------------
+    # Appliance switching
+    # ------------------------------------------------------------------
+
+    async def _async_drive_appliances(self, now: datetime) -> None:
+        """Switch scheduled appliances that have a switch to drive.
+
+        Optional by design. Most flexible loads are a dishwasher with a dial and
+        an immersion on a timer, and for those the schedule is the whole product:
+        it is published, you read it, you press the button. A load only gets
+        switched if you gave it an entity *and* armed appliance control.
+
+        Two rules keep this from fighting either the appliance or the plan:
+
+        * Only ever switch off what this integration switched on. A machine you
+          started yourself is none of its business.
+        * Once a load has been energised, its finish time is committed and a
+          later re-plan cannot move it. Without that, a plan that keeps finding
+          a slightly cheaper window later would switch a running dishwasher off
+          and on again every cycle.
+        """
+        self._appliance_notes = []
+        settings = self.settings
+
+        # Anything whose committed window has ended, or that can no longer be
+        # managed, goes back off -- gated on may_write like the inverter release,
+        # so dry run really means no writes at all.
+        expired = [
+            entity_id
+            for entity_id, until in self._appliance_until.items()
+            if now >= until or not settings.may_switch_appliances
+        ]
+        for entity_id in sorted(expired):
+            if not settings.may_write:
+                _LOGGER.warning(
+                    "Cannot switch %s off while in advisory mode; leaving it on",
+                    entity_id,
+                )
+                self._appliance_notes.append(f"{entity_id}: left on (advisory mode)")
+                continue
+            if await self._async_switch_appliance(entity_id, turn_on=False):
+                self._appliance_until.pop(entity_id, None)
+
+        if not settings.may_switch_appliances:
+            return
+
+        for entity_id, should_run in sorted(
+            appliance_targets(self.placements, now).items()
+        ):
+            if not should_run or entity_id in self._appliance_until:
+                continue
+            end = max(
+                (p.end for p in self.placements if p.switch_entity == entity_id),
+                default=None,
+            )
+            if end is None:
+                continue
+            if await self._async_switch_appliance(entity_id, turn_on=True):
+                self._appliance_until[entity_id] = end
+
+    async def _async_switch_appliance(self, entity_id: str, *, turn_on: bool) -> bool:
+        """Call turn_on/turn_off, returning whether it was actually sent."""
+        if self.hass.states.get(entity_id) is None:
+            _LOGGER.warning("Flexible load points at %s, which does not exist", entity_id)
+            self._appliance_notes.append(f"{entity_id}: no such entity")
+            return False
+        service = "turn_on" if turn_on else "turn_off"
+        try:
+            # The homeassistant.* services rather than switch.*, so a load can
+            # point at an input_boolean, a script or a climate entity just as
+            # happily as a smart plug.
+            await self.hass.services.async_call(
+                "homeassistant",
+                service,
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.warning("Could not %s %s: %s", service, entity_id, err)
+            self._appliance_notes.append(f"{entity_id}: {err}")
+            return False
+        _LOGGER.info("Flexible load: %s %s", service, entity_id)
+        return True
+
+    def appliance_status(self, now: datetime) -> dict[str, Any]:
+        """What appliance switching is doing, for entity attributes."""
+        with_switch = [p for p in self.placements if p.switch_entity]
+        return {
+            "armed": self.settings.may_switch_appliances,
+            "switchable": [p.name for p in with_switch],
+            "advisory_only": [p.name for p in self.placements if not p.switch_entity],
+            "switched_on": sorted(self._appliance_until),
+            "until": {
+                entity_id: until.isoformat()
+                for entity_id, until in sorted(self._appliance_until.items())
+            },
+            "problems": list(self._appliance_notes),
+        }
 
     async def async_recommend_tariffs(self) -> Any:
         """Score candidate tariffs against this system's learned profile.

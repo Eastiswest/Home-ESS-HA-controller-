@@ -126,6 +126,7 @@ CONF_OUTAGE_LOOKAHEAD_HOURS: Final = "outage_lookahead_hours"
 # Flexible load shifting
 CONF_SHIFTING_ENABLED: Final = "shifting_enabled"
 CONF_SHIFTABLE_LOADS: Final = "shiftable_loads"
+CONF_APPLIANCE_CONTROL: Final = "appliance_control"
 
 # Tariff recommendations
 CONF_RECOMMEND_ENABLED: Final = "recommend_enabled"

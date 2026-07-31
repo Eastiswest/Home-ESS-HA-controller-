@@ -29,6 +29,7 @@ from .const import (
     CONF_ALLOW_BATTERY_EXPORT,
     CONF_ALLOW_EXPORT,
     CONF_ALLOW_GRID_CHARGE,
+    CONF_APPLIANCE_CONTROL,
     CONF_BATTERY_COST,
     CONF_BATTERY_EXPECTED_CYCLES,
     CONF_BATTERY_MAX_SOC,
@@ -83,6 +84,13 @@ class RuntimeSettings:
     shifting_enabled: bool = False
     """Schedule flexible loads. Off by default: it only does something once
     loads have actually been defined."""
+    appliance_control: bool = False
+    """Switch scheduled appliances on and off, for the ones that can be.
+
+    Separate from :attr:`dry_run` and off by default, because scheduling a load
+    and actually energising it are different levels of trust -- and because most
+    appliances have no switch to drive, in which case this does nothing at all.
+    """
     outage_protection: bool = False
     """Hold extra charge back when an outage looks likely."""
 
@@ -189,6 +197,16 @@ class RuntimeSettings:
         """Whether the *plan* may be applied to the inverter right now."""
         return self.enabled and not self.dry_run
 
+    @property
+    def may_switch_appliances(self) -> bool:
+        """Whether scheduled appliances may actually be switched.
+
+        Requires the optimiser to be running, advisory mode to be off, shifting
+        to be on, and appliance control to be armed separately -- four gates,
+        because this one turns on real heating elements.
+        """
+        return self.controlling and self.shifting_enabled and self.appliance_control
+
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -239,6 +257,9 @@ class RuntimeSettings:
         self.dry_run = bool(options.get(CONF_DRY_RUN, self.dry_run))
         self.sessions_enabled = bool(
             options.get(CONF_SESSIONS_ENABLED, self.sessions_enabled)
+        )
+        self.appliance_control = bool(
+            options.get(CONF_APPLIANCE_CONTROL, self.appliance_control)
         )
         self.shifting_enabled = bool(
             options.get(CONF_SHIFTING_ENABLED, self.shifting_enabled)

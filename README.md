@@ -194,8 +194,31 @@ folded into the load forecast and the battery re-plans around them, so it
 pre-charges for the immersion heater rather than being surprised by it. Largest
 load is placed first, and the connection limit stops two of them stacking.
 
-Drive your actual switches from `binary_sensor.*_flexible_load_scheduled_now`, or
-read the per-load schedule from `sensor.*_scheduled_flexible_loads`.
+**No smart appliances required.** For most people the dishwasher has a dial and
+the immersion has a mechanical timer, so by default this feature is pure advice:
+the schedule is published and you act on it. `sensor.*_scheduled_flexible_loads`
+carries an `advice` attribute that says exactly that — `start Immersion at 03:00`,
+or `run Immersion now, until 04:00` — along with `next_load` and `next_start` for
+templating, and the full per-load schedule in `placements`. A dashboard card and a
+phone notification off that attribute is the whole workflow.
+
+If an appliance *is* switchable from Home Assistant — a smart plug, a relay, an
+`input_boolean` feeding your own automation, a `script` — add its entity as a
+third field and the schedule can be driven for you:
+
+```
+Dishwasher=1.2kWh@2kW,22:00-06:00
+Immersion=3kWh@3kW,00:00-07:00,switch.immersion
+```
+
+Switching is armed separately from inverter control, with the `Switch appliances`
+switch, and needs advisory mode off as well. Two rules keep it well-behaved: it
+only ever switches off something it switched on, so a machine you started
+yourself is left alone; and once a load has been energised its finish time is
+committed, so a re-plan that finds a marginally cheaper window later cannot
+switch a running dishwasher off again. Loads with no entity stay advisory even
+with the switch armed, and `binary_sensor.*_flexible_load_scheduled_now` works
+either way.
 
 ### Power cut anticipation
 
@@ -441,7 +464,8 @@ ApexCharts card directly.
 
 **Controls** — `Optimiser enabled`, `Inverter control`, `Allow grid charging`,
 `Allow export`, `Allow battery export`, `Act on grid sessions`,
-`Shift flexible loads`, `Outage protection`; numbers for the SoC window, power limits,
+`Shift flexible loads`, `Switch appliances`, `Outage protection`; numbers for the
+SoC window, power limits,
 wear allowance, typical daily load and the heating/cooling sensitivities; a
 `Strategy` select; and buttons to re-plan, clear an override or reset learning.
 

@@ -31,6 +31,7 @@ from .const import (
     CONF_ALLOW_BATTERY_EXPORT,
     CONF_ALLOW_EXPORT,
     CONF_ALLOW_GRID_CHARGE,
+    CONF_APPLIANCE_CONTROL,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_CAPACITY_ENTITY,
     CONF_BATTERY_COST,
@@ -492,6 +493,9 @@ class EssFlowMixin:
                 _suggest(current, CONF_SHIFTABLE_LOADS, None): selector.TextSelector(
                     selector.TextSelectorConfig(multiline=True)
                 ),
+                _suggest(current, CONF_APPLIANCE_CONTROL, False): (
+                    selector.BooleanSelector()
+                ),
             }
         )
 
@@ -922,6 +926,9 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
             # A cleared load list must actually clear, so this field bypasses the
             # empty-means-unset rule that protects the other optional fields.
             self.current[CONF_SHIFTABLE_LOADS] = user_input.get(CONF_SHIFTABLE_LOADS, "")
+            self.current[CONF_APPLIANCE_CONTROL] = bool(
+                user_input.get(CONF_APPLIANCE_CONTROL, False)
+            )
             self.current[CONF_SHIFTING_ENABLED] = bool(
                 user_input.get(CONF_SHIFTING_ENABLED, False)
             )

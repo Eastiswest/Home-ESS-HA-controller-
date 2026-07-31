@@ -54,6 +54,30 @@ class TestDefaults:
         assert RuntimeSettings(enabled=True, dry_run=True).may_write is False
         assert RuntimeSettings(enabled=False, dry_run=True).may_write is False
 
+    def test_appliance_switching_is_off_by_default(self):
+        """Scheduling a load and energising it are separate levels of trust."""
+        settings = RuntimeSettings(enabled=True, dry_run=False, shifting_enabled=True)
+        assert settings.controlling is True
+        assert settings.appliance_control is False
+        assert settings.may_switch_appliances is False
+
+    def test_appliance_switching_needs_all_four_gates(self):
+        armed = {
+            "enabled": True,
+            "dry_run": False,
+            "shifting_enabled": True,
+            "appliance_control": True,
+        }
+        assert RuntimeSettings(**armed).may_switch_appliances is True
+        for gate, disarmed in (
+            ("enabled", False),
+            ("dry_run", True),
+            ("shifting_enabled", False),
+            ("appliance_control", False),
+        ):
+            settings = RuntimeSettings(**{**armed, gate: disarmed})
+            assert settings.may_switch_appliances is False, gate
+
 
 class TestSanitisation:
     def test_clamps_soc_into_range(self):

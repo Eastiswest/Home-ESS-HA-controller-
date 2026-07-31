@@ -154,6 +154,28 @@ FEATURE_SWITCHES: tuple[EssSwitchDescription, ...] = (
         },
     ),
     EssSwitchDescription(
+        key="appliance_control",
+        translation_key="appliance_control",
+        name="Switch appliances",
+        icon="mdi:washing-machine",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.appliance_control,
+        setter=lambda on: {"appliance_control": on},
+        attributes=lambda c: {
+            "description": (
+                "Switch a scheduled load on and off at its window, for loads you "
+                "gave a switch entity. Loads without one stay advisory: the "
+                "schedule is published and you start them yourself."
+            ),
+            "switchable_loads": sum(
+                1 for load in c.shiftable_loads() if load.controllable
+            ),
+            "advisory_loads": sum(
+                1 for load in c.shiftable_loads() if not load.controllable
+            ),
+        },
+    ),
+    EssSwitchDescription(
         key="outage_protection",
         translation_key="outage_protection",
         name="Outage protection",

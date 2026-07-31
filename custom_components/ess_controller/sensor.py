@@ -449,6 +449,10 @@ def _session_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
 
 
 def _shifted_loads_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    from .shifting import next_placement, schedule_advice
+
+    now = dt_util.utcnow()
+    upcoming = next_placement(coordinator.placements, now)
     return {
         "placements": [p.as_dict() for p in coordinator.placements],
         "defined": [load.as_dict() for load in coordinator.shiftable_loads()],
@@ -456,6 +460,12 @@ def _shifted_loads_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
         "total_saving": round(
             sum(p.saving_vs_worst or 0.0 for p in coordinator.placements), 2
         ),
+        # The advice line is what makes this useful without smart appliances:
+        # a plain instruction you can put on a dashboard and act on yourself.
+        "advice": schedule_advice(coordinator.placements, now, dt_util.as_local),
+        "next_load": upcoming.name if upcoming else None,
+        "next_start": upcoming.start.isoformat() if upcoming else None,
+        **coordinator.appliance_status(now),
     }
 
 

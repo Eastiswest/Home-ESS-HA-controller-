@@ -34,10 +34,13 @@ from custom_components.ess_controller.shifting import (
     LoadPlacement,
     ShiftableLoad,
     add_placements_to_slots,
+    appliance_targets,
     marginal_prices,
+    next_placement,
     parse_shiftable_loads,
     place_load,
     place_loads,
+    schedule_advice,
 )
 from custom_components.ess_controller.tariff.base import PriceSeries
 
@@ -747,6 +750,133 @@ class TestParseShiftableLoads:
             ShiftableLoad(name="x", energy_kwh=-1.0, power_kw=1.0)
         with pytest.raises(ValueError):
             ShiftableLoad(name="x", energy_kwh=1.0, power_kw=0.0)
+
+    def test_newlines_separate_entries(self):
+        """The config flow offers a multiline box, so newlines must work."""
+        loads = parse_shiftable_loads(
+            "Dishwasher=1.2kWh@2kW,22:00-06:00\nImmersion=3kWh@3kW\n\n"
+        )
+        assert [load.name for load in loads] == ["Dishwasher", "Immersion"]
+
+    def test_switch_entity_is_optional(self):
+        load = parse_shiftable_loads("Dishwasher=1.2kWh@2kW,22:00-06:00")[0]
+        assert load.switch_entity is None
+        assert load.controllable is False
+
+    def test_compact_form_accepts_a_switch(self):
+        load = parse_shiftable_loads("Immersion=3kWh@3kW,00:00-07:00,switch.immersion")[0]
+        assert load.switch_entity == "switch.immersion"
+        assert load.controllable is True
+        assert load.earliest == time(0, 0)
+
+    def test_switch_without_a_window(self):
+        load = parse_shiftable_loads("Immersion=3kWh@3kW,,switch.immersion")[0]
+        assert load.earliest is None
+        assert load.switch_entity == "switch.immersion"
+
+    def test_mapping_form_accepts_a_switch(self):
+        load = parse_shiftable_loads(
+            [{"name": "EV", "energy_kwh": 10.0, "power_kw": 7.0, "switch": "switch.ev"}]
+        )[0]
+        assert load.switch_entity == "switch.ev"
+
+    def test_a_bad_switch_leaves_the_load_advisory(self):
+        """A typo should cost the automation, not the whole load definition."""
+        load = parse_shiftable_loads("Immersion=3kWh@3kW,,not-an-entity")[0]
+        assert load.name == "Immersion"
+        assert load.switch_entity is None
+
+    def test_switch_is_carried_into_the_placement(self):
+        slots = horizon([30.0] * 4 + [5.0] * 4)
+        load = ShiftableLoad(
+            name="Immersion",
+            energy_kwh=3.0,
+            power_kw=3.0,
+            switch_entity="switch.immersion",
+        )
+        placement = place_load(load, slots, marginal_prices(slots, None), local)
+        assert placement is not None
+        assert placement.switch_entity == "switch.immersion"
+        assert placement.as_dict()["switch"] == "switch.immersion"
+
+
+class TestApplianceTargets:
+    """The pure decision the coordinator drives switches from."""
+
+    def _placement(self, name, hour, hours, switch):
+        return LoadPlacement(
+            name=name,
+            start=dt(hour),
+            end=dt(hour) + timedelta(hours=hours),
+            energy_kwh=1.0,
+            power_kw=1.0,
+            cost=0.0,
+            switch_entity=switch,
+        )
+
+    def test_load_without_a_switch_is_never_targeted(self):
+        placements = [self._placement("Dishwasher", 3, 1, None)]
+        assert appliance_targets(placements, dt(3, 30)) == {}
+
+    def test_on_inside_the_window_off_outside(self):
+        placements = [self._placement("Immersion", 3, 1, "switch.immersion")]
+        assert appliance_targets(placements, dt(2, 30)) == {"switch.immersion": False}
+        assert appliance_targets(placements, dt(3, 30)) == {"switch.immersion": True}
+        assert appliance_targets(placements, dt(4, 0)) == {"switch.immersion": False}
+
+    def test_two_loads_sharing_a_switch_are_ored(self):
+        """A single plug feeding two cycles must stay on for either of them."""
+        placements = [
+            self._placement("Cycle one", 1, 1, "switch.plug"),
+            self._placement("Cycle two", 5, 1, "switch.plug"),
+        ]
+        assert appliance_targets(placements, dt(5, 30)) == {"switch.plug": True}
+        assert appliance_targets(placements, dt(3, 0)) == {"switch.plug": False}
+
+    def test_mixed_switchable_and_manual(self):
+        placements = [
+            self._placement("Immersion", 3, 1, "switch.immersion"),
+            self._placement("Dishwasher", 3, 1, None),
+        ]
+        assert appliance_targets(placements, dt(3, 30)) == {"switch.immersion": True}
+
+
+class TestScheduleAdvice:
+    """What a user with no smart appliances actually reads."""
+
+    def _placement(self, name, hour, hours=1):
+        return LoadPlacement(
+            name=name,
+            start=dt(hour),
+            end=dt(hour) + timedelta(hours=hours),
+            energy_kwh=1.0,
+            power_kw=1.0,
+            cost=0.0,
+        )
+
+    def test_nothing_scheduled(self):
+        assert schedule_advice([], dt(3), local) == "nothing scheduled"
+
+    def test_names_the_next_start(self):
+        placements = [self._placement("Immersion", 3), self._placement("Dishwasher", 5)]
+        assert schedule_advice(placements, dt(1), local) == "start Immersion at 03:00"
+
+    def test_says_to_run_it_now_while_the_window_is_open(self):
+        placements = [self._placement("Immersion", 3)]
+        assert schedule_advice(placements, dt(3, 15), local) == (
+            "run Immersion now, until 04:00"
+        )
+
+    def test_after_the_last_window(self):
+        placements = [self._placement("Immersion", 3)]
+        assert schedule_advice(placements, dt(9), local) == (
+            "all scheduled loads have finished"
+        )
+
+    def test_next_placement_ignores_one_already_running(self):
+        placements = [self._placement("Immersion", 3), self._placement("Dishwasher", 5)]
+        upcoming = next_placement(placements, dt(3, 15))
+        assert upcoming is not None and upcoming.name == "Dishwasher"
 
 
 class TestOvernightWindow:
