@@ -26,6 +26,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAR_OVERRIDE,
+    SERVICE_EXPORT_PERFORMANCE,
     SERVICE_RECOMMEND_TARIFFS,
     SERVICE_REPLAN,
     SERVICE_RESET_LEARNING,
@@ -59,6 +60,19 @@ SET_OVERRIDE_SCHEMA = vol.Schema(
 )
 
 ENTRY_ONLY_SCHEMA = vol.Schema({vol.Optional("entry_id"): cv.string})
+
+EXPORT_FORMATS = ["summary", "slots", "csv"]
+
+EXPORT_PERFORMANCE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("entry_id"): cv.string,
+        vol.Optional("days", default=7): vol.All(
+            vol.Coerce(float), vol.Range(min=0.5, max=400)
+        ),
+        vol.Optional("format", default="summary"): vol.In(EXPORT_FORMATS),
+        vol.Optional("write_file", default=False): cv.boolean,
+    }
+)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -146,6 +160,31 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 results[coordinator.entry.entry_id] = recommendation.as_dict()
         return {"recommendations": results}
 
+    async def async_export_performance(call: ServiceCall) -> ServiceResponse:
+        """Return the performance history, and optionally write it to a file.
+
+        Response-only: the whole point is to get the numbers back out, whether
+        into a template, the Developer Tools output box, or a CSV to hand to
+        something that can read it.
+        """
+        days: float = call.data["days"]
+        fmt: str = call.data["format"]
+        write_file: bool = call.data["write_file"]
+        results: dict[str, Any] = {}
+        for coordinator in _coordinators(hass, call):
+            payload: dict[str, Any] = {
+                "days": days,
+                "summary": coordinator.performance_summary(days),
+            }
+            if fmt == "slots":
+                payload["slots"] = coordinator.performance_rows(days)
+            elif fmt == "csv":
+                payload["csv"] = coordinator.performance_csv(days)
+            if write_file:
+                payload["file"] = await coordinator.async_write_performance_csv(days)
+            results[coordinator.entry.entry_id] = payload
+        return {"controllers": results}
+
     hass.services.async_register(
         DOMAIN, SERVICE_REPLAN, async_replan, schema=ENTRY_ONLY_SCHEMA
     )
@@ -157,6 +196,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_LEARNING, async_reset_learning, schema=ENTRY_ONLY_SCHEMA
+    )
+    # Exists only to return data, so a response is mandatory rather than optional.
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EXPORT_PERFORMANCE,
+        async_export_performance,
+        schema=EXPORT_PERFORMANCE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     # Returns the ranked comparison, so it is a response-aware service.
     hass.services.async_register(

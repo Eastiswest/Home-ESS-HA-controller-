@@ -16,6 +16,7 @@ CPU-bound, and the event loop should not be blocked by arithmetic.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -57,6 +58,7 @@ from .const import (
     CONF_INVERTER_ADAPTER,
     CONF_INVERTER_PREFIX,
     CONF_LOAD_POWER_ENTITY,
+    CONF_LOG_RETENTION_DAYS,
     CONF_OCTOPUS_IMPORT_PRODUCT,
     CONF_OCTOPUS_REGION,
     CONF_ONLY_JOINED_SESSIONS,
@@ -87,6 +89,7 @@ from .const import (
     DEFAULT_GRID_EXPORT_LIMIT,
     DEFAULT_GRID_IMPORT_LIMIT,
     DEFAULT_HORIZON_HOURS,
+    DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
     DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
     DEFAULT_OUTAGE_RESERVE_SOC,
@@ -140,8 +143,10 @@ from .models import (
     SlotAction,
 )
 from .optimiser.dp import OptimiserSettings, optimise
+from .performance import PerformanceSummary, SelfUseShadow, SlotRecord, summarise
+from .performance_store import PerformanceStore
 from .runtime import RuntimeSettings, RuntimeStore
-from .sampling import SlotAccumulator, slot_boundaries
+from .sampling import SlotAccumulator, slot_boundaries, slot_start_for
 from .shifting import (
     LoadPlacement,
     add_placements_to_slots,
@@ -176,6 +181,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.entry = entry
         self.learning_store = LearningStore(hass, entry.entry_id)
         self.runtime_store = RuntimeStore(hass, entry.entry_id)
+        self.performance_store = PerformanceStore(hass, entry.entry_id)
         self.settings: RuntimeSettings = RuntimeSettings()
         self.accumulator = SlotAccumulator()
 
@@ -201,6 +207,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.adjustment_result: AdjustmentResult | None = None
         self.outage: outage_mod.OutageAssessment = outage_mod.OutageAssessment()
         self.placements: list[LoadPlacement] = []
+        self._slot_marks: dict[datetime, dict[str, Any]] = {}
+        self._report_cache: dict[float, PerformanceSummary] = {}
         self._appliance_until: dict[str, datetime] = {}
         self._appliance_notes: list[str] = []
         self.recommendation = None
@@ -220,6 +228,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Load persisted state and build the adapters."""
         await self.learning_store.async_load()
         self.settings = await self.runtime_store.async_load(self.options)
+        await self.performance_store.async_load(
+            int(self.options.get(CONF_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS))
+        )
         self._build_adapters()
         self._build_tariffs()
 
@@ -373,6 +384,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.settings.strategy == STRATEGY_OFF or not self.settings.enabled:
             # Hand the inverter back to its own logic and stop planning.
             await self._async_release(now)
+            self._note_slot_state(now, site)
             return self._build_data(now, site)
 
         await self._async_refresh_forecasts(now)
@@ -409,6 +421,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.last_apply.writes:
                 _LOGGER.info("%s: %s", command.action.value, self.last_apply.summary())
 
+        self._note_slot_state(now, site)
         return self._build_data(now, site)
 
     async def _async_release(self, now: datetime) -> None:
@@ -466,6 +479,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             pv_power_kw=pv or 0.0,
             load_power_kw=load or 0.0,
             grid_power_kw=grid or 0.0,
+            grid_valid=grid is not None,
             battery_power_kw=self.battery.power_kw or 0.0,
             battery_capacity_kwh=self.battery.capacity_kwh,
             battery_soh=self.battery.soh,
@@ -503,7 +517,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             temperature=site.outdoor_temperature,
             forecast_kwh=forecast_kwh,
             uv_index=uv_index,
+            grid_power_kw=site.grid_power_kw if site.grid_valid else None,
         )
+        self._record_completed(completed)
 
         model = self.learning_store.model
         for slot in completed:
@@ -540,6 +556,166 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         if completed:
             self.learning_store.async_schedule_save()
+
+    # ------------------------------------------------------------------
+    # Performance history
+    # ------------------------------------------------------------------
+
+    def _note_slot_state(self, now: datetime, site: SiteState) -> None:
+        """Stamp what is true right now against the slot it belongs to.
+
+        Called at the end of the cycle, once the plan has been resolved and
+        applied, so the marks describe a decision that was actually made rather
+        than one still being computed. The measured energy arrives later, when
+        the accumulator closes the slot.
+        """
+        slot_start = slot_start_for(now)
+        mark = self._slot_marks.setdefault(slot_start, {})
+        mark.setdefault("soc_start", site.soc if site.soc_valid else None)
+        if site.soc_valid:
+            mark["soc_end"] = site.soc
+        mark["import_price"] = self._import_prices.price_at(slot_start)
+        mark["export_price"] = self._export_prices.price_at(slot_start)
+        mark["controlling"] = self.settings.controlling
+        planned = self.plan.slot_at(now) if self.plan else None
+        if planned is not None:
+            mark["planned_action"] = planned.action.value
+        if self.last_command is not None:
+            mark["applied_action"] = self.last_command.action.value
+
+        # Capture forecasts for slots that have not started yet, so the error
+        # measured later is against a genuine prediction rather than hindsight.
+        # Overwriting each cycle leaves the freshest forecast made before the
+        # slot began, which is the one the decision was actually taken on.
+        if self.plan is not None:
+            for slot in self.plan.slots[:6]:
+                if slot.start <= slot_start or slot.start != slot_start_for(slot.start):
+                    continue
+                future = self._slot_marks.setdefault(slot.start, {})
+                future["pv_forecast_kwh"] = slot.pv_kwh
+                future["load_forecast_kwh"] = slot.load_kwh
+
+        # Marks are only needed until their slot closes; a few hours is ample.
+        cutoff = slot_start - timedelta(hours=4)
+        for start in [s for s in self._slot_marks if s < cutoff]:
+            self._slot_marks.pop(start, None)
+
+    def _record_completed(self, completed: list[Any]) -> None:
+        """Turn closed half-hours into performance records."""
+        if not completed:
+            return
+        capacity = self.nominal_capacity_kwh()
+        for slot in completed:
+            mark = self._slot_marks.pop(slot.start, {})
+            # A slot that closed without ever being marked -- the first slot
+            # after a restart -- would otherwise be recorded at a price of zero
+            # and quietly report having cost nothing. The series still covers a
+            # half-hour just gone, so ask it.
+            import_price = mark.get("import_price")
+            if import_price is None:
+                import_price = self._import_prices.price_at(slot.start)
+            export_price = mark.get("export_price")
+            if export_price is None:
+                export_price = self._export_prices.price_at(slot.start)
+            record = SlotRecord(
+                start=slot.start,
+                import_price=float(import_price or 0.0),
+                export_price=float(export_price or 0.0),
+                pv_kwh=slot.pv_kwh,
+                load_kwh=slot.load_kwh,
+                grid_import_kwh=slot.grid_import_kwh,
+                grid_export_kwh=slot.grid_export_kwh,
+                grid_measured=slot.grid_measured,
+                coverage=slot.coverage,
+                pv_forecast_kwh=mark.get("pv_forecast_kwh"),
+                load_forecast_kwh=mark.get("load_forecast_kwh"),
+                soc_start=mark.get("soc_start"),
+                soc_end=mark.get("soc_end"),
+                planned_action=mark.get("planned_action"),
+                applied_action=mark.get("applied_action"),
+                controlling=bool(mark.get("controlling", False)),
+            )
+            # Battery flow from the SoC change rather than a power sensor: it is
+            # the one figure every inverter reports, and over a half-hour the
+            # quantisation matters far less than the missing sensor would.
+            start_soc, end_soc = record.soc_start, record.soc_end
+            if start_soc is not None and end_soc is not None and capacity > 0:
+                delta = (end_soc - start_soc) / 100.0 * capacity
+                if delta >= 0:
+                    record.battery_charge_kwh = delta
+                else:
+                    record.battery_discharge_kwh = -delta
+            self.performance_store.log.add(record)
+        self._report_cache = {}
+        self.performance_store.async_schedule_save()
+
+    def _self_use_shadow(self) -> SelfUseShadow:
+        """A self-use battery starting where the history does."""
+        battery = self.battery_spec()
+        records = self.performance_store.log.records
+        start_soc = next(
+            (r.soc_start for r in records if r.soc_start is not None), battery.min_soc
+        )
+        return SelfUseShadow(
+            soc=start_soc,
+            capacity_kwh=battery.capacity_kwh,
+            min_soc=battery.min_soc,
+            max_soc=battery.max_soc,
+            max_charge_kw=self.settings.max_charge_kw,
+            max_discharge_kw=self.settings.max_discharge_kw,
+            charge_efficiency=battery.charge_efficiency,
+            discharge_efficiency=battery.discharge_efficiency,
+        )
+
+    def performance_report(self, days: float = 7.0) -> PerformanceSummary:
+        """The metrics for a window, as an object entities can read fields off.
+
+        Memoised until the next slot is recorded: the self-use shadow replays
+        every record in the window, and several entities and the diagnostics
+        download all ask for the same window on the same refresh.
+        """
+        if (cached := self._report_cache.get(days)) is not None:
+            return cached
+        records = self.performance_store.log.window(days)
+        report = summarise(
+            records,
+            cycle_cost=self.wear_estimate().cycle_cost,
+            usable_kwh=self.usable_kwh(),
+            shadow=self._self_use_shadow() if records else None,
+        )
+        self._report_cache[days] = report
+        return report
+
+    def performance_summary(self, days: float = 7.0) -> dict[str, Any]:
+        return self.performance_report(days).as_dict()
+
+    def performance_rows(self, days: float = 7.0) -> list[dict[str, Any]]:
+        return [r.as_dict() for r in self.performance_store.log.window(days)]
+
+    def performance_csv(self, days: float = 7.0) -> str:
+        log = self.performance_store.log
+        return log.to_csv(log.window(days))
+
+    async def async_write_performance_csv(self, days: float = 7.0) -> str:
+        """Write the CSV under the config directory and return its path."""
+        directory = self.hass.config.path(DOMAIN)
+        filename = f"performance_{self.entry.entry_id[:8]}.csv"
+        path = f"{directory}/{filename}"
+        payload = self.performance_csv(days)
+
+        def _write() -> None:
+            os.makedirs(directory, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+
+        await self.hass.async_add_executor_job(_write)
+        _LOGGER.info("Wrote %d days of performance history to %s", days, path)
+        return path
+
+    async def async_clear_performance(self) -> None:
+        await self.performance_store.async_clear()
+        self._slot_marks = {}
+        self._report_cache = {}
 
     # ------------------------------------------------------------------
     # Forward inputs
@@ -1222,6 +1398,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 setattr(self.settings, key, value)
         self.settings.sanitised()
         self.runtime_store.async_schedule_save()
+        # The wear allowance feeds the performance report, so a change to it
+        # must not be masked by a cached summary until the next slot closes.
+        self._report_cache = {}
         # A permission or limit change can alter the correct action right now.
         self._adapter.reset_last_applied()
         await self.async_request_refresh()
@@ -1229,6 +1408,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_shutdown_store(self) -> None:
         await self.learning_store.async_save()
         await self.runtime_store.async_save()
+        await self.performance_store.async_save()
 
     # ------------------------------------------------------------------
     # Data for entities

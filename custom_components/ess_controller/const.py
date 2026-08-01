@@ -128,6 +128,10 @@ CONF_SHIFTING_ENABLED: Final = "shifting_enabled"
 CONF_SHIFTABLE_LOADS: Final = "shiftable_loads"
 CONF_APPLIANCE_CONTROL: Final = "appliance_control"
 
+# Performance history
+CONF_LOG_RETENTION_DAYS: Final = "log_retention_days"
+DEFAULT_LOG_RETENTION_DAYS: Final = 60
+
 # Tariff recommendations
 CONF_RECOMMEND_ENABLED: Final = "recommend_enabled"
 CONF_RECOMMEND_IMPORT_PRODUCTS: Final = "recommend_import_products"
@@ -251,6 +255,7 @@ SERVICE_CLEAR_OVERRIDE: Final = "clear_override"
 SERVICE_RESET_LEARNING: Final = "reset_learning"
 SERVICE_LEARN_FROM_HISTORY: Final = "learn_from_history"
 SERVICE_RECOMMEND_TARIFFS: Final = "recommend_tariffs"
+SERVICE_EXPORT_PERFORMANCE: Final = "export_performance"
 
 ATTR_ACTION: Final = "action"
 ATTR_DURATION: Final = "duration"

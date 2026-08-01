@@ -109,3 +109,53 @@ recommend_tariffs:
       required: false
       selector:
         text:
+
+export_performance:
+  name: Export performance history
+  description: >-
+    Return the recorded half-hourly history and the metrics computed from it:
+    actual spend against what no battery and a self-use battery would have
+    cost, solar and load forecast error, plan fidelity and measured round-trip
+    efficiency. Optionally writes a CSV under the config directory so the file
+    can be handed to a spreadsheet or an AI assistant.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to include all of them.
+      required: false
+      selector:
+        text:
+    days:
+      name: Days
+      description: How much history to include, measured back from the newest record.
+      required: false
+      default: 7
+      selector:
+        number:
+          min: 0.5
+          max: 400
+          step: 0.5
+          unit_of_measurement: days
+          mode: box
+    format:
+      name: Format
+      description: >-
+        Summary returns the metrics only. Slots adds every half-hour as
+        structured data. CSV adds the same rows as text you can copy out whole.
+      required: false
+      default: summary
+      selector:
+        select:
+          options:
+            - summary
+            - slots
+            - csv
+    write_file:
+      name: Write a CSV file
+      description: >-
+        Also write the rows to config/ess_controller/performance_<entry>.csv and
+        return the path. Overwrites the previous export.
+      required: false
+      default: false
+      selector:
+        boolean:

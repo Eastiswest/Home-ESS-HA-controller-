@@ -215,6 +215,7 @@ class TestHomeAssistantFreeModules:
         "outage",
         "shifting",
         "recommend",
+        "performance",
         "optimiser.dp",
         "optimiser",
         "learning.model",

@@ -44,4 +44,15 @@ async def async_get_config_entry_diagnostics(
     data["controller"] = async_redact_data(coordinator.diagnostics(), REDACT)
     data["forecast_totals"] = coordinator.forecast_totals()
     data["cheapest_slots"] = coordinator.cheapest_slots(12)
+
+    # Recent history, so a diagnostics file answers "has it been working?" and
+    # not only "what is it doing this minute". Bounded to two days of slots:
+    # enough to see a full cycle of behaviour without producing a file too large
+    # to attach to an issue. Use the export_performance action for the rest.
+    data["performance"] = {
+        "summary_7d": coordinator.performance_summary(7.0),
+        "summary_30d": coordinator.performance_summary(30.0),
+        "recent_slots": coordinator.performance_rows(2.0),
+        "records_held": len(coordinator.performance_store.log),
+    }
     return data

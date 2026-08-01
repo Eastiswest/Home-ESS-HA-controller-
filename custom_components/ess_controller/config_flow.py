@@ -69,6 +69,7 @@ from .const import (
     CONF_INVERTER_ADAPTER,
     CONF_INVERTER_PREFIX,
     CONF_LOAD_POWER_ENTITY,
+    CONF_LOG_RETENTION_DAYS,
     CONF_MAX_CHARGE_POWER,
     CONF_MAX_DISCHARGE_POWER,
     CONF_OCTOPUS_ACCOUNT,
@@ -119,6 +120,7 @@ from .const import (
     DEFAULT_GRID_IMPORT_LIMIT,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_IMPORT_FIXED_RATE,
+    DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_MAX_CHARGE_POWER,
     DEFAULT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_SOC,
@@ -551,6 +553,9 @@ class EssFlowMixin:
                     current, CONF_ALLOW_BATTERY_EXPORT, True
                 ): selector.BooleanSelector(),
                 _suggest(current, CONF_DRY_RUN, True): selector.BooleanSelector(),
+                _suggest(
+                    current, CONF_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS
+                ): _number(0, 365, 1, "days"),
             }
         )
 

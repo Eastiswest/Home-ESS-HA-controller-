@@ -48,6 +48,14 @@ class CompletedSlot:
     uv_index: float | None = None
     temperature: float | None = None
     forecast_kwh: float | None = None
+    grid_import_kwh: float = 0.0
+    """Metered import. Integrated separately from export rather than netted:
+    a slot that imports 1 kWh and exports 1 kWh costs real money, and netting
+    it to zero would hide that."""
+    grid_export_kwh: float = 0.0
+    grid_measured: bool = False
+    """Whether a grid power sensor was actually contributing. Without one the
+    two figures above are zero and must not be read as "imported nothing"."""
 
 
 @dataclass(slots=True)
@@ -55,6 +63,9 @@ class _Bucket:
     start: datetime
     pv_kwh: float = 0.0
     load_kwh: float = 0.0
+    grid_import_kwh: float = 0.0
+    grid_export_kwh: float = 0.0
+    grid_seconds: float = 0.0
     covered_seconds: float = 0.0
     cloud_samples: list[float] = field(default_factory=list)
     uv_samples: list[float] = field(default_factory=list)
@@ -88,6 +99,7 @@ class SlotAccumulator:
         temperature: float | None = None,
         forecast_kwh: float | None = None,
         uv_index: float | None = None,
+        grid_power_kw: float | None = None,
     ) -> list[CompletedSlot]:
         """Record a sample, returning any slots completed by it.
 
@@ -127,6 +139,12 @@ class SlotAccumulator:
                     self._bucket.pv_kwh += max(float(pv_power_kw), 0.0) * hours
                 if load_power_kw is not None:
                     self._bucket.load_kwh += max(float(load_power_kw), 0.0) * hours
+                if grid_power_kw is not None:
+                    # Sign convention: positive is import, negative is export.
+                    grid = float(grid_power_kw)
+                    self._bucket.grid_import_kwh += max(grid, 0.0) * hours
+                    self._bucket.grid_export_kwh += max(-grid, 0.0) * hours
+                    self._bucket.grid_seconds += seconds
                 self._bucket.covered_seconds += seconds
                 cursor = segment_end
 
@@ -185,6 +203,9 @@ class SlotAccumulator:
             uv_index=uv,
             temperature=temp,
             forecast_kwh=bucket.forecast_kwh,
+            grid_import_kwh=bucket.grid_import_kwh * scale,
+            grid_export_kwh=bucket.grid_export_kwh * scale,
+            grid_measured=bucket.grid_seconds > 0,
         )
 
 

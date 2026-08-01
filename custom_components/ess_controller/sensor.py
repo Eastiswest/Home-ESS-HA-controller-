@@ -469,6 +469,30 @@ def _shifted_loads_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
     }
 
 
+def _performance_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    """The last week's report, on the entity that summarises it.
+
+    Attached to a sensor as well as a service so the numbers are visible on a
+    dashboard without anyone having to know the action exists.
+    """
+    return {
+        **coordinator.performance_summary(7.0),
+        "records_held": len(coordinator.performance_store.log),
+        "export_action": "ess_controller.export_performance",
+    }
+
+
+def _performance_state(coordinator: EssCoordinator) -> float | None:
+    """Net saving against a self-use battery over the last week, after wear.
+
+    Net rather than gross: the optimiser cycles the pack harder than self-use
+    does, and a headline saving that disappears once the wear allowance is paid
+    is not one worth reporting.
+    """
+    net = coordinator.performance_report(7.0).net_saving_vs_self_use
+    return None if net is None else round(net, 1)
+
+
 def _recommendation_state(coordinator: EssCoordinator) -> str | None:
     from . import recommend as recommend_mod
 
@@ -516,6 +540,17 @@ SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
         icon="mdi:calendar-clock",
         value=lambda c: len(c.placements),
         attributes=_shifted_loads_attributes,
+    ),
+    EssSensorDescription(
+        key="weekly_saving",
+        translation_key="weekly_saving",
+        name="Saving vs self use this week",
+        icon="mdi:chart-line",
+        native_unit_of_measurement=PRICE_UNIT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value=_performance_state,
+        attributes=_performance_attributes,
     ),
     EssSensorDescription(
         key="tariff_recommendation",

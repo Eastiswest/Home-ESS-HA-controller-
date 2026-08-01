@@ -125,13 +125,15 @@
           "allow_grid_charge": "Allow charging from the grid",
           "allow_export": "Allow export",
           "allow_battery_export": "Allow the battery to export",
-          "dry_run": "Start in advisory mode (recommended)"
+          "dry_run": "Start in advisory mode (recommended)",
+          "log_retention_days": "Performance history to keep"
         },
         "data_description": {
           "horizon_hours": "Longer sees further ahead but relies more on extrapolated prices.",
           "soc_levels": "Higher is more precise and slightly slower. 60 is plenty for a domestic battery.",
           "terminal_value_mode": "Stops the optimiser dumping the battery into the final slot just because the horizon ends there.",
-          "dry_run": "Strongly recommended for a new install."
+          "dry_run": "Strongly recommended for a new install.",
+          "log_retention_days": "How many days of half-hourly history to record for the 'Export performance history' action. Roughly 48 rows per day; set to 0 to keep none."
         }
       },
       "sessions": {
@@ -345,7 +347,11 @@
           "allow_grid_charge": "Allow charging from the grid",
           "allow_export": "Allow export",
           "allow_battery_export": "Allow the battery to export",
-          "dry_run": "Start in advisory mode"
+          "dry_run": "Start in advisory mode",
+          "log_retention_days": "Performance history to keep"
+        },
+        "data_description": {
+          "log_retention_days": "How many days of half-hourly history to record for the 'Export performance history' action. Roughly 48 rows per day; set to 0 to keep none."
         }
       },
       "sessions": {
@@ -557,6 +563,9 @@
       },
       "wear_allowance": {
         "name": "Wear allowance in use"
+      },
+      "weekly_saving": {
+        "name": "Saving vs self use this week"
       }
     },
     "binary_sensor": {
@@ -765,6 +774,28 @@
         "entry_id": {
           "name": "Entry ID",
           "description": "Target one controller. Omit to apply to all."
+        }
+      }
+    },
+    "export_performance": {
+      "name": "Export performance history",
+      "description": "Return the recorded half-hourly history and the metrics computed from it: actual spend against what no battery and a self-use battery would have cost, solar and load forecast error, plan fidelity and measured round-trip efficiency. Optionally writes a CSV under the config directory.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Target one controller. Omit to include all of them."
+        },
+        "days": {
+          "name": "Days",
+          "description": "How much history to include, measured back from the newest record."
+        },
+        "format": {
+          "name": "Format",
+          "description": "Summary returns the metrics only. Slots adds every half-hour as structured data. CSV adds the same rows as text you can copy out whole."
+        },
+        "write_file": {
+          "name": "Write a CSV file",
+          "description": "Also write the rows to config/ess_controller/performance_<entry>.csv and return the path."
         }
       }
     }

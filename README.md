@@ -252,6 +252,50 @@ the window is short and a few cheap days are not an annual saving. The wear
 allowance is applied, so a tariff that only wins by cycling the pack twice as
 hard does not look artificially good.
 
+### Performance history you can export
+
+Every completed half-hour is recorded — prices in force, measured solar, load and
+grid flow, the forecasts that had been made for that slot, SoC either side, the
+action planned and the action applied. 60 days by default, adjustable in the
+optimiser step.
+
+From that, the numbers that actually answer "is this working?":
+
+| | |
+|---|---|
+| **Money** | What you spent, against two counterfactuals: no battery at all, and a battery running plain self-use. The second is the one that matters — beating "no battery" only proves a battery works. |
+| **Wear** | The same saving after charging the extra cycling to the wear allowance, plus equivalent full cycles used. |
+| **Forecasting** | Solar and load error per slot, MAE *and* signed bias. A model 2 kWh out in both directions is healthy; one quietly 2 kWh low every day is broken, and only the bias term tells them apart. |
+| **Control** | How often the inverter actually did what the plan said, and the round-trip efficiency the pack really returned. |
+| **Solar** | Self-consumption: the share of generation used on site rather than exported. |
+
+`sensor.*_saving_vs_self_use_this_week` carries the whole report as attributes.
+To get it out as a file:
+
+```yaml
+action: ess_controller.export_performance
+data:
+  days: 30
+  format: csv
+  write_file: true
+```
+
+The response contains the summary and the CSV text; `write_file` also drops
+`config/ess_controller/performance_<entry>.csv`, which is the file to hand to a
+spreadsheet or paste into an AI assistant and ask what to change. The last two
+days of slots and both 7- and 30-day summaries are included in the normal
+diagnostics download too, so a bug report carries evidence with it.
+
+Caveats travel with the numbers rather than living here: a summary computed from
+two days of data says so, an advisory-mode history says the difference is not the
+optimiser's doing, slots with no grid meter are declared as unmetered, and a
+window that ends with the battery much fuller than it started says how much that
+flatters the cost.
+
+Needs a grid power sensor to be metered rather than inferred — configure one in
+the forecasting step. Without it the log still records solar, load, forecasts and
+actions, and says which slots were unmetered.
+
 ---
 
 ## Installation
@@ -469,7 +513,7 @@ SoC window, power limits,
 wear allowance, typical daily load and the heating/cooling sensitivities; a
 `Strategy` select; and buttons to re-plan, clear an override or reset learning.
 
-**Services** — `ess_controller.replan`, `set_override`, `clear_override`,
+**Services** — `ess_controller.export_performance`, `replan`, `set_override`, `clear_override`,
 `reset_learning`, `recommend_tariffs`.
 
 Overrides beat the strategy lock, which beats the plan. An override always
@@ -552,6 +596,7 @@ custom_components/ess_controller/
 ├── inverter/              # roles, discovery, Solax + generic adapters, battery
 ├── adjustments.py         # session repricing (Saving Sessions, Power Up)
 ├── shifting.py            # flexible load placement
+├── performance.py         # recorded history and the metrics from it
 ├── outage.py              # power cut anticipation
 ├── recommend.py           # tariff comparison
 ├── coordinator.py         # the planning loop
