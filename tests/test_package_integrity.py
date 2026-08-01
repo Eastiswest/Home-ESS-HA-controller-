@@ -216,6 +216,7 @@ class TestHomeAssistantFreeModules:
         "shifting",
         "recommend",
         "performance",
+        "dashboard",
         "optimiser.dp",
         "optimiser",
         "learning.model",
@@ -308,11 +309,34 @@ class TestTranslations:
             assert not missing, f"{platform} missing translations for {sorted(missing)}"
 
     def test_services_documented(self):
+        """Every registered service is described in both files, with its fields.
+
+        Derived from the SERVICE_* constants rather than a hand-kept list, so
+        adding a service and forgetting to document it fails here instead of
+        showing up as an untranslated action in the UI.
+        """
         strings = json.loads((PACKAGE / "strings.json").read_text())
         services_yaml = (PACKAGE / "services.yaml").read_text()
-        for service in ("replan", "set_override", "clear_override", "reset_learning"):
+        declared = {
+            value
+            for name, value in _const_strings(TREES["const"]).items()
+            if name.startswith("SERVICE_")
+        }
+        assert len(declared) >= 6, declared
+        for service in sorted(declared):
             assert f"{service}:" in services_yaml, f"{service} missing from services.yaml"
             assert service in strings["services"], f"{service} missing from strings.json"
+            assert strings["services"][service].get("name"), f"{service} has no name"
+
+    def test_service_fields_are_translated(self):
+        """Each field offered in services.yaml carries a label in strings.json."""
+        yaml = pytest.importorskip("yaml")
+        strings = json.loads((PACKAGE / "strings.json").read_text())
+        services = yaml.safe_load((PACKAGE / "services.yaml").read_text())
+        for service, spec in services.items():
+            described = strings["services"].get(service, {}).get("fields", {})
+            for field in spec.get("fields") or {}:
+                assert field in described, f"{service}.{field} has no translation"
 
     def test_selector_options_cover_constants(self):
         """Every provider, adapter and strategy offered must have a label."""
@@ -346,6 +370,25 @@ def _translation_keys(tree: ast.Module) -> set[str]:
                 ):
                     keys.add(keyword.value.value)
     return keys
+
+
+def _const_strings(tree: ast.Module) -> dict[str, str]:
+    """Read the plain string constants out of const.py."""
+    found: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name, value = node.target.id, node.value
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            name, value = node.targets[0].id, node.value
+        else:
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            found[name] = value.value
+    return found
 
 
 def _const_lists(tree: ast.Module) -> dict[str, list[str]]:

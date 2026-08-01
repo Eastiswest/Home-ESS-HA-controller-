@@ -44,6 +44,7 @@ from .const import (
     CONF_BATTERY_SOC_ENTITY,
     CONF_BATTERY_TEMPERATURE_ENTITY,
     CONF_CHARGE_EFFICIENCY,
+    CONF_CREATE_DASHBOARD,
     CONF_CURRENCY,
     CONF_CYCLE_COST,
     CONF_DEFAULT_DAILY_LOAD,
@@ -556,6 +557,9 @@ class EssFlowMixin:
                 _suggest(
                     current, CONF_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS
                 ): _number(0, 365, 1, "days"),
+                _suggest(
+                    current, CONF_CREATE_DASHBOARD, True
+                ): selector.BooleanSelector(),
             }
         )
 

@@ -16,6 +16,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -23,10 +24,12 @@ from .const import (
     ATTR_DURATION,
     ATTR_POWER,
     ATTR_TARGET_SOC,
+    CONF_CREATE_DASHBOARD,
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAR_OVERRIDE,
     SERVICE_EXPORT_PERFORMANCE,
+    SERVICE_GENERATE_DASHBOARD,
     SERVICE_RECOMMEND_TARIFFS,
     SERVICE_REPLAN,
     SERVICE_RESET_LEARNING,
@@ -60,6 +63,13 @@ SET_OVERRIDE_SCHEMA = vol.Schema(
 )
 
 ENTRY_ONLY_SCHEMA = vol.Schema({vol.Optional("entry_id"): cv.string})
+
+GENERATE_DASHBOARD_SCHEMA = vol.Schema(
+    {
+        vol.Optional("entry_id"): cv.string,
+        vol.Optional("write_file", default=False): cv.boolean,
+    }
+)
 
 EXPORT_FORMATS = ["summary", "slots", "csv"]
 
@@ -95,7 +105,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     _async_register_services(hass)
+    _async_schedule_dashboard(hass, entry, coordinator)
     return True
+
+
+def _async_schedule_dashboard(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: EssCoordinator
+) -> None:
+    """Offer the prebuilt dashboard once, after startup has settled.
+
+    After startup because Lovelace has to be loaded before a dashboard can be
+    added to it, and because the entities need to be registered before their ids
+    can be read. Once, because deleting the dashboard should stick.
+    """
+    if coordinator.settings.dashboard_created:
+        return
+    if not entry.options.get(
+        CONF_CREATE_DASHBOARD, entry.data.get(CONF_CREATE_DASHBOARD, True)
+    ):
+        return
+
+    async def _install(_now: Any) -> None:
+        from .panel import async_install
+
+        try:
+            outcome = await async_install(hass, entry)
+        except Exception:
+            _LOGGER.exception("Unexpected failure creating the dashboard")
+            return
+        if outcome in ("created", "exists", "unsupported"):
+            # "unsupported" counts as done: the YAML has been written, and
+            # retrying every restart would only rewrite the same file.
+            coordinator.settings.dashboard_created = True
+            coordinator.runtime_store.async_schedule_save()
+
+    entry.async_on_unload(async_at_started(hass, _install))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -185,6 +229,31 @@ def _async_register_services(hass: HomeAssistant) -> None:
             results[coordinator.entry.entry_id] = payload
         return {"controllers": results}
 
+    async def async_generate_dashboard(call: ServiceCall) -> ServiceResponse:
+        """Return the prebuilt dashboard configuration, for hand-installing.
+
+        The same configuration the sidebar dashboard is built from, so it can be
+        pasted into any dashboard's raw configuration editor, or used as a
+        starting point for a custom one.
+        """
+        from .panel import build_for_entry, to_yaml
+
+        write_file: bool = call.data["write_file"]
+        results: dict[str, Any] = {}
+        for coordinator in _coordinators(hass, call):
+            config = build_for_entry(hass, coordinator.entry)
+            payload: dict[str, Any] = {
+                "views": len(config["views"]),
+                "yaml": to_yaml(config),
+                "config": config,
+            }
+            if write_file:
+                from .panel import async_write_yaml
+
+                payload["file"] = await async_write_yaml(hass, coordinator.entry, config)
+            results[coordinator.entry.entry_id] = payload
+        return {"dashboards": results}
+
     hass.services.async_register(
         DOMAIN, SERVICE_REPLAN, async_replan, schema=ENTRY_ONLY_SCHEMA
     )
@@ -196,6 +265,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_LEARNING, async_reset_learning, schema=ENTRY_ONLY_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GENERATE_DASHBOARD,
+        async_generate_dashboard,
+        schema=GENERATE_DASHBOARD_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     # Exists only to return data, so a response is mandatory rather than optional.
     hass.services.async_register(

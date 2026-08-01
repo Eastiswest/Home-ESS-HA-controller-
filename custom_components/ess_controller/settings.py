@@ -129,6 +129,9 @@ class RuntimeSettings:
 
     # -- bookkeeping ----------------------------------------------------
     seeded: bool = False
+    dashboard_created: bool = False
+    """Set once the sidebar dashboard has been offered. Remembered so that
+    deleting the dashboard is respected rather than undone on every restart."""
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def sanitised(self) -> RuntimeSettings:

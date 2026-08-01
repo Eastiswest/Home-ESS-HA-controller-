@@ -472,6 +472,63 @@ minimum price spread that currently justifies a cycle.
 
 ---
 
+## The dashboard
+
+You do not have to build one. On first setup a ready-made **ESS Controller**
+dashboard is added to the sidebar, generated from the entities your install
+actually has:
+
+| View | What is on it |
+|---|---|
+| **Overview** | What it is doing now and why, state of charge, the arming switch, the next six hours as a table |
+| **Plan** | The forward plan, prices, this slot's detail, 24 hours of price and SoC history |
+| **Performance** | The weekly report — spend against both counterfactuals, forecast error, plan fidelity, round-trip efficiency — plus the wear allowance workings |
+| **Loads & events** | Flexible load schedule and advice, grid sessions, outage risk |
+| **Settings** | Every live-tunable number and switch in one place |
+
+Three deliberate properties:
+
+- **Stock cards only.** ApexCharts and mini-graph-card make prettier plots, but
+  they are separate HACS installs, and a dashboard that renders as a column of
+  red "Custom element doesn't exist" boxes is worse than no dashboard. The
+  forward plan is a Markdown table built from the plan sensor's attributes, so it
+  works on a bare install.
+- **It becomes yours.** It is an ordinary storage dashboard: edit it, rearrange
+  it, delete it. It is created *once* and never rewritten, so your changes stick
+  and a deleted dashboard stays deleted. Want it back? The **Rebuild dashboard**
+  button.
+- **It degrades.** Cards are built from the entities that resolved, so disabling
+  entities produces a smaller dashboard rather than a broken one.
+
+Turn it off before setup with **Add a dashboard to the sidebar** in the optimiser
+step if you would rather start from nothing.
+
+### Building your own
+
+Everything on the prebuilt dashboard is an ordinary entity, and the interesting
+detail is in attributes rather than hidden: `slots` on the plan sensor is the
+full half-hourly plan, ready for ApexCharts; the weekly report is the complete
+summary dict; `placements` and `advice` carry the load schedule.
+
+For a starting point rather than a blank page:
+
+```yaml
+action: ess_controller.generate_dashboard
+data:
+  write_file: true
+```
+
+That returns the same configuration as YAML — paste it into any dashboard's raw
+configuration editor — and writes `config/ess_controller/dashboard.yaml`.
+
+There is no public API for an integration to add a dashboard to the sidebar, so
+this uses Lovelace internals. Every step is feature-detected and nothing about it
+is load-bearing: if a Home Assistant release moves the furniture, the YAML is
+written out and a log line tells you where, and the controller carries on
+regardless.
+
+---
+
 ## Entities
 
 **Sensors** — `grid_incentive_session`, `outage_risk`,
@@ -511,9 +568,10 @@ ApexCharts card directly.
 `Shift flexible loads`, `Switch appliances`, `Outage protection`; numbers for the
 SoC window, power limits,
 wear allowance, typical daily load and the heating/cooling sensitivities; a
-`Strategy` select; and buttons to re-plan, clear an override or reset learning.
+`Strategy` select; and buttons to re-plan, clear an override, compare tariffs,
+rebuild the dashboard or reset learning.
 
-**Services** — `ess_controller.export_performance`, `replan`, `set_override`, `clear_override`,
+**Services** — `ess_controller.generate_dashboard`, `export_performance`, `replan`, `set_override`, `clear_override`,
 `reset_learning`, `recommend_tariffs`.
 
 Overrides beat the strategy lock, which beats the plan. An override always
@@ -597,6 +655,8 @@ custom_components/ess_controller/
 ├── adjustments.py         # session repricing (Saving Sessions, Power Up)
 ├── shifting.py            # flexible load placement
 ├── performance.py         # recorded history and the metrics from it
+├── dashboard.py           # the prebuilt dashboard's configuration
+├── panel.py               # installing it into the sidebar
 ├── outage.py              # power cut anticipation
 ├── recommend.py           # tariff comparison
 ├── coordinator.py         # the planning loop

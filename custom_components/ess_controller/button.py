@@ -44,6 +44,14 @@ BUTTONS: tuple[EssButtonDescription, ...] = (
         action=lambda c: c.async_recommend_tariffs(),
     ),
     EssButtonDescription(
+        key="create_dashboard",
+        translation_key="create_dashboard",
+        name="Rebuild dashboard",
+        icon="mdi:view-dashboard-outline",
+        entity_category=EntityCategory.CONFIG,
+        action=lambda c: c.async_create_dashboard(),
+    ),
+    EssButtonDescription(
         key="reset_learning",
         translation_key="reset_learning",
         name="Reset learned history",

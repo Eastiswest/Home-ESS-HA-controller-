@@ -712,6 +712,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("Wrote %d days of performance history to %s", days, path)
         return path
 
+    async def async_create_dashboard(self) -> str:
+        """(Re)create the sidebar dashboard on demand.
+
+        The automatic offer happens once, so that deleting the dashboard sticks.
+        This is the way back: it recreates it, or writes the YAML out if the
+        sidebar cannot be touched on this Home Assistant version.
+        """
+        from .panel import async_install
+
+        outcome = await async_install(self.hass, self.entry)
+        self.settings.dashboard_created = True
+        self.runtime_store.async_schedule_save()
+        return outcome
+
     async def async_clear_performance(self) -> None:
         await self.performance_store.async_clear()
         self._slot_marks = {}

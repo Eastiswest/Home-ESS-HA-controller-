@@ -128,6 +128,9 @@ CONF_SHIFTING_ENABLED: Final = "shifting_enabled"
 CONF_SHIFTABLE_LOADS: Final = "shiftable_loads"
 CONF_APPLIANCE_CONTROL: Final = "appliance_control"
 
+# Prebuilt dashboard
+CONF_CREATE_DASHBOARD: Final = "create_dashboard"
+
 # Performance history
 CONF_LOG_RETENTION_DAYS: Final = "log_retention_days"
 DEFAULT_LOG_RETENTION_DAYS: Final = 60
@@ -253,9 +256,9 @@ SERVICE_REPLAN: Final = "replan"
 SERVICE_SET_OVERRIDE: Final = "set_override"
 SERVICE_CLEAR_OVERRIDE: Final = "clear_override"
 SERVICE_RESET_LEARNING: Final = "reset_learning"
-SERVICE_LEARN_FROM_HISTORY: Final = "learn_from_history"
 SERVICE_RECOMMEND_TARIFFS: Final = "recommend_tariffs"
 SERVICE_EXPORT_PERFORMANCE: Final = "export_performance"
+SERVICE_GENERATE_DASHBOARD: Final = "generate_dashboard"
 
 ATTR_ACTION: Final = "action"
 ATTR_DURATION: Final = "duration"

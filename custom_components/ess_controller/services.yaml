@@ -159,3 +159,25 @@ export_performance:
       default: false
       selector:
         boolean:
+
+generate_dashboard:
+  name: Generate dashboard configuration
+  description: >-
+    Return the prebuilt dashboard's configuration as YAML, built from the
+    entities this install actually has. Paste it into any dashboard's raw
+    configuration editor, or use it as a starting point for your own.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to include all of them.
+      required: false
+      selector:
+        text:
+    write_file:
+      name: Write a YAML file
+      description: >-
+        Also write it to config/ess_controller/dashboard.yaml and return the path.
+      required: false
+      default: false
+      selector:
+        boolean:
