@@ -48,6 +48,8 @@ from .dashboard import (
     DASHBOARD_URL_PATH,
     build_dashboard,
     dashboards_mapping,
+    is_placeholder,
+    placeholder_dashboard,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -213,7 +215,9 @@ async def _async_install_storage(
             # ConfigNotFound on a first run, which is the case we are here to
             # fix. Anything else is equally a reason to seed.
             stored = None
-    if not stored:
+    # The placeholder is explicitly replaceable; a real stored config is not,
+    # because by then it may carry the user's own edits.
+    if not stored or is_placeholder(stored):
         await store.async_save(config)
 
     dashboards[DASHBOARD_URL_PATH] = store
@@ -268,11 +272,14 @@ async def async_install(
         "yes" if dashboards is not None else "no",
     )
 
-    if not config["views"]:
-        # No entities in the registry yet. Nothing worth registering, and the
-        # caller retries.
-        _LOGGER.debug("No entities resolved yet; deferring the dashboard")
-        return "waiting"
+    waiting = not config["views"]
+    if waiting:
+        # Register the placeholder rather than nothing at all: an absent sidebar
+        # entry is indistinguishable from the integration having failed, and that
+        # ambiguity is exactly what made this hard to diagnose. The caller retries
+        # and the real dashboard replaces it.
+        _LOGGER.debug("No entities resolved yet; registering a placeholder")
+        config = placeholder_dashboard(entry.title or DASHBOARD_TITLE)
 
     if dashboards is None:
         path = await async_write_yaml(hass, entry, config)
@@ -341,6 +348,13 @@ async def async_install(
             "for a dashboard of your own.",
         )
         return "installed_yaml"
+
+    if waiting:
+        _LOGGER.info(
+            "ESS Controller dashboard registered at /%s; waiting for entities",
+            DASHBOARD_URL_PATH,
+        )
+        return "waiting"
 
     _LOGGER.info(
         "ESS Controller dashboard registered at /%s with %d views",

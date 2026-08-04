@@ -35,6 +35,62 @@ DASHBOARD_ICON = "mdi:home-battery-outline"
 # enough to cover the next decision, short enough to read on a phone.
 PLAN_TABLE_SLOTS = 12
 
+PLACEHOLDER_VIEW_PATH = "waiting"
+
+
+def placeholder_dashboard(title: str = DASHBOARD_TITLE) -> dict[str, Any]:
+    """A dashboard to register when there are no entities yet.
+
+    Registering nothing until entities exist is what made a failure invisible:
+    no sidebar entry, and no way to tell "still starting up" from "the
+    integration did not set up at all". A single view that says so is worth more
+    than an absence, and it is replaced by the real dashboard as soon as there is
+    something to build one from.
+    """
+    return {
+        "title": title,
+        "views": [
+            {
+                "title": "Starting up",
+                "path": PLACEHOLDER_VIEW_PATH,
+                "icon": "mdi:progress-clock",
+                "cards": [
+                    {
+                        "type": "markdown",
+                        "content": (
+                            "## Waiting for entities\n\n"
+                            "The ESS Controller dashboard is registered, but the "
+                            "integration has not published any entities yet. It "
+                            "will fill itself in within a minute or so.\n\n"
+                            "If this page still looks like this after that:\n\n"
+                            "- Check **Settings > Devices & services > AI ESS "
+                            "Controller** for a setup error.\n"
+                            "- Look in **Developer tools > States** for entities "
+                            "beginning `sensor.ess`.\n"
+                            "- Press **Rebuild dashboard** on the integration's "
+                            "device page to try again and get a notification "
+                            "saying what happened."
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def is_placeholder(config: Any) -> bool:
+    """Whether a stored configuration is the placeholder above.
+
+    Used to decide whether replacing it is safe: overwriting the placeholder is
+    the whole point, overwriting the user's edited dashboard never is.
+    """
+    if not isinstance(config, dict):
+        return False
+    views = config.get("views")
+    if not isinstance(views, list) or len(views) != 1:
+        return False
+    return isinstance(views[0], dict) and views[0].get("path") == PLACEHOLDER_VIEW_PATH
+
 
 def dashboards_mapping(data: Any) -> dict[str, Any] | None:
     """Lovelace's url_path -> dashboard mapping, whichever shape it is in.

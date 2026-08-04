@@ -535,11 +535,30 @@ it are saved normally and survive restarts — and turning the option off keeps
 them, so switching it back on restores what you had rather than the generated
 version. **Rebuild dashboard** deliberately discards them and regenerates.
 
-If it does not appear, check in this order: the integration is actually
-configured (**Settings → Devices & services** — a HACS download alone does
-nothing until you add the integration), Home Assistant has been restarted since
-the download, and then **Notifications**, which is where any failure explains
-itself.
+If it does not appear, check in this order:
+
+1. **The version on disk.** The integration's device page shows its version. If
+   it is not the version you just downloaded, HACS has not replaced the files or
+   Home Assistant has not been restarted since. A reload is not enough — the old
+   module stays in memory.
+2. **The integration is actually configured.** A HACS download only copies files;
+   until you add it under **Settings → Devices & services**, none of its code
+   runs. Look for entities beginning `sensor.ess` in **Developer tools → States**.
+3. **Notifications**, which is where the outcome is reported either way.
+4. **Diagnostics** (**⋮ → Download diagnostics**) has a `dashboard` section
+   giving the Lovelace data shape, how many entities resolved, how many views
+   were built, and whether anything is registered at the URL path.
+
+If entities exist but the dashboard has not appeared, the sidebar entry is
+registered with a placeholder view that explains what to check — so an empty
+"Starting up" page means the entities were not ready, not that registration
+failed.
+
+For the record, the two other mechanisms you may have seen are not available
+here: **add-ons** (AdGuard Home, File editor, Terminal) get their sidebar entry
+from the Supervisor's ingress, which only applies to add-ons; and **HACS** ships
+a compiled JavaScript panel, which would mean writing a whole frontend and
+giving up stock cards.
 
 ---
 

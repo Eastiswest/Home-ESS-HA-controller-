@@ -1,12 +1,14 @@
 {
   "domain": "ess_controller",
   "name": "AI ESS Controller",
-  "codeowners": ["@Eastiswest"],
+  "codeowners": [
+    "@Eastiswest"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/Eastiswest/Home-ESS-HA-controller-",
   "integration_type": "hub",
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/Eastiswest/Home-ESS-HA-controller-/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.4.0"
 }

@@ -559,3 +559,63 @@ class TestDashboardsMapping:
 
         board: dict = {}
         assert dashboards_mapping({"dashboards": board}) is board
+
+
+class TestPlaceholder:
+    """Something must appear in the sidebar even before entities exist.
+
+    Registering nothing until entities resolve is what made the failure
+    invisible: an absent sidebar entry looks identical whether the integration is
+    still starting or never set up at all.
+    """
+
+    def _placeholder(self):
+        from custom_components.ess_controller.dashboard import placeholder_dashboard
+
+        return placeholder_dashboard()
+
+    def test_placeholder_has_exactly_one_view_with_a_card(self):
+        config = self._placeholder()
+        assert len(config["views"]) == 1
+        assert len(config["views"][0]["cards"]) == 1
+        assert config["views"][0]["cards"][0]["type"] == "markdown"
+
+    def test_placeholder_says_what_to_check(self):
+        content = self._placeholder()["views"][0]["cards"][0]["content"]
+        assert "Devices & services" in content
+        assert "Rebuild dashboard" in content
+        assert "sensor.ess" in content
+
+    def test_placeholder_carries_the_title(self):
+        from custom_components.ess_controller.dashboard import placeholder_dashboard
+
+        assert placeholder_dashboard("Garage")["title"] == "Garage"
+
+    def test_placeholder_references_no_entities(self):
+        """It has to render before anything exists, so it can depend on nothing."""
+        assert referenced_entities(self._placeholder()) == set()
+
+    def test_the_placeholder_is_recognised_as_replaceable(self):
+        from custom_components.ess_controller.dashboard import is_placeholder
+
+        assert is_placeholder(self._placeholder()) is True
+
+    def test_a_real_dashboard_is_never_treated_as_replaceable(self):
+        """Overwriting the user's edited dashboard would destroy their work."""
+        from custom_components.ess_controller.dashboard import is_placeholder
+
+        assert is_placeholder(build_dashboard(resolved())) is False
+
+    def test_a_single_view_dashboard_of_their_own_is_not_the_placeholder(self):
+        from custom_components.ess_controller.dashboard import is_placeholder
+
+        assert is_placeholder(build_dashboard(resolved("min_soc"))) is False
+        assert is_placeholder({"views": [{"path": "home", "cards": []}]}) is False
+
+    def test_junk_is_not_the_placeholder(self):
+        from custom_components.ess_controller.dashboard import is_placeholder
+
+        assert is_placeholder(None) is False
+        assert is_placeholder({}) is False
+        assert is_placeholder({"views": "nonsense"}) is False
+        assert is_placeholder({"views": [None]}) is False

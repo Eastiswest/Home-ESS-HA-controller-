@@ -27,6 +27,7 @@ from .const import (
     ATTR_TARGET_SOC,
     CONF_CREATE_DASHBOARD,
     DOMAIN,
+    NAME,
     PLATFORMS,
     SERVICE_CLEAR_OVERRIDE,
     SERVICE_EXPORT_PERFORMANCE,
@@ -35,6 +36,7 @@ from .const import (
     SERVICE_REPLAN,
     SERVICE_RESET_LEARNING,
     SERVICE_SET_OVERRIDE,
+    VERSION,
 )
 from .coordinator import EssCoordinator
 from .models import SlotAction
@@ -99,6 +101,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a configured ESS controller."""
+    # Logged so "is the version I think I installed actually running?" is
+    # answerable from the log, which a stale HACS download makes a real question.
+    _LOGGER.info("Setting up %s version %s", NAME, VERSION)
     coordinator = EssCoordinator(hass, entry)
     try:
         await coordinator.async_setup()
