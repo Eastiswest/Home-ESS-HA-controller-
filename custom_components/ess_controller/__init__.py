@@ -16,6 +16,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
@@ -63,6 +64,11 @@ SET_OVERRIDE_SCHEMA = vol.Schema(
 )
 
 ENTRY_ONLY_SCHEMA = vol.Schema({vol.Optional("entry_id"): cv.string})
+
+# The entity registry can lag a fresh install by a few seconds, so a single look
+# is not enough to conclude there is nothing to build a dashboard from.
+DASHBOARD_ATTEMPTS = 4
+DASHBOARD_RETRY_SECONDS = 15
 
 GENERATE_DASHBOARD_SCHEMA = vol.Schema(
     {
@@ -129,13 +135,33 @@ def _async_schedule_dashboard(
     ):
         return
 
+    attempts = 0
+
     async def _install(_now: Any) -> None:
+        nonlocal attempts
         from .panel import async_install
 
+        attempts += 1
         try:
             outcome = await async_install(hass, entry)
         except Exception:
             _LOGGER.exception("Unexpected failure registering the dashboard")
+            return
+
+        if outcome == "waiting" and attempts < DASHBOARD_ATTEMPTS:
+            # The entity registry can lag a fresh install, and giving up on the
+            # first look is how this ends up doing nothing at all with nothing
+            # said. Try again shortly.
+            entry.async_on_unload(
+                async_call_later(hass, DASHBOARD_RETRY_SECONDS, _install)
+            )
+            return
+        if outcome == "waiting":
+            _LOGGER.warning(
+                "No ESS Controller entities were found after %d attempts, so no "
+                "dashboard was created. Check the integration set up cleanly",
+                attempts,
+            )
             return
         if outcome != "failed" and not coordinator.settings.dashboard_created:
             coordinator.settings.dashboard_created = True

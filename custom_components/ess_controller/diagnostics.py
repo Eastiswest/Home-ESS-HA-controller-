@@ -45,6 +45,15 @@ async def async_get_config_entry_diagnostics(
     data["forecast_totals"] = coordinator.forecast_totals()
     data["cheapest_slots"] = coordinator.cheapest_slots(12)
 
+    # Why the sidebar dashboard is or is not there. Every failure mode looks the
+    # same from the outside, so the state it depends on is reported explicitly.
+    try:
+        from .panel import describe as describe_dashboard
+
+        data["dashboard"] = describe_dashboard(hass, entry)
+    except Exception as err:  # pragma: no cover - diagnostics must not fail
+        data["dashboard"] = {"error": str(err)}
+
     # Recent history, so a diagnostics file answers "has it been working?" and
     # not only "what is it doing this minute". Bounded to two days of slots:
     # enough to see a full cycle of behaviour without producing a file too large

@@ -156,28 +156,131 @@ def _is_ours(stored: Any, entry: ConfigEntry) -> bool:
     return config.get("id") == _dashboard_item(entry)["id"]
 
 
+def _register_panel(hass: HomeAssistant, item: dict[str, Any], mode: str) -> None:
+    """Put the panel in the sidebar.
+
+    Prefers Lovelace's own ``_register_panel``, which is what its dashboards
+    collection calls and therefore the exact call a real dashboard gets --
+    including the keys it reads out of the item dict. Falls back to the frontend
+    helper directly if that private name ever moves.
+    """
+    try:
+        from homeassistant.components.lovelace import _register_panel as lovelace_panel
+
+        lovelace_panel(hass, item["url_path"], mode, item, True)
+        return
+    except Exception:
+        _LOGGER.debug("Lovelace's panel helper unavailable; registering directly")
+
+    from homeassistant.components import frontend
+
+    frontend.async_register_built_in_panel(
+        hass,
+        LOVELACE_DOMAIN,
+        sidebar_title=item["title"],
+        sidebar_icon=item["icon"],
+        frontend_url_path=item["url_path"],
+        config={"mode": mode},
+        require_admin=item["require_admin"],
+        update=True,
+        show_in_sidebar=item["show_in_sidebar"],
+    )
+
+
+async def _async_install_storage(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    dashboards: dict[str, Any],
+    config: dict[str, Any],
+    reseed: bool,
+) -> None:
+    """Serve an editable, storage-backed dashboard.
+
+    Preferred because the user can rearrange it in the UI and the edits persist:
+    they are saved through the same object Lovelace would use for a dashboard
+    created by hand.
+    """
+    from homeassistant.components.lovelace.dashboard import LovelaceStorage
+
+    item = _dashboard_item(entry)
+    store = LovelaceStorage(hass, item)
+
+    stored: Any = None
+    if not reseed:
+        try:
+            stored = await store.async_load(False)
+        except Exception:
+            # ConfigNotFound on a first run, which is the case we are here to
+            # fix. Anything else is equally a reason to seed.
+            stored = None
+    if not stored:
+        await store.async_save(config)
+
+    dashboards[DASHBOARD_URL_PATH] = store
+    _register_panel(hass, item, "storage")
+
+
+async def _async_install_yaml(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    dashboards: dict[str, Any],
+    config: dict[str, Any],
+) -> str:
+    """Serve the dashboard straight from the YAML file, as a fallback.
+
+    Read-only in the UI, which is why it is second choice, but it depends on far
+    less: a file we wrote and Lovelace's YAML dashboard class. Returns the path.
+    """
+    from homeassistant.components.lovelace.dashboard import LovelaceYAML
+
+    path = await async_write_yaml(hass, entry, config)
+    item = _dashboard_item(entry)
+    item["mode"] = "yaml"
+    # Relative to the config directory, which is what Lovelace resolves against.
+    item["filename"] = f"{DOMAIN}/dashboard.yaml"
+    dashboards[DASHBOARD_URL_PATH] = LovelaceYAML(hass, DASHBOARD_URL_PATH, item)
+    _register_panel(hass, item, "yaml")
+    return path
+
+
 async def async_install(
     hass: HomeAssistant, entry: ConfigEntry, *, reseed: bool = False
 ) -> str:
     """Register the dashboard, seeding its configuration if it has none.
 
-    Returns one of ``installed``, ``adopted`` (something else already owns the
-    URL path), ``unsupported`` (YAML written instead) or ``failed``.
+    Returns ``installed``, ``installed_yaml``, ``adopted`` (something else owns
+    the URL path), ``unsupported`` (file written, nothing registered), ``waiting``
+    (no entities yet) or ``failed``.
 
     Safe to call on every setup: the panel registration is in-memory and has to
-    be repeated, and re-registering is what ``update=True`` is for.
+    be repeated, which is what ``update=True`` is for.
     """
     config = build_for_entry(hass, entry)
-    if not config["views"]:
-        _LOGGER.debug("No entities resolved yet; not registering a dashboard")
-        return "failed"
+    lovelace = hass.data.get(LOVELACE_DOMAIN)
+    dashboards = dashboards_mapping(lovelace)
 
-    existing = dashboards_mapping(hass.data.get(LOVELACE_DOMAIN))
-    if existing is None:
+    # One line saying what was actually found, because every failure below is
+    # otherwise indistinguishable from the outside.
+    _LOGGER.debug(
+        "Dashboard install: views=%d lovelace=%s dashboards=%s",
+        len(config["views"]),
+        type(lovelace).__name__ if lovelace is not None else "missing",
+        "yes" if dashboards is not None else "no",
+    )
+
+    if not config["views"]:
+        # No entities in the registry yet. Nothing worth registering, and the
+        # caller retries.
+        _LOGGER.debug("No entities resolved yet; deferring the dashboard")
+        return "waiting"
+
+    if dashboards is None:
         path = await async_write_yaml(hass, entry, config)
         _LOGGER.warning(
-            "Lovelace is not available in the expected shape, so the dashboard "
-            "could not be added to the sidebar. Its configuration is in %s",
+            "Lovelace is not available in the expected shape (found %s), so the "
+            "dashboard could not be added to the sidebar. Its configuration is "
+            "in %s",
+            type(lovelace).__name__ if lovelace is not None else "nothing",
             path,
         )
         _notify(
@@ -194,64 +297,88 @@ async def async_install(
     # Something already serves this URL path -- a dashboard the user made, or
     # our own from a previous boot. Re-registering our own is the normal case;
     # taking over someone else's is not ours to do.
-    current = existing.get(DASHBOARD_URL_PATH)
+    current = dashboards.get(DASHBOARD_URL_PATH)
     if current is not None and not _is_ours(current, entry):
         _LOGGER.info("A dashboard already uses /%s; leaving it alone", DASHBOARD_URL_PATH)
         return "adopted"
 
     try:
-        from homeassistant.components import frontend
-        from homeassistant.components.lovelace.dashboard import LovelaceStorage
-
-        item = _dashboard_item(entry)
-        store = LovelaceStorage(hass, item)
-
-        stored: Any = None
-        if not reseed:
-            try:
-                stored = await store.async_load(False)
-            except Exception:
-                # ConfigNotFound on a first run, which is exactly the case we
-                # are here to fix. Anything else is equally a reason to seed.
-                stored = None
-        if not stored:
-            await store.async_save(config)
-
-        existing[DASHBOARD_URL_PATH] = store
-        frontend.async_register_built_in_panel(
-            hass,
-            LOVELACE_DOMAIN,
-            sidebar_title=item["title"],
-            sidebar_icon=item["icon"],
-            frontend_url_path=DASHBOARD_URL_PATH,
-            config={"mode": "storage"},
-            require_admin=False,
-            update=True,
-        )
-    except Exception as err:
-        path = await async_write_yaml(hass, entry, config)
+        await _async_install_storage(hass, entry, dashboards, config, reseed)
+    except Exception as storage_err:
         _LOGGER.warning(
-            "Could not register the ESS Controller dashboard (%s). Its "
-            "configuration is in %s if you want to add it by hand",
-            err,
-            path,
+            "Could not register an editable dashboard (%s); falling back to "
+            "serving it from a file",
+            storage_err,
         )
+        try:
+            path = await _async_install_yaml(hass, entry, dashboards, config)
+        except Exception as yaml_err:
+            path = await async_write_yaml(hass, entry, config)
+            _LOGGER.warning(
+                "Could not register the dashboard at all (%s). Its configuration "
+                "is in %s if you want to add it by hand",
+                yaml_err,
+                path,
+            )
+            _notify(
+                hass,
+                "ESS Controller dashboard",
+                f"Adding the dashboard to the sidebar failed: `{yaml_err}`.\n\n"
+                f"Its configuration has been written to `{path}`. Add it by hand "
+                "with **Settings > Dashboards > Add dashboard**, then the "
+                "three-dot menu > **Raw configuration editor**, and paste the "
+                "file in.",
+            )
+            return "failed"
+
         _notify(
             hass,
             "ESS Controller dashboard",
-            f"Adding the dashboard to the sidebar failed: `{err}`.\n\nIts "
-            f"configuration has been written to `{path}`. Add it by hand with "
-            "**Settings > Dashboards > Add dashboard**, then the three-dot menu "
-            "> **Raw configuration editor**, and paste the file in.",
+            "**ESS Controller** is in your sidebar, served from "
+            f"`{path}`.\n\nEditing it in the UI is not possible in this mode -- "
+            "edit that file instead, or use the "
+            "`ess_controller.generate_dashboard` action to get the configuration "
+            "for a dashboard of your own.",
         )
-        return "failed"
+        return "installed_yaml"
 
     _LOGGER.info(
         "ESS Controller dashboard registered at /%s with %d views",
         DASHBOARD_URL_PATH,
         len(config["views"]),
     )
+    _notify(
+        hass,
+        "ESS Controller dashboard",
+        f"**ESS Controller** is in your sidebar with {len(config['views'])} "
+        "views. It is an ordinary dashboard now -- rearrange it however you "
+        "like and the changes are kept.\n\nIf you cannot see it, reload the "
+        "page. To remove it, turn off *Add a dashboard to the sidebar* in the "
+        "integration's options.",
+    )
     return "installed"
+
+
+def describe(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
+    """What the installer can see, for the diagnostics download.
+
+    Every failure mode above looks identical from the outside -- no sidebar
+    entry -- so the state it depends on is reported explicitly.
+    """
+    lovelace = hass.data.get(LOVELACE_DOMAIN)
+    dashboards = dashboards_mapping(lovelace)
+    resolved = resolve_entities(hass, entry)
+    current = (dashboards or {}).get(DASHBOARD_URL_PATH)
+    return {
+        "url_path": DASHBOARD_URL_PATH,
+        "lovelace_data": type(lovelace).__name__ if lovelace is not None else None,
+        "dashboards_mapping": None if dashboards is None else sorted(dashboards),
+        "entities_resolved": len(resolved),
+        "views_built": len(build_dashboard(resolved)["views"]),
+        "registered": current is not None,
+        "registered_is_ours": current is not None and _is_ours(current, entry),
+        "registered_type": type(current).__name__ if current is not None else None,
+    }
 
 
 def async_remove(hass: HomeAssistant, entry: ConfigEntry) -> None:
