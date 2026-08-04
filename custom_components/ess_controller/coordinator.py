@@ -713,15 +713,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return path
 
     async def async_create_dashboard(self) -> str:
-        """(Re)create the sidebar dashboard on demand.
+        """Rebuild the sidebar dashboard from the current entities, on demand.
 
-        The automatic offer happens once, so that deleting the dashboard sticks.
-        This is the way back: it recreates it, or writes the YAML out if the
-        sidebar cannot be touched on this Home Assistant version.
+        Discards edits deliberately -- this is the button for when the dashboard
+        has been broken or emptied and the generated one is wanted back. It also
+        writes the YAML out if the sidebar cannot be touched on this Home
+        Assistant version.
         """
         from .panel import async_install
 
-        outcome = await async_install(self.hass, self.entry)
+        # reseed: the button exists for someone who has broken or emptied the
+        # dashboard and wants the generated one back, so it overwrites the stored
+        # copy rather than preserving it.
+        outcome = await async_install(self.hass, self.entry, reseed=True)
         self.settings.dashboard_created = True
         self.runtime_store.async_schedule_save()
         return outcome

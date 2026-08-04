@@ -112,14 +112,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 def _async_schedule_dashboard(
     hass: HomeAssistant, entry: ConfigEntry, coordinator: EssCoordinator
 ) -> None:
-    """Offer the prebuilt dashboard once, after startup has settled.
+    """Register the sidebar dashboard, after startup has settled.
 
-    After startup because Lovelace has to be loaded before a dashboard can be
-    added to it, and because the entities need to be registered before their ids
-    can be read. Once, because deleting the dashboard should stick.
+    After startup because Lovelace has to be loaded before a panel can be
+    attached to it, and because the entities must be in the registry before their
+    ids can be read.
+
+    On *every* setup, not once: the sidebar panel is in-memory and disappears with
+    a restart or a reload, so registering it a single time would leave the
+    dashboard working until the next reboot and then silently vanish. What
+    happens only once is seeding the configuration -- after that the stored copy,
+    including any edits, is what gets served.
     """
-    if coordinator.settings.dashboard_created:
-        return
     if not entry.options.get(
         CONF_CREATE_DASHBOARD, entry.data.get(CONF_CREATE_DASHBOARD, True)
     ):
@@ -131,11 +135,9 @@ def _async_schedule_dashboard(
         try:
             outcome = await async_install(hass, entry)
         except Exception:
-            _LOGGER.exception("Unexpected failure creating the dashboard")
+            _LOGGER.exception("Unexpected failure registering the dashboard")
             return
-        if outcome in ("created", "exists", "unsupported"):
-            # "unsupported" counts as done: the YAML has been written, and
-            # retrying every restart would only rewrite the same file.
+        if outcome != "failed" and not coordinator.settings.dashboard_created:
             coordinator.settings.dashboard_created = True
             coordinator.runtime_store.async_schedule_save()
 
@@ -144,6 +146,11 @@ def _async_schedule_dashboard(
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Tear down an entry, persisting anything learned first."""
+    # Before the platforms go, so a reload does not leave a panel pointing at
+    # entities that are about to be removed and then re-registered.
+    from .panel import async_remove
+
+    async_remove(hass, entry)
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         coordinator: EssCoordinator | None = hass.data.get(DOMAIN, {}).pop(

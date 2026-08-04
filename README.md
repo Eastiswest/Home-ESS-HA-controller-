@@ -522,10 +522,24 @@ That returns the same configuration as YAML — paste it into any dashboard's ra
 configuration editor — and writes `config/ess_controller/dashboard.yaml`.
 
 There is no public API for an integration to add a dashboard to the sidebar, so
-this uses Lovelace internals. Every step is feature-detected and nothing about it
-is load-bearing: if a Home Assistant release moves the furniture, the YAML is
-written out and a log line tells you where, and the controller carries on
-regardless.
+this registers a panel and hands Lovelace its own storage object to serve the
+configuration from. Every step is feature-detected and none of it is
+load-bearing: if a Home Assistant release moves the furniture, the YAML is
+written out, a **notification** tells you where and how to paste it in, and the
+controller carries on regardless.
+
+One consequence of that mechanism: the dashboard is not listed under
+**Settings → Dashboards**, so there is no delete button for it. To remove it,
+turn **Add a dashboard to the sidebar** off in the optimiser step. Your edits to
+it are saved normally and survive restarts — and turning the option off keeps
+them, so switching it back on restores what you had rather than the generated
+version. **Rebuild dashboard** deliberately discards them and regenerates.
+
+If it does not appear, check in this order: the integration is actually
+configured (**Settings → Devices & services** — a HACS download alone does
+nothing until you add the integration), Home Assistant has been restarted since
+the download, and then **Notifications**, which is where any failure explains
+itself.
 
 ---
 

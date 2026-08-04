@@ -36,6 +36,24 @@ DASHBOARD_ICON = "mdi:home-battery-outline"
 PLAN_TABLE_SLOTS = 12
 
 
+def dashboards_mapping(data: Any) -> dict[str, Any] | None:
+    """Lovelace's url_path -> dashboard mapping, whichever shape it is in.
+
+    It was a plain dict under ``hass.data["lovelace"]["dashboards"]`` for years
+    and is an attribute of a dataclass in newer releases. Lives here rather than
+    beside the installer so the shape handling is testable without Home
+    Assistant.
+    """
+    if data is None:
+        return None
+    found = (
+        data.get("dashboards")
+        if isinstance(data, dict)
+        else getattr(data, "dashboards", None)
+    )
+    return found if isinstance(found, dict) else None
+
+
 def _entities_card(
     title: str, keys: list[str], resolved: dict[str, str], **extra: Any
 ) -> dict[str, Any] | None:

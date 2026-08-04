@@ -513,3 +513,49 @@ class TestTemplatesRender:
         for card in self._cards(build_dashboard(resolved())):
             rendered = self._render(card, {})
             assert "None" not in rendered
+
+
+class TestDashboardsMapping:
+    """Lovelace's dashboards mapping has changed shape across HA releases.
+
+    Getting this wrong is exactly how the first attempt failed silently: it
+    looked for the live dashboards *collection*, which Home Assistant keeps as a
+    local variable and never publishes, so the lookup always missed and the
+    install quietly fell back to writing a file.
+    """
+
+    def test_reads_the_legacy_dict_shape(self):
+        from custom_components.ess_controller.dashboard import dashboards_mapping
+
+        board = {"my-dash": object()}
+        assert dashboards_mapping({"dashboards": board, "mode": "storage"}) is board
+
+    def test_reads_the_dataclass_shape(self):
+        from custom_components.ess_controller.dashboard import dashboards_mapping
+
+        class LovelaceData:
+            def __init__(self, dashboards):
+                self.dashboards = dashboards
+                self.mode = "storage"
+
+        board = {"my-dash": object()}
+        assert dashboards_mapping(LovelaceData(board)) is board
+
+    def test_returns_none_when_lovelace_is_absent(self):
+        from custom_components.ess_controller.dashboard import dashboards_mapping
+
+        assert dashboards_mapping(None) is None
+
+    def test_returns_none_for_an_unrecognised_shape(self):
+        from custom_components.ess_controller.dashboard import dashboards_mapping
+
+        assert dashboards_mapping({"mode": "yaml"}) is None
+        assert dashboards_mapping(object()) is None
+        assert dashboards_mapping({"dashboards": ["not", "a", "mapping"]}) is None
+
+    def test_an_empty_mapping_is_still_usable(self):
+        """No dashboards yet is the normal case, not a failure."""
+        from custom_components.ess_controller.dashboard import dashboards_mapping
+
+        board: dict = {}
+        assert dashboards_mapping({"dashboards": board}) is board
