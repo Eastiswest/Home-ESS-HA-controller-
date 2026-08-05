@@ -308,6 +308,18 @@ class TestTranslations:
             missing = keys - declared
             assert not missing, f"{platform} missing translations for {sorted(missing)}"
 
+    def test_manifest_version_matches_the_constant(self):
+        """Two places record the version, and a release checks both against the tag.
+
+        Drift here means an update that installs and then reports the old
+        version, which is a miserable thing to diagnose from the outside.
+        """
+        manifest = json.loads((PACKAGE / "manifest.json").read_text())
+        constants = _const_strings(TREES["const"])
+        assert manifest["version"] == constants["VERSION"], (
+            f"manifest {manifest['version']} != const {constants['VERSION']}"
+        )
+
     def test_services_documented(self):
         """Every registered service is described in both files, with its fields.
 

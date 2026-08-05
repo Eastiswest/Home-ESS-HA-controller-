@@ -35,7 +35,7 @@
       },
       "inverter": {
         "title": "Inverter",
-        "description": "Control is applied through your existing inverter integration's entities.\n\nAuto-discovered so far: {discovered}",
+        "description": "Control is applied by calling your existing inverter integration's entities, so how that integration reaches the inverter -- Modbus TCP over a WiFi dongle, RS485, anything else -- is its business and not this one's.\n\nWhat matters is that something in Home Assistant exposes *writable* entities for charge and discharge control. A read-only integration cannot be driven.\n\nAuto-discovered so far: {discovered}",
         "data": {
           "inverter_adapter": "Inverter type",
           "inverter_entity_prefix": "Entity name prefix",
@@ -47,7 +47,8 @@
         "data_description": {
           "inverter_entity_prefix": "Used to pick the right entities if you have more than one inverter, e.g. \"solax\".",
           "nominal_voltage": "Used to convert a power target into a battery current limit when the inverter limits by current. The live voltage sensor is preferred when available.",
-          "grid_export_limit_kw": "Your permitted export, e.g. 3.68 kW for a typical single-phase G98 connection."
+          "grid_export_limit_kw": "Your permitted export, e.g. 3.68 kW for a typical single-phase G98 connection.",
+          "inverter_adapter": "SolaX expects the entities created by the SolaX Modbus integration, which itself supports Modbus TCP. Generic lets you name any writable entities. None leaves the inverter alone and publishes the plan only."
         }
       },
       "tariff": {
@@ -285,7 +286,7 @@
       },
       "inverter": {
         "title": "Inverter",
-        "description": "Auto-discovered: {discovered}",
+        "description": "Control is applied by calling your existing inverter integration's entities, so how that integration reaches the inverter -- Modbus TCP over a WiFi dongle, RS485, anything else -- is its business and not this one's.\n\nWhat matters is that something in Home Assistant exposes *writable* entities for charge and discharge control. A read-only integration cannot be driven.\n\nAuto-discovered so far: {discovered}",
         "data": {
           "inverter_adapter": "Inverter type",
           "inverter_entity_prefix": "Entity name prefix",
@@ -293,6 +294,9 @@
           "manage_export_limit": "Also manage the inverter's export limit",
           "grid_import_limit_kw": "Grid import limit",
           "grid_export_limit_kw": "Grid export limit"
+        },
+        "data_description": {
+          "inverter_adapter": "SolaX expects the entities created by the SolaX Modbus integration, which itself supports Modbus TCP. Generic lets you name any writable entities. None leaves the inverter alone and publishes the plan only."
         }
       },
       "entity_map": {
@@ -457,8 +461,8 @@
   "selector": {
     "adapter": {
       "options": {
-        "solax_modbus": "SolaX (SolaX Modbus integration)",
-        "generic": "Generic — describe the entities yourself",
+        "solax_modbus": "SolaX — drive the SolaX Modbus integration's entities",
+        "generic": "Generic — name the entities yourself",
         "none": "None — advisory only, never control"
       }
     },

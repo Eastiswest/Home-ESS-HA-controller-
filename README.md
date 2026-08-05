@@ -327,6 +327,30 @@ reconfiguring. It arrives disarmed.
 Copy `custom_components/ess_controller` into your `config/custom_components/`
 directory and restart.
 
+### Updating
+
+HACS shows an **Update** button for a repository that publishes releases, and
+only a redownload for one that does not — so every version worth taking is
+tagged and released. Update in place from HACS; your configuration, learned
+history and performance log all survive. **Restart Home Assistant afterwards**:
+HACS replaces the files, but Python keeps the old module in memory until a
+restart, so a reload is not enough.
+
+Uninstalling and reinstalling is never required, and would throw away your
+configuration.
+
+Cutting a release (for anyone maintaining a fork):
+
+```bash
+# bump the version in BOTH manifest.json and const.py, then
+git commit -am "Release 0.6.1"
+git tag v0.6.1 && git push && git push --tags
+```
+
+The release workflow refuses to publish if the tag, the manifest and the
+constant disagree — a mismatch produces an update that installs and then reports
+the old version, which is thoroughly confusing from the outside.
+
 ---
 
 ## What you need first
@@ -375,6 +399,20 @@ minimum and sits below that. It is the hardware backstop if this integration
 stops running, so the optimiser is deliberately not allowed to plan into it.
 
 ### Inverter
+
+**How the inverter is reached is not this integration's business.** It calls
+entities that your existing inverter integration exposes, so Modbus TCP over a
+WiFi dongle, RS485, or anything else all work identically from here. What matters
+is that *something* in Home Assistant publishes **writable** entities for charge
+and discharge control — a read-only integration can be read but not driven, and
+the controller will stay stuck in advisory mode.
+
+For a SolaX X1 Hybrid G4 that means
+[homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus),
+which speaks Modbus TCP to a Pocket WiFi dongle and creates the writable selects
+and numbers this integration drives. The core `solax` integration is HTTP and
+read-only, so it cannot be used for control — pick `None` for the adapter and run
+advisory-only if that is all you have.
 
 Pick your inverter type and, if you have more than one, an entity name prefix
 (e.g. `solax`) to disambiguate them. Entities are auto-discovered by role — "the

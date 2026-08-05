@@ -1,0 +1,52 @@
+name: Release
+
+# HACS shows an "Update" button for a repository that publishes releases, and
+# only offers a redownload for one that does not. Tagging is therefore what turns
+# a commit into an update people can take without uninstalling and starting
+# again -- which also means losing their configuration, so it matters.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version HACS reports comes from the tag, and the version Home
+      # Assistant reports comes from the manifest. If they disagree, the update
+      # appears to install and then the integration claims to be the old
+      # version, which is a miserable thing to debug.
+      - name: Check the tag matches the manifest
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(python -c "import json;print(json.load(open('custom_components/ess_controller/manifest.json'))['version'])")
+          CONST=$(python -c "import re;print(re.search(r'VERSION: Final = \"([^\"]+)\"', open('custom_components/ess_controller/const.py').read()).group(1))")
+          echo "tag=$TAG manifest=$MANIFEST const=$CONST"
+          if [ "$TAG" != "$MANIFEST" ] || [ "$TAG" != "$CONST" ]; then
+            echo "::error::tag $TAG, manifest $MANIFEST and const $CONST must all agree"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the fast tests before publishing
+        run: |
+          pip install pytest ruff
+          ruff check custom_components tests
+          python -m pytest tests/ -q
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
