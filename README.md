@@ -305,8 +305,22 @@ actions, and says which slots were unmetered.
 1. HACS → three-dot menu → **Custom repositories**.
 2. Add `https://github.com/Eastiswest/Home-ESS-HA-controller-`, category
    **Integration**.
-3. Install **AI ESS Controller**, restart Home Assistant.
-4. **Settings → Devices & Services → Add Integration → AI ESS Controller**.
+3. Download **AI ESS Controller**.
+4. **Restart Home Assistant.** A reload is not enough — new files need a restart.
+5. **Settings → Devices & services → + Add integration → AI ESS Controller**,
+   and complete the setup flow.
+
+**Step 5 is not optional.** Downloading through HACS only copies files onto
+disk; until a config entry exists none of the integration's code runs, so there
+are no entities and nothing in the sidebar. If you are unsure whether it is
+configured, look for entities beginning `ess` in **Developer tools → States** —
+a working install has around sixty.
+
+Of the eleven setup steps, two matter on the first pass: **Battery** (your state
+of charge sensor, the pack capacity, and what the pack cost if you want the wear
+allowance derived) and **Import tariff** (Octopus product code and region).
+Everything else has a sensible default and can be changed later without
+reconfiguring. It arrives disarmed.
 
 ### Manual
 
