@@ -177,6 +177,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER,
             name=DOMAIN,
             update_interval=DEFAULT_SCAN_INTERVAL,
+            # Explicit rather than left to the ContextVar the base class would
+            # otherwise infer it from: that inference is deprecated and stops
+            # working in Home Assistant 2026.8, at which point setup raises and
+            # the integration produces no entities at all.
+            config_entry=entry,
         )
         self.entry = entry
         self.learning_store = LearningStore(hass, entry.entry_id)

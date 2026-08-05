@@ -22,6 +22,22 @@ jobs:
       - name: Test
         run: python -m pytest tests/ -q
 
+  # The fast job above runs without Home Assistant, which is what let a
+  # config flow that returned "400: Bad Request" and four platforms that could
+  # not import reach a user. This job installs Home Assistant and actually walks
+  # the flow, sets the entry up, and registers the dashboard.
+  homeassistant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Home Assistant
+        run: pip install pytest pytest-asyncio homeassistant
+      - name: End-to-end tests
+        run: python -m pytest tests/test_with_homeassistant.py -q
+
   hassfest:
     runs-on: ubuntu-latest
     steps:

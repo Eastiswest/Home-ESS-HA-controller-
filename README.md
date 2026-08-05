@@ -677,6 +677,30 @@ inverter. Start in advisory mode.
 
 ## Development
 
+### Tests
+
+```bash
+pip install pytest ruff && python -m pytest tests/ -q
+```
+
+That runs without Home Assistant installed, which keeps it fast — and is why a
+second job exists:
+
+```bash
+pip install pytest pytest-asyncio homeassistant   # needs Python 3.13
+python -m pytest tests/test_with_homeassistant.py -q
+```
+
+Those boot a real instance and do what a user does: set the component up, walk
+every config-flow step, open every options step, check the entities appear, and
+register the dashboard. Three fatal bugs shipped because nothing did that — a
+selector that could not be serialised (the config flow returned *400: Bad
+Request*, so the integration could not be added at all), an import of a module
+that does not exist (four platforms failed, so there were no entities), and a
+deprecated coordinator call that stops working in Home Assistant 2026.8. None of
+them are wrong as Python, so none of them were visible without importing Home
+Assistant.
+
 ```bash
 pip install pytest ruff
 python -m pytest tests/ -q

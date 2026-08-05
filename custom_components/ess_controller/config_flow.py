@@ -195,15 +195,24 @@ MAPPABLE_ROLES: tuple[tuple[str, tuple[str, ...]], ...] = (
 def _number(
     minimum: float, maximum: float, step: float, unit: str | None = None
 ) -> selector.NumberSelector:
-    return selector.NumberSelector(
-        selector.NumberSelectorConfig(
-            min=minimum,
-            max=maximum,
-            step=step,
-            unit_of_measurement=unit,
-            mode=selector.NumberSelectorMode.BOX,
-        )
+    """A boxed number field, with a unit only when there is one.
+
+    ``NumberSelectorConfig`` is a TypedDict validated by voluptuous, and its
+    ``unit_of_measurement`` must be a string -- passing ``None`` for the unitless
+    fields raised "expected str for dictionary value", which meant the schema
+    could not be built, which meant Home Assistant could not start the config
+    flow at all: "Config flow could not be loaded: 400: Bad Request". The key has
+    to be absent, not null.
+    """
+    config = selector.NumberSelectorConfig(
+        min=minimum,
+        max=maximum,
+        step=step,
+        mode=selector.NumberSelectorMode.BOX,
     )
+    if unit is not None:
+        config["unit_of_measurement"] = unit
+    return selector.NumberSelector(config)
 
 
 def _entity(
