@@ -661,20 +661,79 @@ class EssFlowMixin:
         return {}
 
 
+# Order matters: it is the sequence of the first pass and the order of the
+# review menu, so the two always agree.
+CONFIG_SECTIONS: tuple[str, ...] = (
+    "user",
+    "inverter",
+    "tariff",
+    "tariff_import",
+    "tariff_export",
+    "forecast",
+    "sessions",
+    "shifting",
+    "outage",
+    "optimiser",
+)
+
+# Partial answers from a flow that was closed rather than finished, so reopening
+# resumes instead of starting from an empty form.
+DATA_PARTIAL = f"{DOMAIN}_partial_config"
+
+
 class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
-    """Guided setup."""
+    """Guided setup.
+
+    Home Assistant's flow API has no way back: the frontend can only show a
+    form, a menu, or the end of the flow, so there is no back arrow to add. What
+    it does have is menus, so the last step is a review menu listing every
+    section -- which is better than a back arrow, because a mistake three steps
+    ago is one click away rather than three.
+
+    Two things make a closed dialog cheap as well. Revisiting a section from the
+    review menu returns to the review menu rather than walking the rest of the
+    wizard again, and answers survive the dialog being closed, so reopening
+    resumes where it stopped.
+    """
 
     VERSION = 1
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self._reviewing = False
+
+    def _next(self, current: str) -> str:
+        """The step after ``current`` on the first pass."""
+        index = CONFIG_SECTIONS.index(current)
+        return (
+            CONFIG_SECTIONS[index + 1] if index + 1 < len(CONFIG_SECTIONS) else "review"
+        )
+
+    async def _advance(self, current: str) -> ConfigFlowResult:
+        """Go to the review menu when revisiting, otherwise to the next step."""
+        if self._reviewing:
+            return await self.async_step_review()
+        return await getattr(self, f"async_step_{self._next(current)}")()
+
+    @callback
+    def async_remove(self) -> None:
+        """Keep what was typed when the dialog is closed unfinished.
+
+        Losing eleven steps of answers to a mis-click is the actual complaint
+        behind wanting a back arrow.
+        """
+        if self._data:
+            self.hass.data.setdefault(DATA_PARTIAL, {})[DOMAIN] = dict(self._data)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_inverter()
+            return await self._advance("user")
+        if not self._data:
+            # Resume a flow that was closed rather than completed.
+            self._data = dict(self.hass.data.get(DATA_PARTIAL, {}).get(DOMAIN) or {})
         return self.async_show_form(
             step_id="user", data_schema=self._battery_schema(self._data)
         )
@@ -684,7 +743,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_tariff()
+            return await self._advance("inverter")
 
         adapter = self._data.get(CONF_INVERTER_ADAPTER, ADAPTER_SOLAX_MODBUS)
         discovered = discover_entities(self.hass, SOLAX_ROLE_SPECS, "solax")
@@ -704,7 +763,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_tariff_import()
+            return await self._advance("tariff")
         return self.async_show_form(
             step_id="tariff", data_schema=self._tariff_schema(self._data)
         )
@@ -719,7 +778,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
             errors = await self._async_validate_tariff(candidate, "import")
             if not errors:
                 self._data = candidate
-                return await self.async_step_tariff_export()
+                return await self._advance("tariff_import")
         return self.async_show_form(
             step_id="tariff_import",
             data_schema=self._direction_schema(self._data, "import"),
@@ -731,7 +790,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if self._data.get(CONF_EXPORT_PROVIDER, PROVIDER_NONE) == PROVIDER_NONE:
             # No export tariff configured, which is a perfectly normal setup.
-            return await self.async_step_forecast()
+            return await self._advance("tariff_export")
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -740,7 +799,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
             errors = await self._async_validate_tariff(candidate, "export")
             if not errors:
                 self._data = candidate
-                return await self.async_step_forecast()
+                return await self._advance("tariff_export")
         return self.async_show_form(
             step_id="tariff_export",
             data_schema=self._direction_schema(self._data, "export"),
@@ -752,7 +811,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_sessions()
+            return await self._advance("forecast")
         return self.async_show_form(
             step_id="forecast", data_schema=self._forecast_schema(self._data)
         )
@@ -762,7 +821,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_shifting()
+            return await self._advance("sessions")
         return self.async_show_form(
             step_id="sessions", data_schema=self._sessions_schema(self._data)
         )
@@ -772,7 +831,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_outage()
+            return await self._advance("shifting")
         return self.async_show_form(
             step_id="shifting", data_schema=self._shifting_schema(self._data)
         )
@@ -782,7 +841,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            return await self.async_step_optimiser()
+            return await self._advance("outage")
         return self.async_show_form(
             step_id="outage", data_schema=self._outage_schema(self._data)
         )
@@ -792,14 +851,73 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._data.update(_clean(user_input))
-            await self.async_set_unique_id(
-                f"{DOMAIN}_{self._data.get(CONF_INVERTER_PREFIX, 'default')}"
-            )
-            self._abort_if_unique_id_configured()
-            return self.async_create_entry(title=NAME, data=self._data)
+            return await self._advance("optimiser")
         return self.async_show_form(
             step_id="optimiser", data_schema=self._optimiser_schema(self._data)
         )
+
+    async def async_step_review(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Everything answered: check it over, or go back into any section.
+
+        This is the flow API's substitute for a back arrow, and a better one --
+        any section is one click away, in any order, as many times as you like.
+        """
+        if user_input is not None:
+            chosen = user_input["next_step_id"]
+            if chosen == "finish":
+                return await self.async_step_finish()
+            self._reviewing = True
+            return await getattr(self, f"async_step_{chosen}")()
+
+        self._reviewing = True
+        return self.async_show_menu(
+            step_id="review",
+            menu_options=["finish", *CONFIG_SECTIONS],
+            description_placeholders=self._summary(),
+        )
+
+    async def async_step_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        await self.async_set_unique_id(
+            f"{DOMAIN}_{self._data.get(CONF_INVERTER_PREFIX, 'default')}"
+        )
+        self._abort_if_unique_id_configured()
+        # Finished, so the resume copy is no longer wanted.
+        self.hass.data.get(DATA_PARTIAL, {}).pop(DOMAIN, None)
+        return self.async_create_entry(title=NAME, data=self._data)
+
+    def _summary(self) -> dict[str, str]:
+        """A few words on what was chosen, so the review is worth reading."""
+        data = self._data
+        soc = data.get(CONF_BATTERY_SOC_ENTITY) or "the inverter's own reading"
+        wear = (
+            f"derived from {data.get(CONF_BATTERY_COST, 0):.0f} over "
+            f"{data.get(CONF_BATTERY_EXPECTED_CYCLES, 0):.0f} cycles"
+            if data.get(CONF_DERIVE_WEAR_FROM_COST)
+            else f"{data.get(CONF_CYCLE_COST, DEFAULT_CYCLE_COST)} p/kWh as entered"
+        )
+        export = data.get(CONF_EXPORT_PROVIDER, PROVIDER_NONE)
+        return {
+            "battery": (
+                f"{data.get(CONF_BATTERY_CAPACITY, DEFAULT_BATTERY_CAPACITY)} kWh, "
+                f"{data.get(CONF_BATTERY_MIN_SOC, DEFAULT_MIN_SOC):.0f}"
+                f"-{data.get(CONF_BATTERY_MAX_SOC, DEFAULT_MAX_SOC):.0f}%, "
+                f"state of charge from {soc}"
+            ),
+            "wear": wear,
+            "tariff": (
+                f"import via {data.get(CONF_IMPORT_PROVIDER, 'not set')}, "
+                f"export {'not configured' if export == PROVIDER_NONE else export}"
+            ),
+            "control": (
+                "advisory mode: the plan is published but the inverter is not written to"
+                if data.get(CONF_DRY_RUN, True)
+                else "armed: the plan will be applied to the inverter"
+            ),
+        }
 
     @staticmethod
     @callback

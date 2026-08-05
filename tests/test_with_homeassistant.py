@@ -125,13 +125,22 @@ def _lovelace(hass) -> None:
 
 
 async def _complete_flow(hass) -> object:
-    """Click through the config flow accepting every default."""
+    """Click through the config flow accepting every default, then save.
+
+    The wizard ends at a review menu rather than creating the entry, so reaching
+    an entry means choosing "finish" -- which is worth asserting on its own: an
+    entry created before the review would mean nothing was reviewable.
+    """
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     steps = 0
     while result["type"] == "form":
         steps += 1
         assert steps < 20, "config flow does not terminate"
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    if result["type"] == "menu":
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "finish"}
+        )
     return result
 
 
@@ -194,6 +203,11 @@ class TestConfigFlow:
             result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
             assert len(visited) < 20
 
+        # The wizard hands off to the review menu, not straight to an entry.
+        assert result["type"] == "menu"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "finish"}
+        )
         assert result["type"] == "create_entry"
         assert "user" in visited
         assert "optimiser" in visited
@@ -379,3 +393,138 @@ class TestOctopusErrors:
         from custom_components.ess_controller.tariff.octopus import KIND_NOT_FOUND
 
         assert _OCTOPUS_ERRORS[KIND_NOT_FOUND] == "octopus_not_found"
+
+
+class TestReviewMenu:
+    """The substitute for the back arrow Home Assistant's flow API has not got.
+
+    Any section reachable in one click, revisiting one returning to the review
+    rather than re-walking the wizard, and nothing saved until "finish".
+    """
+
+    async def _to_review(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        steps = 0
+        while result["type"] == "form":
+            steps += 1
+            assert steps < 20
+            result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        return result
+
+    async def test_the_wizard_ends_at_a_review_menu(self, hass):
+        result = await self._to_review(hass)
+        assert result["type"] == "menu"
+        assert result["step_id"] == "review"
+
+    async def test_nothing_is_saved_until_finish(self, hass):
+        result = await self._to_review(hass)
+        assert result["type"] == "menu"
+        assert hass.config_entries.async_entries(DOMAIN) == []
+
+    async def test_every_section_is_offered(self, hass):
+        from custom_components.ess_controller.config_flow import CONFIG_SECTIONS
+
+        result = await self._to_review(hass)
+        offered = set(result["menu_options"])
+        assert "finish" in offered
+        assert set(CONFIG_SECTIONS) <= offered
+
+    async def test_every_menu_option_has_a_label(self, hass):
+        import json
+
+        result = await self._to_review(hass)
+        strings = json.loads(
+            (REPO / "custom_components/ess_controller/strings.json").read_text()
+        )
+        labels = strings["config"]["step"]["review"]["menu_options"]
+        for option in result["menu_options"]:
+            assert option in labels, option
+
+    async def test_the_summary_placeholders_are_all_filled(self, hass):
+        """An unfilled placeholder renders as a literal {brace} in the dialog."""
+        import json
+        import re
+
+        result = await self._to_review(hass)
+        strings = json.loads(
+            (REPO / "custom_components/ess_controller/strings.json").read_text()
+        )
+        description = strings["config"]["step"]["review"]["description"]
+        needed = set(re.findall(r"\{(\w+)\}", description))
+        assert needed <= set(result["description_placeholders"])
+
+    @pytest.mark.parametrize("section", ["user", "inverter", "optimiser", "forecast"])
+    async def test_revisiting_a_section_returns_to_the_review(self, hass, section):
+        """The whole point: fix one step without re-walking the rest."""
+        result = await self._to_review(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": section}
+        )
+        assert result["type"] == "form"
+        assert result["step_id"] == section
+
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        assert result["type"] == "menu", "did not come back to the review"
+        assert result["step_id"] == "review"
+
+    async def test_a_correction_is_kept(self, hass):
+        result = await self._to_review(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "user"}
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"battery_capacity_kwh": 17.6}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "finish"}
+        )
+        assert result["type"] == "create_entry"
+        assert result["data"]["battery_capacity_kwh"] == 17.6
+
+    async def test_finish_creates_the_entry(self, hass):
+        result = await self._to_review(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "finish"}
+        )
+        assert result["type"] == "create_entry"
+        assert len(hass.config_entries.async_entries(DOMAIN)) == 1
+
+    async def test_closing_the_dialog_keeps_the_answers(self, hass):
+        """Abandoning the flow must not throw away eleven steps of typing."""
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"battery_capacity_kwh": 19.4}
+        )
+        hass.config_entries.flow.async_abort(result["flow_id"])
+
+        resumed = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        assert resumed["type"] == "form"
+        assert resumed["step_id"] == "user"
+        schema = resumed["data_schema"].schema
+        suggested = {
+            str(key): key.description.get("suggested_value")
+            for key in schema
+            if getattr(key, "description", None)
+        }
+        assert suggested.get("battery_capacity_kwh") == 19.4
+
+    async def test_a_finished_flow_leaves_nothing_to_resume(self, hass):
+        from custom_components.ess_controller.config_flow import DATA_PARTIAL
+
+        result = await self._to_review(hass)
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "finish"}
+        )
+        assert not hass.data.get(DATA_PARTIAL, {}).get(DOMAIN)

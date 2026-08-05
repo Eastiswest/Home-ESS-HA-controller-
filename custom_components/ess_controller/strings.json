@@ -199,6 +199,23 @@
           "recommend_import_products": "Comma separated Octopus product codes. Leave empty for a sensible default set.",
           "recommend_window_hours": "Agile publishes only 24-48 hours ahead, so a longer window is not necessarily better."
         }
+      },
+      "review": {
+        "title": "Check it over",
+        "description": "Nothing has been saved yet. Pick any section to go back into it, or save.\n\n**Battery** — {battery}\n**Wear allowance** — {wear}\n**Tariff** — {tariff}\n**Control** — {control}",
+        "menu_options": {
+          "finish": "Save and finish",
+          "user": "Battery",
+          "inverter": "Inverter",
+          "tariff": "Tariff sources",
+          "tariff_import": "Import tariff",
+          "tariff_export": "Export tariff",
+          "forecast": "Forecasting",
+          "sessions": "Grid incentive sessions",
+          "shifting": "Flexible loads",
+          "outage": "Power cut anticipation",
+          "optimiser": "Optimiser"
+        }
       }
     },
     "error": {
