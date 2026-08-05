@@ -390,6 +390,13 @@ the intended power by tens of percent) and this figure is the fallback.
 
 ### Tariff
 
+Product codes, since the naming trips people up: **import** Agile is
+`AGILE-24-10-01`, **export** Agile is `AGILE-OUTGOING-19-05-13` — outgoing reads
+`AGILE-OUTGOING`, not `OUTGOING-AGILE`. Open
+<https://api.octopus.energy/v1/products/> in a browser to see the live list.
+If you have no export tariff, set the export price source to **none** and the
+export step is skipped entirely.
+
 Import prices are required. Export is optional — leave it as **None** if you are
 not paid for export, and the optimiser will treat exported energy as worthless,
 storing or spilling surplus rather than giving it away.

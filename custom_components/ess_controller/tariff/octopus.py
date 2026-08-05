@@ -65,8 +65,25 @@ REQUEST_TIMEOUT = 30
 _SLOT = timedelta(minutes=SLOT_MINUTES)
 
 
+# What went wrong, so a caller can say something useful. "Could not reach the
+# API" for a mistyped product code sends people to check their router when the
+# problem is four characters in a text box.
+KIND_UNREACHABLE = "unreachable"
+KIND_NOT_FOUND = "not_found"
+KIND_UNAUTHORISED = "unauthorised"
+KIND_BAD_RESPONSE = "bad_response"
+KIND_HTTP = "http"
+
+
 class OctopusApiError(Exception):
     """Raised when the Octopus API cannot be reached or returns an error."""
+
+    def __init__(
+        self, message: str, kind: str = KIND_UNREACHABLE, status: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
 
 
 def build_tariff_code(product_code: str, region: str, direction: str = "import") -> str:
@@ -292,21 +309,33 @@ async def async_get_json(
             url, params=params, headers=_auth_header(api_key), timeout=REQUEST_TIMEOUT
         )
     except Exception as err:
-        raise OctopusApiError(f"request to {url} failed: {err}") from err
+        raise OctopusApiError(
+            f"request to {url} failed: {err}", KIND_UNREACHABLE
+        ) from err
 
     async with response:
-        if response.status == 401:
-            raise OctopusApiError("unauthorised: check the Octopus API key")
-        if response.status == 404:
+        if response.status in (401, 403):
             raise OctopusApiError(
-                "not found: check the product and tariff codes are correct"
+                "unauthorised: check the Octopus API key",
+                KIND_UNAUTHORISED,
+                response.status,
+            )
+        if response.status == 404:
+            # The API answered perfectly well; the code asked for something that
+            # does not exist. Reported as such rather than as a network fault.
+            raise OctopusApiError(
+                f"no such product or tariff: {url}", KIND_NOT_FOUND, 404
             )
         if response.status >= 400:
-            raise OctopusApiError(f"HTTP {response.status} from {url}")
+            raise OctopusApiError(
+                f"HTTP {response.status} from {url}", KIND_HTTP, response.status
+            )
         try:
             return await response.json()
         except Exception as err:
-            raise OctopusApiError(f"invalid JSON from {url}: {err}") from err
+            raise OctopusApiError(
+                f"invalid JSON from {url}: {err}", KIND_BAD_RESPONSE
+            ) from err
 
 
 def parse_account_tariffs(payload: dict[str, Any]) -> dict[str, Any]:

@@ -167,6 +167,10 @@ from .inverter.roles import (
     discover_entities,
 )
 from .tariff.octopus import (
+    KIND_BAD_RESPONSE,
+    KIND_HTTP,
+    KIND_NOT_FOUND,
+    KIND_UNAUTHORISED,
     REGIONS,
     OctopusApiError,
     async_discover_tariffs,
@@ -234,6 +238,17 @@ def _options(values: list[str], key: str) -> selector.SelectSelector:
             translation_key=key,
         )
     )
+
+
+# A mistyped product code and a dead network are different problems with
+# different fixes, and telling a user to check their network when the API
+# answered "no such product" is worse than saying nothing.
+_OCTOPUS_ERRORS = {
+    KIND_NOT_FOUND: "octopus_not_found",
+    KIND_UNAUTHORISED: "octopus_unauthorised",
+    KIND_HTTP: "octopus_http_error",
+    KIND_BAD_RESPONSE: "octopus_bad_response",
+}
 
 
 def _suggest(current: dict[str, Any], key: str, default: Any) -> Any:
@@ -618,7 +633,9 @@ class EssFlowMixin:
             try:
                 found = await async_discover_tariffs(session, api_key, account)
             except OctopusApiError as err:
-                _LOGGER.warning("Octopus account lookup failed: %s", err)
+                _LOGGER.warning("Octopus account lookup failed (%s): %s", err.kind, err)
+                if err.kind == KIND_UNAUTHORISED:
+                    return {"base": "octopus_unauthorised"}
                 return {"base": "octopus_account_failed"}
             tariff_code = found.get(direction)
             if tariff_code:
@@ -637,8 +654,8 @@ class EssFlowMixin:
         try:
             count = await async_validate_tariff(session, tariff_code, product)
         except OctopusApiError as err:
-            _LOGGER.warning("Octopus tariff validation failed: %s", err)
-            return {"base": "octopus_unreachable"}
+            _LOGGER.warning("Octopus tariff validation failed (%s): %s", err.kind, err)
+            return {"base": _OCTOPUS_ERRORS.get(err.kind, "octopus_unreachable")}
         if count <= 0:
             return {"base": "octopus_no_rates"}
         return {}

@@ -206,7 +206,11 @@
       "octopus_no_rates": "That tariff returned no rates. Check the product code and region.",
       "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
       "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
-      "invalid_region": "Unknown Octopus region."
+      "invalid_region": "Unknown Octopus region.",
+      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. You can list the real codes at https://api.octopus.energy/v1/products/ in a browser.",
+      "octopus_unauthorised": "Octopus rejected the API key. Check it, or clear it and the account number and use a product code plus region instead.",
+      "octopus_http_error": "Octopus returned an error. Try again shortly; if it persists, check the product and tariff codes.",
+      "octopus_bad_response": "Octopus returned something unreadable. Try again shortly."
     },
     "abort": {
       "already_configured": "This controller is already configured."
@@ -426,7 +430,11 @@
       "octopus_no_rates": "That tariff returned no rates. Check the product code and region.",
       "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
       "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
-      "invalid_region": "Unknown Octopus region."
+      "invalid_region": "Unknown Octopus region.",
+      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. You can list the real codes at https://api.octopus.energy/v1/products/ in a browser.",
+      "octopus_unauthorised": "Octopus rejected the API key. Check it, or clear it and the account number and use a product code plus region instead.",
+      "octopus_http_error": "Octopus returned an error. Try again shortly; if it persists, check the product and tariff codes.",
+      "octopus_bad_response": "Octopus returned something unreadable. Try again shortly."
     }
   },
   "selector": {

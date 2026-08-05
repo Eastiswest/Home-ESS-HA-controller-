@@ -354,3 +354,28 @@ class TestDashboardInstall:
         written = Path(hass.config.path(DOMAIN)) / "dashboard.yaml"
         assert written.exists()
         assert "views" in written.read_text()
+
+
+class TestOctopusErrors:
+    """Config-flow error keys, which need voluptuous and so cannot live in the
+    fast suite. Reporting "check your network" for a mistyped product code is a
+    real cost: it points the user at the wrong thing entirely."""
+
+    def test_every_error_kind_maps_to_a_translated_message(self):
+        import json
+
+        from custom_components.ess_controller.config_flow import _OCTOPUS_ERRORS
+
+        strings = json.loads(
+            (REPO / "custom_components/ess_controller/strings.json").read_text()
+        )
+        assert _OCTOPUS_ERRORS, "no error kinds mapped"
+        for key in _OCTOPUS_ERRORS.values():
+            assert key in strings["config"]["error"], key
+            assert key in strings["options"]["error"], key
+
+    def test_a_missing_product_does_not_report_a_network_problem(self):
+        from custom_components.ess_controller.config_flow import _OCTOPUS_ERRORS
+        from custom_components.ess_controller.tariff.octopus import KIND_NOT_FOUND
+
+        assert _OCTOPUS_ERRORS[KIND_NOT_FOUND] == "octopus_not_found"

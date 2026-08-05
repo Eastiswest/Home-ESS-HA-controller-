@@ -425,3 +425,108 @@ def test_tou_provider_covers_horizon():
     prices = [s.price for s in series]
     assert prices[:2] == [9.0, 9.0]
     assert prices[2:] == [30.0, 30.0]
+
+
+class TestOctopusErrorClassification:
+    """A mistyped code and a dead network need different advice.
+
+    Collapsing both into "could not reach the Octopus API" sent a real user to
+    check their router when the API had answered, perfectly promptly, that the
+    product code they typed does not exist.
+    """
+
+    class _Response:
+        def __init__(self, status: int, payload=None):
+            self.status = status
+            self._payload = payload if payload is not None else {}
+
+        async def json(self):
+            return self._payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    class _Session:
+        def __init__(self, response=None, error=None):
+            self._response = response
+            self._error = error
+
+        async def get(self, *_args, **_kwargs):
+            if self._error is not None:
+                raise self._error
+            return self._response
+
+    async def _validate(self, session):
+        from custom_components.ess_controller.tariff.octopus import (
+            async_validate_tariff,
+        )
+
+        return await async_validate_tariff(session, "E-1R-AGILE-24-10-01-C")
+
+    def _run(self, session):
+        import asyncio
+
+        return asyncio.run(self._validate(session))
+
+    def test_missing_product_is_not_found(self):
+        from custom_components.ess_controller.tariff.octopus import (
+            KIND_NOT_FOUND,
+            OctopusApiError,
+        )
+
+        with pytest.raises(OctopusApiError) as caught:
+            self._run(self._Session(self._Response(404)))
+        assert caught.value.kind == KIND_NOT_FOUND
+        assert caught.value.status == 404
+
+    def test_bad_key_is_unauthorised(self):
+        from custom_components.ess_controller.tariff.octopus import (
+            KIND_UNAUTHORISED,
+            OctopusApiError,
+        )
+
+        for status in (401, 403):
+            with pytest.raises(OctopusApiError) as caught:
+                self._run(self._Session(self._Response(status)))
+            assert caught.value.kind == KIND_UNAUTHORISED, status
+
+    def test_server_error_is_reported_as_http(self):
+        from custom_components.ess_controller.tariff.octopus import (
+            KIND_HTTP,
+            OctopusApiError,
+        )
+
+        with pytest.raises(OctopusApiError) as caught:
+            self._run(self._Session(self._Response(503)))
+        assert caught.value.kind == KIND_HTTP
+        assert caught.value.status == 503
+
+    def test_connection_failure_is_unreachable(self):
+        from custom_components.ess_controller.tariff.octopus import (
+            KIND_UNREACHABLE,
+            OctopusApiError,
+        )
+
+        with pytest.raises(OctopusApiError) as caught:
+            self._run(self._Session(error=OSError("no route to host")))
+        assert caught.value.kind == KIND_UNREACHABLE
+
+    def test_unreadable_body_is_a_bad_response(self):
+        from custom_components.ess_controller.tariff.octopus import (
+            KIND_BAD_RESPONSE,
+            OctopusApiError,
+        )
+
+        class Broken(self._Response):
+            async def json(self):
+                raise ValueError("not json")
+
+        with pytest.raises(OctopusApiError) as caught:
+            self._run(self._Session(Broken(200)))
+        assert caught.value.kind == KIND_BAD_RESPONSE
+
+    def test_a_good_response_returns_the_rate_count(self):
+        assert self._run(self._Session(self._Response(200, {"count": 48}))) == 48
