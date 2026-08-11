@@ -10,9 +10,11 @@ from __future__ import annotations
 import pytest
 
 from custom_components.ess_controller.dashboard import (
+    ACTION_NOTES,
     ACTION_WORDS,
     APEX_CARD,
     DASHBOARD_TITLE,
+    _action_legend,
     _plan_table,
     build_dashboard,
     fingerprint,
@@ -572,7 +574,11 @@ class TestTemplatesRender:
 
     def test_plan_table_renders_the_fallback_with_no_plan(self):
         cards = self._cards(build_dashboard(resolved("plan_cost")))
-        for card in cards:
+        # Only the cards that read the plan. The state legend is static prose and
+        # is as true with no plan as with one.
+        templated = [card for card in cards if "state_attr" in card]
+        assert templated
+        for card in templated:
             assert "No plan yet" in self._render(card, {})
 
     def test_performance_report_renders_the_numbers(self):
@@ -1212,3 +1218,55 @@ class TestTheBuyColumnSeparatesSunFromGrid:
 
     def test_the_column_is_explained(self):
         assert "off the grid into the battery" in _plan_table("sensor.plan")
+
+
+class TestTheStateLegend:
+    """Five state names on a page mean nothing without a line each.
+
+    Tied to ``ACTION_WORDS`` by key so the legend cannot drift out of step with
+    the table above it, and so a new action cannot ship undocumented.
+    """
+
+    def test_every_action_is_explained(self):
+        from custom_components.ess_controller.models import SlotAction
+
+        for action in SlotAction:
+            assert action.value in ACTION_NOTES, action.value
+
+    def test_the_legend_names_match_the_table(self):
+        legend = _action_legend()
+        for words in ACTION_WORDS.values():
+            assert words in legend
+
+    def test_it_stays_brief(self):
+        """A legend, not documentation. Two short columns per state."""
+        for does, why in ACTION_NOTES.values():
+            assert len(does) <= 60, does
+            assert len(why) <= 60, why
+
+    def test_it_is_a_markdown_table(self):
+        legend = _action_legend()
+        assert legend.startswith("| State | What happens | Why |")
+        assert legend.count("\n") == len(ACTION_NOTES) + 2
+
+    def test_it_is_on_the_plan_view(self):
+        config = build_dashboard(resolved())
+        view = next(v for v in config["views"] if v["path"] == "plan")
+        content = " ".join(
+            card.get("content", "")
+            for card in walk_cards({"views": [view]})
+            if card["type"] == "markdown"
+        )
+        assert "What happens" in content
+
+    def test_a_hold_is_distinguished_from_a_solar_charge(self):
+        """The question this legend exists to answer: on a sunny half-hour the two
+        look the same, because a hold blocks discharging but not the array."""
+        hold_does, hold_why = ACTION_NOTES["idle"]
+        assert "discharge" in hold_does.lower()
+        assert "sun" in hold_does.lower()
+        assert "later" in hold_why.lower()
+        assert ACTION_NOTES["charge_solar_only"][0] != hold_does
+
+    def test_the_hold_state_name_says_where_the_power_comes_from(self):
+        assert "grid" in ACTION_WORDS["idle"].lower()

@@ -508,6 +508,47 @@ ACTION_WORDS = {
 }
 
 
+# What each state does, and why the optimiser picks it. Two short columns: any
+# more and it stops being a legend and starts being documentation nobody reads.
+#
+# Keyed by the same values as ``ACTION_WORDS`` so the legend cannot drift out of
+# step with the table above it, and so a new action cannot ship undocumented.
+ACTION_NOTES: dict[str, tuple[str, str]] = {
+    "charge": (
+        "Buys from the grid to fill the battery",
+        "This half-hour is cheaper than the ones it saves",
+    ),
+    "charge_solar_only": (
+        "Surplus sun goes in; battery still covers the house",
+        "Free energy, and room to keep it",
+    ),
+    "self_use": (
+        "Battery covers whatever the sun does not",
+        "Stored energy is worth more than this price",
+    ),
+    # The one people ask about, because on a sunny half-hour it can look like
+    # Solar charge. The difference is the direction that is blocked: a hold will
+    # not *discharge*, but it does not shut the array out either.
+    "idle": (
+        "Will not discharge; sun may still top it up",
+        "The grid is cheap; the charge is worth more later",
+    ),
+    "discharge": (
+        "Empties past what the house needs",
+        "Making room, or export pays more than holding",
+    ),
+}
+
+
+def _action_legend() -> str:
+    """A short table of what each planned state means."""
+    rows = "".join(
+        f"| {ACTION_WORDS[key]} | {does} | {why} |\n"
+        for key, (does, why) in ACTION_NOTES.items()
+    )
+    return "| State | What happens | Why |\n|---|---|---|\n" + rows
+
+
 def _action_expr(var: str) -> str:
     """A Jinja expression mapping a raw action value to its wording."""
     pairs = ", ".join(f"'{key}': '{value}'" for key, value in ACTION_WORDS.items())
@@ -1073,6 +1114,13 @@ def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]
                 "The whole plan",
                 "mdi:clock-outline",
                 [_markdown(_plan_table(plan, bars=not charts)) if plan else None],
+            ),
+            _section(
+                "What the states mean",
+                "mdi:help-circle-outline",
+                # Only alongside the table it explains. A legend on a dashboard
+                # with no plan on it is furniture.
+                [_markdown(_action_legend()) if plan else None],
             ),
             _section(
                 "Last 24 hours",
