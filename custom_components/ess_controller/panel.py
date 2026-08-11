@@ -43,6 +43,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .dashboard import (
+    APEX_RESOURCE,
     DASHBOARD_ICON,
     DASHBOARD_TITLE,
     DASHBOARD_URL_PATH,
@@ -78,9 +79,35 @@ def resolve_entities(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, str]:
     return resolved
 
 
+def has_apexcharts(hass: HomeAssistant) -> bool:
+    """Whether ApexCharts Card is registered as a Lovelace resource.
+
+    Feature detection rather than a config option: the answer is knowable, and a
+    setting the user has to find and tick to get charts they already installed is
+    a setting that will not get ticked. Because the dashboard is fingerprinted,
+    installing the card and reloading makes the charts appear on their own.
+
+    Anything unexpected in Lovelace's internals means "no": drawing block
+    characters is always safe, whereas emitting a custom card that is not there
+    renders a red error box.
+    """
+    data = hass.data.get(LOVELACE_DOMAIN)
+    resources = getattr(data, "resources", None)
+    if resources is None:
+        return False
+    try:
+        items = list(resources.async_items())
+    except Exception:  # pragma: no cover - defensive about a private API
+        _LOGGER.debug("Could not read Lovelace resources", exc_info=True)
+        return False
+    return any(APEX_RESOURCE in str(item.get("url", "")) for item in items)
+
+
 def build_for_entry(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     title = entry.title or DASHBOARD_TITLE
-    return build_dashboard(resolve_entities(hass, entry), title=title)
+    return build_dashboard(
+        resolve_entities(hass, entry), title=title, charts=has_apexcharts(hass)
+    )
 
 
 def to_yaml(config: dict[str, Any]) -> str:

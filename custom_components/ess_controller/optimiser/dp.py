@@ -24,6 +24,7 @@ from datetime import datetime
 from ..const import (
     TERMINAL_MODE_FIXED,
     TERMINAL_MODE_HORIZON_MEAN,
+    TERMINAL_MODE_HORIZON_MEDIAN,
     TERMINAL_MODE_ZERO,
 )
 from ..models import (
@@ -50,7 +51,7 @@ class OptimiserSettings:
     """Knobs that shape the optimisation but are not physical limits."""
 
     soc_levels: int = 60
-    terminal_mode: str = TERMINAL_MODE_HORIZON_MEAN
+    terminal_mode: str = TERMINAL_MODE_HORIZON_MEDIAN
     terminal_rate: float = 0.0
     """Price in minor units per kWh used when ``terminal_mode`` is fixed."""
     terminal_weight: float = 1.0
@@ -201,15 +202,79 @@ def _price_delta(
     )
 
 
+# A ceiling on the refined level count, so a tiny household load cannot turn the
+# sweep into something that takes seconds. Two hundred and forty levels over an
+# 18 kWh window is 75 Wh of resolution, which is finer than any half-hour
+# decision needs.
+MAX_REFINED_LEVELS = 240
+
+
+# Where on the horizon's price distribution stored energy is valued: the middle.
+TERMINAL_MEDIAN_FRACTION = 0.5
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    """Linear-interpolated percentile, so a short horizon still gives an answer."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = min(max(fraction, 0.0), 1.0) * (len(ordered) - 1)
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def _smallest_useful_move(
+    slots: list[HorizonSlot], battery: BatterySpec, grid: GridSpec
+) -> float | None:
+    """The finest cell-side movement the plan needs to be able to represent.
+
+    Only discharge is considered, and only where the site may not push the
+    battery into the grid: that is the case where the household's own demand is a
+    hard cap on how much may leave the battery, and so the case where a coarse
+    level grid silently forbids discharging at all. Charging has no such cap --
+    surplus can always be topped up from the grid -- so it does not constrain the
+    resolution.
+
+    Returns ``None`` when nothing constrains it, meaning the configured
+    resolution stands.
+    """
+    if grid.allow_battery_export:
+        return None
+    deficits = [
+        (slot.load_kwh - slot.pv_kwh) / battery.discharge_efficiency
+        for slot in slots
+        if slot.load_kwh - slot.pv_kwh > EPS
+    ]
+    if not deficits:
+        return None
+    return min(deficits)
+
+
 def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> float:
     """Value per kWh assigned to energy still in the battery at horizon end.
 
     Without this the optimiser would empty the battery into the final slot,
-    because energy has no value once the horizon stops. Valuing the remainder
-    at the horizon's mean import price is a neutral choice: it neither hoards
-    nor dumps.
+    because energy has no value once the horizon stops.
 
-    Clamped at zero. On a heavily negative day the horizon mean can itself go
+    Valuing it at the horizon *mean* was a real and expensive mistake. On a peaky
+    tariff the mean is dragged above almost every price on the horizon by a
+    handful of evening half-hours: an Agile day averaging 25p is 16-21p for most
+    of its length, so stored energy got booked at more than nearly every slot cost
+    and buying looked profitable almost everywhere. The optimiser filled the pack
+    and sat on it, and because an import-only site can empty a battery no faster
+    than the house consumes, it bought far more than it could ever spend -- the
+    house ran off the grid at 30p to protect a hoard bought at 21p. The profit was
+    in the terminal credit, which is imaginary: the horizon rolls forward and that
+    energy is never actually cashed in.
+
+    The *median* is the price of a typical half-hour, which is what the remainder
+    in the pack will really displace, and it is not moved by a few spikes.
+    ``horizon_mean`` is kept for anyone who wants the old behaviour.
+
+    Clamped at zero. On a heavily negative day the horizon rate can itself go
     negative, which would make stored energy a *liability* and drive the plan to
     empty the pack at the horizon end for no reason. Energy in a battery is never
     worth less than nothing: you are never obliged to pay to keep it.
@@ -220,8 +285,10 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
         return max(settings.terminal_rate, 0.0)
     if not slots:
         return 0.0
-    mean = sum(s.import_price for s in slots) / len(slots)
-    return max(mean, 0.0)
+    prices = [s.import_price for s in slots]
+    if settings.terminal_mode == TERMINAL_MODE_HORIZON_MEAN:
+        return max(sum(prices) / len(prices), 0.0)
+    return max(_percentile(prices, TERMINAL_MEDIAN_FRACTION), 0.0)
 
 
 def optimise(
@@ -250,6 +317,23 @@ def optimise(
 
     levels = settings.clamped_levels()
     step = usable / levels
+    # The level grid has to be fine enough to express the single most important
+    # move on an import-only site: covering the house from the battery. It was
+    # not, and the consequence was severe.
+    #
+    # A site that may not export can only discharge as much as the house is
+    # using, so a transition whose discharge exceeds that half-hour's demand is
+    # rejected as infeasible -- the energy would have nowhere to go. With sixty
+    # levels over an 18 kWh window each step is ~0.3 kWh, and a house drawing
+    # 0.5 kW uses 0.25 kWh in a half-hour. Every discharge transition was
+    # therefore illegal and the battery was frozen: the plan sat on a full pack
+    # and bought the load at the evening peak, because *buying* was the only move
+    # the grid could represent. Refining the grid to the smallest useful movement
+    # fixes it without making the sweep expensive.
+    finest = _smallest_useful_move(slots, battery, grid)
+    if finest is not None and step > finest:
+        levels = min(math.ceil(usable / finest), MAX_REFINED_LEVELS)
+        step = usable / levels
     n = len(slots)
 
     start_energy = battery.soc_to_energy(start_soc)

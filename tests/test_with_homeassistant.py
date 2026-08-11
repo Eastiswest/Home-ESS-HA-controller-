@@ -413,6 +413,19 @@ class TestDashboardRenders:
             rendered = await self._render(hass, content)
             assert rendered.strip(), content[:120]
 
+    async def test_the_plan_table_spells_out_what_it_is_doing(self, hass):
+        """The table used the raw enum values, so it said "Charge" where the tile
+        beside it said "Charging from grid" -- and neither told a reader that a
+        hold means the house is buying its whole load."""
+        parts = [await self._render(hass, c) for c in await self._cards(hass)]
+        rendered = "\n".join(parts)
+        from custom_components.ess_controller.dashboard import ACTION_WORDS
+
+        assert any(words in rendered for words in ACTION_WORDS.values()), rendered[:400]
+        # The bare enum wording must be gone.
+        assert "| Charge |" not in rendered
+        assert "| Idle |" not in rendered
+
     async def test_no_card_leaks_a_missing_attribute(self, hass):
         """The symptom of a wrong attribute name, in the forms it takes."""
         for content in await self._cards(hass):
@@ -1337,3 +1350,122 @@ class TestRebuildIsReachable:
         assert any(isinstance(t, str) and "rebuild_dashboard" in t for t in targets), (
             targets
         )
+
+
+class TestLiveStateIsNotOnThePlanningClock:
+    """Link status must not be up to five minutes behind reality.
+
+    Re-planning pulls forecasts and can call the tariff API, so it belongs on a
+    slow clock. Reading the inverter is pure state lookups against entities
+    another integration already polls, so it costs nothing -- and while the two
+    shared one timer, "Inverter link: Disconnected" sat there for minutes while
+    the inverter's values were visibly still arriving.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_the_live_clock_is_no_slower_than_thirty_seconds(self, hass):
+        from custom_components.ess_controller.const import DEFAULT_LIVE_INTERVAL
+
+        assert DEFAULT_LIVE_INTERVAL.total_seconds() <= 30
+
+    async def test_it_is_faster_than_the_planning_clock(self, hass):
+        from custom_components.ess_controller.const import (
+            DEFAULT_LIVE_INTERVAL,
+            DEFAULT_SCAN_INTERVAL,
+        )
+
+        assert DEFAULT_LIVE_INTERVAL < DEFAULT_SCAN_INTERVAL
+
+    async def test_a_tick_picks_up_an_inverter_that_just_appeared(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert coordinator.inverter_state.available is False
+
+        hass.states.async_set("sensor.solax_battery_capacity", "61", {})
+        hass.states.async_set(
+            "select.solax_charger_use_mode",
+            "Self Use Mode",
+            {"options": ["Self Use Mode", "Manual Mode"]},
+        )
+        coordinator._rediscover_if_blind()
+
+        # A live tick, not a full refresh.
+        await coordinator._async_live_refresh(ha_dt.utcnow())
+        assert coordinator.inverter_state.available is True
+
+    async def test_a_tick_does_not_postpone_replanning(self, hass):
+        """``async_set_updated_data`` would reschedule the planning timer, so a
+        fast poll would push re-planning out for ever."""
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        before = coordinator.update_interval
+        await coordinator._async_live_refresh(ha_dt.utcnow())
+        assert coordinator.update_interval == before
+
+    async def test_a_tick_before_the_first_refresh_is_harmless(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        coordinator.data = None
+        await coordinator._async_live_refresh(ha_dt.utcnow())
+
+    async def test_polling_stops_when_the_entry_unloads(self, hass):
+        coordinator = await self._coordinator(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert coordinator is not None
+
+
+class TestApexDetection:
+    """Charts appear on their own when the card is installed, and never when not."""
+
+    def test_a_plain_instance_gets_no_custom_cards(self, hass):
+        from custom_components.ess_controller.panel import has_apexcharts
+
+        _lovelace(hass)
+        assert has_apexcharts(hass) is False
+
+    def test_no_lovelace_at_all_is_not_an_error(self, hass):
+        from custom_components.ess_controller.panel import has_apexcharts
+
+        assert has_apexcharts(hass) is False
+
+    def test_an_installed_card_is_found(self, hass):
+        from custom_components.ess_controller.panel import has_apexcharts
+
+        _lovelace(hass)
+
+        class _Resources:
+            def async_items(self):
+                return [
+                    {"url": "/hacsfiles/lovelace-mushroom/mushroom.js"},
+                    {"url": "/hacsfiles/apexcharts-card/apexcharts-card.js"},
+                ]
+
+        hass.data["lovelace"].resources = _Resources()
+        assert has_apexcharts(hass) is True
+
+    def test_a_resource_collection_that_raises_means_no(self, hass):
+        from custom_components.ess_controller.panel import has_apexcharts
+
+        _lovelace(hass)
+
+        class _Broken:
+            def async_items(self):
+                raise RuntimeError("moved furniture")
+
+        hass.data["lovelace"].resources = _Broken()
+        assert has_apexcharts(hass) is False

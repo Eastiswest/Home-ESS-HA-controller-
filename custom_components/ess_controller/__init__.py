@@ -116,6 +116,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    # Link status and live readings on their own fast clock, so they are not
+    # hostage to the five-minute planning cycle.
+    entry.async_on_unload(coordinator.async_start_live_polling())
     _async_register_services(hass)
     _async_schedule_dashboard(hass, entry, coordinator)
     return True

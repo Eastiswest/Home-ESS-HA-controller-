@@ -437,3 +437,141 @@ class TestTerminalValueClamp:
         plan = optimise(slots, 70.0, battery, make_grid(allow_export=False), settings)
         assert plan.slots[-1].soc_end >= 70.0 - 2.0
         assert sum(s.curtailed_kwh for s in plan.slots) == pytest.approx(0.0)
+
+
+class TestTerminalValuationDoesNotHoard:
+    """The terminal credit must not pay the plan to buy energy it cannot spend.
+
+    Valuing the remainder at the horizon *mean* did exactly that. On a peaky
+    tariff the mean sits above almost every price on the horizon, so buying
+    looked profitable nearly everywhere; the pack filled and stayed full while
+    the house bought its load at the dear end. The median is not moved by a few
+    spikes, which is the whole point.
+    """
+
+    # Sixteen cheap half-hours and four dear ones: mean 30p, median 20p.
+    PEAKY = [20.0] * 16 + [70.0] * 4
+
+    def test_mean_is_dragged_above_the_typical_price(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        slots = build_slots(self.PEAKY)
+        mean = _terminal_rate(slots, OptimiserSettings(terminal_mode="horizon_mean"))
+        median = _terminal_rate(slots, OptimiserSettings())
+        assert mean == pytest.approx(30.0)
+        assert median == pytest.approx(20.0)
+        assert median < mean
+
+    def test_median_is_the_default(self):
+        assert OptimiserSettings().terminal_mode == "horizon_median"
+
+    def test_a_flat_horizon_values_energy_at_that_price(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        rate = _terminal_rate(build_slots([24.0] * 12), OptimiserSettings())
+        assert rate == pytest.approx(24.0)
+
+    def test_free_slots_do_not_make_the_battery_worthless(self):
+        """A percentile low enough to sit inside a cheap block valued stored
+        energy at zero, and the plan then declined free electricity."""
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        slots = build_slots([0.0] * 4 + [25.0] * 8)
+        assert _terminal_rate(slots, OptimiserSettings()) == pytest.approx(25.0)
+
+    def test_does_not_fill_the_pack_it_cannot_empty(self):
+        """No export, a small house load, and a horizon that is mostly cheap.
+
+        Under the mean the plan bought its way to full and held there. What it
+        can actually spend is bounded by the load, so it should end the horizon
+        near where it started rather than gorged.
+        """
+        battery = make_battery(cycle_cost_per_kwh=1.0)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        slots = build_slots(self.PEAKY, load=0.25)
+        plan = optimise(slots, 50.0, battery, grid)
+        bought = sum(s.grid_import_kwh for s in plan.slots)
+        # The house needs 5 kWh over ten hours; anything far above that is the
+        # plan buying for a credit it will never collect.
+        assert bought < 9.0
+
+    def test_the_old_behaviour_is_still_available(self):
+        settings = OptimiserSettings(terminal_mode="horizon_mean")
+        plan = optimise(
+            build_slots(self.PEAKY), 50.0, make_battery(), make_grid(), settings
+        )
+        assert plan.slots
+
+
+class TestResolutionDoesNotFreezeTheBattery:
+    """A level grid coarser than the household's demand forbids discharging.
+
+    On a site that may not push the battery into the grid, a discharge may be no
+    larger than what the house is using. With sixty levels over an 18 kWh window
+    each level is about 0.3 kWh, and a house drawing 0.5 kW uses 0.25 kWh in a
+    half-hour -- so every discharge transition was rejected as infeasible and the
+    battery could not move. The plan then bought its load at the evening peak
+    while sitting on a full pack, because buying was the only move it could
+    express.
+    """
+
+    PEAKY = [20.0] * 16 + [70.0] * 4
+
+    def plan(self, **kwargs):
+        battery = make_battery(cycle_cost_per_kwh=1.0)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        slots = build_slots(self.PEAKY, load=0.25, **kwargs)
+        return optimise(slots, 50.0, battery, grid, OptimiserSettings())
+
+    def test_the_coarse_grid_really_was_coarser_than_the_demand(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        battery = make_battery()
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        slots = build_slots(self.PEAKY, load=0.25)
+        finest = _smallest_useful_move(slots, battery, grid)
+        assert finest is not None
+        # One level of the configured grid is bigger than the smallest useful
+        # move, which is exactly the condition that froze the battery.
+        assert battery.usable_kwh / OptimiserSettings().clamped_levels() > finest
+
+    def test_it_covers_the_house_through_the_peak(self):
+        plan = self.plan()
+        peak = [s for s in plan.slots if s.import_price > 50.0]
+        assert peak
+        # Not exactly zero: the level grid cannot land on the deficit to the
+        # milliwatt-hour, so a fraction of a percent of the load still comes from
+        # the grid. What matters is that the battery, not the grid, is carrying
+        # the house through the dear half-hours.
+        assert all(s.grid_import_kwh < 0.01 for s in peak)
+        assert sum(s.discharge_ac_kwh for s in peak) > 0.9
+
+    def test_the_saving_is_real(self):
+        plan = self.plan()
+        assert sum(s.grid_import_kwh for s in plan.slots) < 4.5
+
+    def test_export_sites_keep_the_configured_resolution(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        slots = build_slots(self.PEAKY, load=0.25)
+        assert _smallest_useful_move(slots, make_battery(), make_grid()) is None
+
+    def test_a_horizon_with_no_deficit_keeps_the_configured_resolution(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        slots = build_slots([20.0] * 6, load=0.0, pv=1.0)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        assert _smallest_useful_move(slots, make_battery(), grid) is None
+
+    def test_a_tiny_load_does_not_make_the_sweep_enormous(self):
+        from custom_components.ess_controller.optimiser.dp import MAX_REFINED_LEVELS
+
+        plan = optimise(
+            build_slots([20.0] * 8, load=0.001),
+            50.0,
+            make_battery(),
+            make_grid(allow_export=False, allow_battery_export=False),
+            OptimiserSettings(),
+        )
+        assert plan.slots
+        assert MAX_REFINED_LEVELS <= 240

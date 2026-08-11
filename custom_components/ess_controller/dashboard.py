@@ -478,6 +478,161 @@ BAR_WIDTH = 12
 SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 
+# ApexCharts Card is a HACS front-end card, so it cannot be a requirement: this
+# dashboard has to render on a stock install. When it *is* installed there is no
+# reason to keep drawing block characters, so the chart sections are swapped for
+# real ones. ``APEX_RESOURCE`` is the substring to look for in Lovelace's
+# registered resources.
+APEX_CARD = "custom:apexcharts-card"
+APEX_RESOURCE = "apexcharts-card"
+
+
+# What each planned action is called in the plan table. The raw enum values with
+# the underscores swapped for spaces read as jargon and, worse, as instructions
+# the controller is issuing: "Charge" gives no clue that the energy is being
+# bought, and "Idle" sounds like nothing is being decided when in fact the
+# battery is being held shut while the house runs off the grid.
+#
+# These are the *observed* mix, not modes: the optimiser labels a charging slot
+# by where the energy came from after it has decided how much to move.
+ACTION_WORDS = {
+    "charge": "Grid charge",
+    "charge_solar_only": "Solar charge",
+    "discharge": "Forced discharge",
+    "self_use": "Self use",
+    "idle": "Hold (house on grid)",
+}
+
+
+def _action_expr(var: str) -> str:
+    """A Jinja expression mapping a raw action value to its wording."""
+    pairs = ", ".join(f"'{key}': '{value}'" for key, value in ACTION_WORDS.items())
+    return (
+        "{{ {" + pairs + "}.get(" + var + ", " + var + " | replace('_', ' ') "
+        "| capitalize) }}"
+    )
+
+
+# How far forward the charts look. The horizon is at most 48 hours and usually
+# less; anything past the plan simply draws no points.
+CHART_SPAN_HOURS = 48
+
+# One hue per chart, stepped by value rather than mixed with a second hue: price
+# is a magnitude, so it gets a sequential ramp, and a negative price gets the one
+# colour that is not on that ramp because it is a different kind of thing.
+PRICE_COLOURS = (
+    (0.0, "#3d8f5b"),  # paid to import: the only slot worth a different hue
+    (15.0, "#8ecfa5"),
+    (25.0, "#5aa8d6"),
+    (35.0, "#3f6fae"),
+    (50.0, "#2b3f7a"),
+)
+SOC_COLOUR = "#7a5cb8"
+
+
+def _apex_price_chart(plan_entity: str) -> dict[str, Any]:
+    """Import price over the whole horizon, as columns.
+
+    Columns rather than a line because a price is a value that *holds* for a
+    half-hour rather than a point that interpolates between neighbours, and
+    reading the trough off a stepped shape is what the chart is for.
+
+    The data comes from the plan sensor's ``slots`` attribute rather than from
+    recorded history, which is the only way to draw the future at all.
+    """
+    return {
+        "type": APEX_CARD,
+        "graph_span": f"{CHART_SPAN_HOURS}h",
+        # Start the window at the current minute so the chart runs forwards.
+        # Left alone, the card plots the graph_span *ending* now and the whole
+        # plan falls off the right-hand edge.
+        "span": {"start": "minute"},
+        "header": {"show": True, "title": label("import_price"), "show_states": False},
+        "now": {"show": True, "label": "now"},
+        "experimental": {"color_threshold": True},
+        "yaxis": [{"decimals": 0, "apex_config": {"title": {"text": "p/kWh"}}}],
+        "apex_config": {
+            "chart": {"height": 260},
+            "legend": {"show": False},
+            "grid": {"borderColor": "rgba(127,127,127,0.25)"},
+            "xaxis": {"labels": {"datetimeUTC": False}},
+        },
+        "series": [
+            {
+                "entity": plan_entity,
+                "name": label("import_price"),
+                "type": "column",
+                "unit": "p",
+                "float_precision": 1,
+                "color_threshold": [
+                    {"value": value, "color": colour} for value, colour in PRICE_COLOURS
+                ],
+                "data_generator": (
+                    "return (entity.attributes.slots || []).map(s => "
+                    "[new Date(s.start).getTime(), s.import_price]);"
+                ),
+            }
+        ],
+        "grid_options": {"columns": "full"},
+    }
+
+
+def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
+    """Where the plan expects the battery to be, half-hour by half-hour.
+
+    Deliberately its own chart rather than a second axis on the price chart. A
+    percentage and a price share no scale, and a chart with two y-axes invites
+    reading a crossing point that means nothing.
+    """
+    series: list[dict[str, Any]] = [
+        {
+            "entity": plan_entity,
+            "name": "Planned",
+            "type": "line",
+            "curve": "stepline",
+            "unit": "%",
+            "float_precision": 0,
+            "color": SOC_COLOUR,
+            "stroke_width": 2,
+            "data_generator": (
+                "return (entity.attributes.slots || []).map(s => "
+                "[new Date(s.end).getTime(), s.soc_end]);"
+            ),
+        }
+    ]
+    if soc_entity:
+        # The measured SoC up to now, so the projection is read against where the
+        # battery actually is rather than in isolation.
+        series.append(
+            {
+                "entity": soc_entity,
+                "name": "Measured",
+                "type": "line",
+                "unit": "%",
+                "float_precision": 0,
+                "stroke_width": 2,
+                "extend_to": "now",
+            }
+        )
+    return {
+        "type": APEX_CARD,
+        "graph_span": f"{CHART_SPAN_HOURS}h",
+        # Half a day of measured SoC behind the projection is enough context to
+        # see whether the plan is starting from where it thought it would.
+        "span": {"start": "minute", "offset": "-12h"},
+        "header": {"show": True, "title": "Battery", "show_states": False},
+        "now": {"show": True, "label": "now"},
+        "yaxis": [{"min": 0, "max": 100, "decimals": 0}],
+        "apex_config": {
+            "chart": {"height": 220},
+            "grid": {"borderColor": "rgba(127,127,127,0.25)"},
+            "xaxis": {"labels": {"datetimeUTC": False}},
+        },
+        "series": series,
+        "grid_options": {"columns": "full"},
+    }
+
+
 def _plan_sparkline(plan_entity: str) -> str:
     """The whole horizon as one line of block characters.
 
@@ -519,16 +674,22 @@ def _plan_sparkline(plan_entity: str) -> str:
     )
 
 
-def _plan_table(plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS) -> str:
-    """The forward plan as a horizontal bar chart, in Markdown.
+def _plan_table(
+    plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS, *, bars: bool = True
+) -> str:
+    """The forward plan, one row per half-hour, in Markdown.
 
     A table of numbers is not a shape, and the shape is the whole point: what a
     person wants from the plan is to see where the trough is, not to read
-    seventy-two prices. A proper line chart is not available -- ``history-graph``
-    plots recorded state and cannot draw the future, and ApexCharts is a separate
-    HACS install this dashboard deliberately does not require -- so the bars are
-    drawn with block characters in a code span, which needs nothing installed and
+    seventy-two prices. Where no chart is available -- ``history-graph`` plots
+    recorded state and cannot draw the future, and ApexCharts is a separate HACS
+    install this dashboard deliberately does not require -- the shape is drawn
+    with block characters in a code span, which needs nothing installed and
     renders anywhere.
+
+    ``bars`` turns that column off, for the case where ApexCharts *is* installed
+    and the shape is already on the page as a real chart. The table then earns its
+    place on the thing a chart cannot show: what the controller intends to do.
 
     Bars are scaled to the dearest slot on show, so the picture is always of
     *this* horizon rather than of some fixed price range. Negative prices get
@@ -536,6 +697,30 @@ def _plan_table(plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS) -> str:
     zero-length bar would bury them.
     """
     limit = "" if slots is None else f"[:{slots}]"
+    # "SoC" beside a live battery reading invites reading it as the battery's
+    # state now. It is the plan's projection for the end of that half-hour.
+    header = (
+        "| Time | Price | | Doing | Planned SoC |\n|---|--:|---|---|--:|\n"
+        if bars
+        else "| Time | Price | Doing | Planned SoC |\n|---|--:|---|--:|\n"
+    )
+    bar_cell = (
+        (
+            "{% set filled = [(p / top * "
+            + str(BAR_WIDTH)
+            + ") | round | int, "
+            + str(BAR_WIDTH)
+            + "] | min if p > 0 else 0 %}"
+            # A negative price is off the scale in the good direction, so it gets
+            # its own fixed marker rather than a proportional bar.
+            "| `{% if p < 0 %}◄◄{{ '·' * " + str(BAR_WIDTH - 2) + " }}"
+            "{% else %}{{ '█' * filled }}{{ '·' * ("
+            + str(BAR_WIDTH)
+            + " - filled) }}{% endif %}` "
+        )
+        if bars
+        else ""
+    )
     return (
         "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
         "{% if not slots %}No plan yet — waiting for prices.{% else %}"
@@ -553,29 +738,19 @@ def _plan_table(plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS) -> str:
         "{% set day = as_timestamp(slot.start) | timestamp_custom('%a %-d %b', true) %}"
         "{% if day != ns.day %}"
         "{% if not loop.first %}\n{% endif %}"
-        "**{{ day }}**\n\n"
-        "| Time | Price | | Doing | SoC |\n|---|--:|---|---|--:|\n"
-        "{% set ns.day = day %}"
+        "**{{ day }}**\n\n" + header + "{% set ns.day = day %}"
         "{% endif %}"
         "{% set p = slot.import_price %}"
-        "{% set filled = [(p / top * "
-        + str(BAR_WIDTH)
-        + ") | round | int, "
-        + str(BAR_WIDTH)
-        + "] | min if p > 0 else 0 %}"
         "| {{ as_timestamp(slot.start) | timestamp_custom('%H:%M', true) }} "
         # A predicted price is marked rather than dressed up as announced: an
         # asterisk costs a character and is the difference between "the plan says
         # 4p at 2am" and "the plan guesses 4p at 2am".
         "| {{ '%.1f' | format(p) }}p"
         "{{ '*' if slot.price_is_forecast else '' }} "
-        # A negative price is off the scale in the good direction, so it gets its
-        # own fixed marker rather than a proportional bar.
-        "| `{% if p < 0 %}◄◄{{ '·' * " + str(BAR_WIDTH - 2) + " }}"
-        "{% else %}{{ '█' * filled }}{{ '·' * ("
-        + str(BAR_WIDTH)
-        + " - filled) }}{% endif %}` "
-        "| {{ slot.action | replace('_', ' ') | capitalize }} "
+        + bar_cell
+        + "| "
+        + _action_expr("slot.action")
+        + " "
         "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
         "{% endfor %}"
         "\n{% if prices | select('lt', 0) | list | count %}"
@@ -809,7 +984,7 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
     )
 
 
-def _plan_view(resolved: dict[str, str]) -> dict[str, Any]:
+def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]:
     plan = resolved.get("plan_cost")
     history = [
         {"entity": resolved[key], "name": label(key)}
@@ -850,12 +1025,29 @@ def _plan_view(resolved: dict[str, str]) -> dict[str, Any]:
             _section(
                 "Price shape",
                 "mdi:chart-bell-curve-cumulative",
-                [_markdown(_plan_sparkline(plan)) if plan else None],
+                [
+                    (
+                        _apex_price_chart(plan)
+                        if charts
+                        else _markdown(_plan_sparkline(plan))
+                    )
+                    if plan
+                    else None
+                ],
+            ),
+            _section(
+                "Battery",
+                "mdi:battery-clock-outline",
+                [
+                    _apex_soc_chart(plan, resolved.get("battery_soc"))
+                    if plan and charts
+                    else None
+                ],
             ),
             _section(
                 "The whole plan",
                 "mdi:clock-outline",
-                [_markdown(_plan_table(plan)) if plan else None],
+                [_markdown(_plan_table(plan, bars=not charts)) if plan else None],
             ),
             _section(
                 "Last 24 hours",
@@ -1095,17 +1287,22 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
 
 
 def build_dashboard(
-    resolved: dict[str, str], title: str = DASHBOARD_TITLE
+    resolved: dict[str, str], title: str = DASHBOARD_TITLE, *, charts: bool = False
 ) -> dict[str, Any]:
     """Build the whole dashboard from the entity keys that resolved.
 
     ``resolved`` maps an entity key (``plan_action``, ``min_soc``, ...) to the
     entity id it ended up with, so the output is correct whatever the device was
     named and whichever entities the user disabled.
+
+    ``charts`` says whether ApexCharts Card is installed. It cannot be required --
+    it is a HACS front-end card and this dashboard has to render on a stock
+    install -- so the chart sections degrade to block-character drawings when it
+    is absent, and become real charts when it is there.
     """
     views = [
         _overview_view(resolved),
-        _plan_view(resolved),
+        _plan_view(resolved, charts),
         _performance_view(resolved),
         _loads_view(resolved),
         _settings_view(resolved),

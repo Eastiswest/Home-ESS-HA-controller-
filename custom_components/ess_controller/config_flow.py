@@ -158,6 +158,7 @@ from .const import (
     PROVIDER_TOU,
     TERMINAL_MODE_FIXED,
     TERMINAL_MODE_HORIZON_MEAN,
+    TERMINAL_MODE_HORIZON_MEDIAN,
     TERMINAL_MODE_ZERO,
 )
 from .inverter.roles import (
@@ -618,9 +619,10 @@ class EssFlowMixin:
                 _suggest(
                     current,
                     CONF_TERMINAL_VALUE_MODE,
-                    TERMINAL_MODE_HORIZON_MEAN,
+                    TERMINAL_MODE_HORIZON_MEDIAN,
                 ): _options(
                     [
+                        TERMINAL_MODE_HORIZON_MEDIAN,
                         TERMINAL_MODE_HORIZON_MEAN,
                         TERMINAL_MODE_FIXED,
                         TERMINAL_MODE_ZERO,

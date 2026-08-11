@@ -336,6 +336,16 @@ class ControlCommand:
     max_soc: float = 100.0
     export_limit_kw: float | None = None
     allow_grid_charge: bool = True
+    hold_absorbs_solar: bool = True
+    """Whether a hold should still let the array charge the battery.
+
+    True unless export is actually paying: with nothing earned for exporting,
+    surplus PV given to the grid during a hold is thrown away, so the hold is
+    expressed as self-use with a raised reserve instead of as Manual mode with
+    charge and discharge stopped. Where export earns more than the energy is worth
+    stored, the stricter hold is correct and this is False.
+    """
+
     reason: str = ""
     slot_end: datetime | None = None
 
@@ -348,6 +358,7 @@ class ControlCommand:
             "max_soc": self.max_soc,
             "export_limit_kw": self.export_limit_kw,
             "allow_grid_charge": self.allow_grid_charge,
+            "hold_absorbs_solar": self.hold_absorbs_solar,
             "reason": self.reason,
             "slot_end": self.slot_end.isoformat() if self.slot_end else None,
         }
@@ -373,6 +384,8 @@ class ControlCommand:
         ):
             return True
         if abs(self.min_soc - other.min_soc) > 0.5:
+            return True
+        if self.hold_absorbs_solar is not other.hold_absorbs_solar:
             return True
         return self.allow_grid_charge is not other.allow_grid_charge
 

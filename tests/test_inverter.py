@@ -415,19 +415,63 @@ class TestSolaxOtherActions:
             pytest.approx(5.6)
         )
 
-    def test_idle_stops_charge_and_discharge(self):
+    def test_strict_hold_stops_charge_and_discharge(self):
+        """Where export pays, a hold really does stop the battery both ways."""
         hass = build_solax_hass()
         hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
         hass.states.set(
             "select.solax_manual_mode_select", "Force Charge", options=SOLAX_MANUAL
         )
         adapter = solax_adapter(hass)
-        apply(adapter, command(SlotAction.IDLE))
+        apply(adapter, command(SlotAction.IDLE, hold_absorbs_solar=False))
         by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
         assert by_entity["select.solax_charger_use_mode"]["option"] == "Manual Mode"
         assert by_entity["select.solax_manual_mode_select"]["option"] == (
             "Stop Charge and Discharge"
         )
+
+    def test_hold_keeps_self_use_so_solar_still_charges(self):
+        """With nothing earned for exporting, a hold must not shut the array out.
+
+        Manual mode with charge and discharge stopped holds the battery against
+        the array as well as against the house, so a sunnier half-hour than
+        forecast is handed to the grid for nothing. Self-use with the reserve
+        raised to the current SoC holds it against discharge only.
+        """
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES
+        )
+        hass.states.set("sensor.solax_battery_capacity", 62.4)
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.IDLE))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["select.solax_charger_use_mode"]["option"] == "Self Use"
+        assert "select.solax_manual_mode_select" not in by_entity
+        # Pinned at the SoC it is holding, not at the configured reserve.
+        assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 62.0
+
+    def test_hold_never_leaves_grid_charging_enabled(self):
+        """Self-use plus grid charging would buy energy to fill the pack."""
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "on")
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.IDLE, allow_grid_charge=True))
+        calls = [
+            c
+            for c in hass.services.calls
+            if c[2]["entity_id"] == "switch.solax_selfuse_night_charge_enable"
+        ]
+        assert [c[1] for c in calls] == ["turn_off"]
+
+    def test_hold_without_a_soc_reading_falls_back_to_the_reserve(self):
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_battery_capacity", "unknown")
+        adapter = solax_adapter(hass)
+        result = apply(adapter, command(SlotAction.IDLE, min_soc=15.0))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert "number.solax_battery_minimum_capacity" not in by_entity
+        assert any("no SoC reading" in note for note in result.skipped)
 
     def test_idle_does_not_set_current_limits(self):
         hass = build_solax_hass()

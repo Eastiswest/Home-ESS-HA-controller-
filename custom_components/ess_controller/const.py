@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.12.0"
+VERSION: Final = "0.13.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -19,10 +19,18 @@ PLATFORMS: Final = [
     "button",
 ]
 
-# How often the coordinator wakes up. The optimiser itself is cheap, but we
-# re-plan on every cycle so that a change in SoC, load or price is reflected
-# quickly. Half-hour slot boundaries are handled separately.
+# How often the coordinator wakes up to re-plan. The optimiser itself is cheap,
+# but a cycle also refreshes forecasts and may call the tariff API, so this is
+# not something to run every few seconds. Half-hour slot boundaries are handled
+# separately.
 DEFAULT_SCAN_INTERVAL: Final = timedelta(minutes=5)
+
+# How often the *live* state is re-read, separately from re-planning. Reading the
+# inverter costs nothing -- the adapters read Home Assistant states that some
+# other integration is already polling -- so there is no reason for the link
+# status, SoC or power readings to be up to five minutes stale. This is what
+# decides how quickly "inverter link disconnected" appears and clears.
+DEFAULT_LIVE_INTERVAL: Final = timedelta(seconds=30)
 
 STORAGE_VERSION: Final = 1
 STORAGE_KEY_LEARNING: Final = f"{DOMAIN}.learning"
@@ -216,6 +224,7 @@ ADAPTER_NONE: Final = "none"
 
 ADAPTERS: Final = [ADAPTER_SOLAX_MODBUS, ADAPTER_GENERIC, ADAPTER_NONE]
 
+TERMINAL_MODE_HORIZON_MEDIAN: Final = "horizon_median"
 TERMINAL_MODE_HORIZON_MEAN: Final = "horizon_mean"
 TERMINAL_MODE_FIXED: Final = "fixed"
 TERMINAL_MODE_ZERO: Final = "zero"

@@ -10,8 +10,12 @@ from __future__ import annotations
 import pytest
 
 from custom_components.ess_controller.dashboard import (
+    ACTION_WORDS,
+    APEX_CARD,
     DASHBOARD_TITLE,
+    _plan_table,
     build_dashboard,
+    fingerprint,
 )
 
 # Every key the integration can publish, as the registry would report them.
@@ -1024,3 +1028,122 @@ class TestRefreshWithoutLosingEdits:
 
         once = stamp(build_dashboard(resolved()))
         assert stamp(once) == once
+
+
+class TestActionWording:
+    """The plan table used the raw enum values, which read as jargon.
+
+    "Charge" gave no hint that the energy was being bought and "Idle" sounded
+    like nothing had been decided, when in fact the battery was being held shut
+    while the house ran off the grid at whatever the price happened to be.
+    """
+
+    def test_every_action_has_wording(self):
+        from custom_components.ess_controller.models import SlotAction
+
+        for action in SlotAction:
+            assert action.value in ACTION_WORDS
+
+    def test_grid_charging_says_grid(self):
+        assert "grid" in ACTION_WORDS["charge"].lower()
+
+    def test_solar_charging_says_solar(self):
+        assert "solar" in ACTION_WORDS["charge_solar_only"].lower()
+
+    def test_a_hold_says_where_the_house_gets_its_power(self):
+        assert "grid" in ACTION_WORDS["idle"].lower()
+
+    def test_the_table_maps_the_raw_values(self):
+        table = _plan_table("sensor.plan")
+        for value, words in ACTION_WORDS.items():
+            assert f"'{value}': '{words}'" in table
+
+    def test_the_soc_column_says_it_is_the_plan(self):
+        """ "SoC" beside a live battery badge reads as the battery's state now."""
+        assert "Planned SoC" in _plan_table("sensor.plan")
+        assert "| SoC |" not in _plan_table("sensor.plan")
+
+
+class TestChartsWhenApexIsInstalled:
+    """ApexCharts cannot be required, so both shapes have to be right."""
+
+    def test_without_apex_nothing_custom_is_emitted(self):
+        types = {card["type"] for card in walk_cards(build_dashboard(resolved()))}
+        assert not any(kind.startswith("custom:") for kind in types)
+
+    def test_with_apex_the_price_shape_becomes_a_chart(self):
+        types = {
+            card["type"] for card in walk_cards(build_dashboard(resolved(), charts=True))
+        }
+        assert APEX_CARD in types
+
+    @staticmethod
+    def plan_view(charts: bool) -> dict:
+        config = build_dashboard(resolved(), charts=charts)
+        view = next(v for v in config["views"] if v["path"] == "plan")
+        return {"views": [view]}
+
+    def test_the_bars_go_away_when_a_real_chart_replaces_them(self):
+        """On the Plan view only. The Overview's six-row glance has no chart
+        beside it, so its bars are still the only shape on offer there."""
+        markdown = [
+            c for c in walk_cards(self.plan_view(True)) if c["type"] == "markdown"
+        ]
+        assert markdown
+        assert not any("█" in c.get("content", "") for c in markdown)
+
+    def test_the_bars_stay_when_there_is_no_chart(self):
+        markdown = [
+            c for c in walk_cards(self.plan_view(False)) if c["type"] == "markdown"
+        ]
+        assert any("█" in c.get("content", "") for c in markdown)
+
+    def test_the_table_survives_either_way(self):
+        for charts in (False, True):
+            cards = walk_cards(build_dashboard(resolved(), charts=charts))
+            content = " ".join(
+                c.get("content", "") for c in cards if c["type"] == "markdown"
+            )
+            assert "Planned SoC" in content
+
+    def test_price_and_soc_are_separate_charts(self):
+        """One y-axis each. A price and a percentage share no scale, and a
+        reader invited to find where they cross is being misled."""
+        charts = [
+            c
+            for c in walk_cards(build_dashboard(resolved(), charts=True))
+            if c["type"] == APEX_CARD
+        ]
+        assert len(charts) == 2
+        for chart in charts:
+            units = {series.get("unit") for series in chart["series"]}
+            assert len(units) == 1
+
+    def test_charts_read_the_plan_attribute_not_history(self):
+        charts = [
+            c
+            for c in walk_cards(build_dashboard(resolved(), charts=True))
+            if c["type"] == APEX_CARD
+        ]
+        generators = [
+            series.get("data_generator", "")
+            for chart in charts
+            for series in chart["series"]
+        ]
+        assert any("attributes.slots" in gen for gen in generators)
+
+    def test_charts_look_forwards(self):
+        """Left alone the card plots the span *ending* now, which would put the
+        entire forward plan off the right-hand edge."""
+        for chart in [
+            c
+            for c in walk_cards(build_dashboard(resolved(), charts=True))
+            if c["type"] == APEX_CARD
+        ]:
+            assert chart["span"]["start"] == "minute"
+
+    def test_installing_apex_changes_the_fingerprint(self):
+        """So a dashboard nobody has edited picks the charts up on its own."""
+        plain = fingerprint(build_dashboard(resolved()))
+        charted = fingerprint(build_dashboard(resolved(), charts=True))
+        assert plain != charted

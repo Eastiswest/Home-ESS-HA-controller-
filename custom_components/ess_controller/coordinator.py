@@ -21,8 +21,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -95,6 +96,7 @@ from .const import (
     DEFAULT_GRID_EXPORT_LIMIT,
     DEFAULT_GRID_IMPORT_LIMIT,
     DEFAULT_HORIZON_HOURS,
+    DEFAULT_LIVE_INTERVAL,
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
     DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
@@ -116,7 +118,7 @@ from .const import (
     STRATEGY_IDLE,
     STRATEGY_OFF,
     STRATEGY_SELF_USE,
-    TERMINAL_MODE_HORIZON_MEAN,
+    TERMINAL_MODE_HORIZON_MEDIAN,
 )
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster
@@ -261,6 +263,48 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._build_adapters()
         self._build_tariffs()
+
+    @callback
+    def async_start_live_polling(self) -> CALLBACK_TYPE:
+        """Re-read the live state every ``DEFAULT_LIVE_INTERVAL``.
+
+        Separate from the planning cycle on purpose. Re-planning pulls forecasts
+        and can call the tariff API, so it belongs on a five-minute clock; reading
+        the inverter is pure state-machine lookups against entities another
+        integration is already polling, so it costs nothing and there is no excuse
+        for the link status to be up to five minutes behind reality. That gap is
+        exactly what made "inverter link disconnected" sit there while values were
+        visibly still arriving.
+
+        Returns the unsubscribe callable, for ``entry.async_on_unload``.
+        """
+        return async_track_time_interval(
+            self.hass,
+            self._async_live_refresh,
+            DEFAULT_LIVE_INTERVAL,
+            name=f"{DOMAIN} live state",
+        )
+
+    async def _async_live_refresh(self, _now: datetime) -> None:
+        """Refresh the live readings without re-planning.
+
+        Deliberately not ``async_set_updated_data``: that reschedules the main
+        interval, so a fast poll would postpone re-planning for ever and the plan
+        would never be rebuilt. This updates the data and notifies listeners
+        directly, leaving the planning clock alone.
+        """
+        if self.data is None:
+            # Nothing to patch yet; the first full refresh has not finished.
+            return
+        now = dt_util.utcnow()
+        try:
+            self.inverter_state = await self._adapter.async_read_state()
+            site = self._read_site_state(now)
+            self.data = self._build_data(now, site)
+        except Exception:  # pragma: no cover - a poll must never kill the timer
+            _LOGGER.exception("Live state refresh failed")
+            return
+        self.async_update_listeners()
 
     def _build_adapters(self) -> None:
         options = self.options
@@ -426,7 +470,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return OptimiserSettings(
             soc_levels=int(options.get(CONF_SOC_LEVELS, DEFAULT_SOC_LEVELS)),
             terminal_mode=options.get(
-                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_HORIZON_MEAN
+                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_HORIZON_MEDIAN
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
         )
@@ -1594,11 +1638,16 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if power <= 0:
             power = self._default_power(slot.action)
 
+        grid = self.grid_spec()
         return ControlCommand(
             action=slot.action,
             power_kw=power,
             target_soc=slot.soc_end,
-            export_limit_kw=self.grid_spec().export_limit_kw,
+            export_limit_kw=grid.export_limit_kw,
+            # Only give surplus PV to the grid during a hold if the grid pays for
+            # it. On an import-only tariff it is worth nothing exported and
+            # something stored, so the hold must let the array keep charging.
+            hold_absorbs_solar=not (grid.allow_export and slot.export_price > 0),
             reason=self.plan.reason,
             slot_end=slot.end,
             **base,

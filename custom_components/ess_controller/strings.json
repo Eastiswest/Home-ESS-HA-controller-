@@ -510,7 +510,8 @@
         "horizon_mean": "Average price over the horizon (recommended)",
         "fixed": "A fixed value",
         "zero": "Worthless"
-      }
+      },
+      "horizon_median": "Typical price over the horizon (recommended)"
     }
   },
   "entity": {
@@ -519,9 +520,9 @@
         "name": "Planned action",
         "state": {
           "charge": "Charging from grid",
-          "discharge": "Discharging",
+          "discharge": "Discharging to the house",
           "self_use": "Self use",
-          "idle": "Holding",
+          "idle": "Holding — house on grid",
           "charge_solar_only": "Charging from solar"
         }
       },
@@ -529,9 +530,9 @@
         "name": "Next action",
         "state": {
           "charge": "Charging from grid",
-          "discharge": "Discharging",
+          "discharge": "Discharging to the house",
           "self_use": "Self use",
-          "idle": "Holding",
+          "idle": "Holding — house on grid",
           "charge_solar_only": "Charging from solar"
         }
       },
