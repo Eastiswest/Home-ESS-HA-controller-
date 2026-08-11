@@ -161,24 +161,33 @@ def resolved(*keys: str) -> dict[str, str]:
 
 
 def walk_cards(config: dict) -> list[dict]:
-    """Every card in the dashboard, including nested stacks."""
+    """Every card in the dashboard, including sections and nested stacks.
+
+    A section is itself a card of type ``grid`` in Lovelace's model, so it is
+    walked into and counted like any other.
+    """
     found: list[dict] = []
 
     def visit(cards: list[dict]) -> None:
         for card in cards:
             found.append(card)
-            if "cards" in card:
+            if isinstance(card.get("cards"), list):
                 visit(card["cards"])
 
     for view in config["views"]:
-        visit(view["cards"])
+        visit(view.get("cards", []))
+        visit(view.get("sections", []))
     return found
+
+
+def badges(config: dict) -> list[dict]:
+    return [badge for view in config["views"] for badge in view.get("badges", [])]
 
 
 def referenced_entities(config: dict) -> set[str]:
     """Entity ids a card points at directly, not ones mentioned in templates."""
     ids: set[str] = set()
-    for card in walk_cards(config):
+    for card in [*walk_cards(config), *badges(config)]:
         if isinstance(card.get("entity"), str):
             ids.add(card["entity"])
         for item in card.get("entities", []):
@@ -186,6 +195,11 @@ def referenced_entities(config: dict) -> set[str]:
                 ids.add(item)
             elif isinstance(item, dict) and isinstance(item.get("entity"), str):
                 ids.add(item["entity"])
+        # A tile that presses a button names its target in the tap action, which
+        # is just as capable of pointing at something that does not exist.
+        target = card.get("tap_action", {}).get("target", {}).get("entity_id")
+        if isinstance(target, str):
+            ids.add(target)
     return ids
 
 
@@ -204,11 +218,12 @@ class TestStructure:
         assert build_dashboard(resolved())["title"] == DASHBOARD_TITLE
         assert build_dashboard(resolved(), title="Garage")["title"] == "Garage"
 
-    def test_every_view_has_a_title_icon_and_cards(self):
+    def test_every_view_has_a_title_icon_and_sections(self):
         for view in build_dashboard(resolved())["views"]:
             assert view["title"]
             assert view["icon"].startswith("mdi:")
-            assert view["cards"]
+            assert view["type"] == "sections"
+            assert view["sections"]
 
     def test_every_card_declares_a_type(self):
         for card in walk_cards(build_dashboard(resolved())):
@@ -219,14 +234,133 @@ class TestStructure:
         stock = {
             "entities",
             "gauge",
-            "glance",
-            "markdown",
-            "button",
-            "horizontal-stack",
+            "grid",
+            "heading",
             "history-graph",
+            "markdown",
+            "tile",
         }
         used = {card["type"] for card in walk_cards(build_dashboard(resolved()))}
         assert used <= stock, used - stock
+
+    def test_every_section_opens_with_a_heading(self):
+        for card in walk_cards(build_dashboard(resolved())):
+            if card["type"] != "grid":
+                continue
+            assert card["cards"][0]["type"] == "heading"
+            assert card["cards"][0]["heading"]
+            assert card["cards"][0]["icon"].startswith("mdi:")
+
+    def test_a_section_is_never_just_its_own_heading(self):
+        """A heading is a card, so it must not be what keeps a section alive."""
+        for key in ALL_KEYS:
+            for card in walk_cards(build_dashboard(resolved(key))):
+                if card["type"] == "grid":
+                    assert len(card["cards"]) > 1, (key, card)
+
+    def test_the_overview_carries_badges(self):
+        overview = build_dashboard(resolved())["views"][0]
+        assert overview["path"] == "overview"
+        assert [badge["entity"] for badge in overview["badges"]] == [
+            entity_id("battery_soc"),
+            entity_id("import_price"),
+            entity_id("plan_action"),
+            entity_id("control_status"),
+        ]
+
+    def test_badges_are_dropped_rather_than_left_empty(self):
+        """An empty ``badges`` list renders as a stray gap above the first card."""
+        config = build_dashboard(resolved("min_soc"))
+        for view in config["views"]:
+            assert view.get("badges", ["something"]) != []
+
+
+class TestNames:
+    """Every entity reference must carry a short name of its own.
+
+    Left to Home Assistant, a friendly name is the device name joined to the
+    entity name, so a dashboard entirely about one device reads "AI ESS
+    Controller ..." on every single row and truncates in any card that lays
+    entities out in columns. These tests are what stops that coming back.
+    """
+
+    def _named(self, config: dict) -> list[dict]:
+        """Every reference that is allowed to display a name."""
+        found = []
+        for card in walk_cards(config):
+            if card["type"] in {"tile", "gauge"}:
+                found.append(card)
+            for item in card.get("entities", []):
+                if isinstance(item, dict):
+                    found.append(item)
+        found.extend(badges(config))
+        return found
+
+    def test_every_key_has_a_label(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        missing = [key for key in ALL_KEYS if key not in LABELS]
+        assert missing == []
+
+    def test_labels_are_short_enough_not_to_truncate(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        too_long = {key: text for key, text in LABELS.items() if len(text) > 28}
+        assert too_long == {}
+
+    def test_no_label_repeats_the_integration_name(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        for text in LABELS.values():
+            assert "ESS" not in text
+            assert "AI " not in text
+
+    def test_every_reference_is_renamed(self):
+        for item in self._named(build_dashboard(resolved())):
+            assert item.get("name"), item
+
+    def test_labels_survive_a_key_nobody_named(self):
+        """A new entity must not be able to break the whole dashboard build."""
+        from custom_components.ess_controller.dashboard import label
+
+        assert label("solar_clipping") == "Solar clipping"
+
+    def test_toggles_show_the_control_inline_and_hide_the_word(self):
+        """'On' next to a switch that is on is noise; the toggle already says so."""
+        config = build_dashboard(resolved())
+        tiles = {
+            card["entity"]: card
+            for card in walk_cards(config)
+            if card["type"] == "tile"
+        }
+        switch = tiles[entity_id("optimiser_enabled")]
+        assert switch["features"] == [{"type": "toggle"}]
+        assert switch["features_position"] == "inline"
+        assert switch["hide_state"] is True
+
+    def test_the_strategy_select_is_pickable_from_the_card(self):
+        config = build_dashboard(resolved())
+        tile = next(
+            card
+            for card in walk_cards(config)
+            if card.get("entity") == entity_id("strategy")
+        )
+        assert tile["features"] == [{"type": "select-options"}]
+
+    def test_buttons_press_rather_than_toggle(self):
+        """``toggle`` on a button entity is not a press, so it is spelled out."""
+        config = build_dashboard(resolved())
+        for key in ("replan", "clear_override", "reset_learning"):
+            tile = next(
+                card
+                for card in walk_cards(config)
+                if card.get("entity") == entity_id(key)
+            )
+            assert tile["tap_action"] == {
+                "action": "perform-action",
+                "perform_action": "button.press",
+                "target": {"entity_id": entity_id(key)},
+            }
 
 
 class TestEntityReferences:
@@ -264,10 +398,26 @@ class TestDegradation:
         assert len(config["views"]) >= 1
         assert referenced_entities(config) == {entity_id("plan_action")}
 
-    def test_views_with_no_cards_are_dropped_entirely(self):
+    def test_views_with_no_sections_are_dropped_entirely(self):
         """An empty view would be a blank tab in the sidebar."""
         config = build_dashboard(resolved("min_soc", "max_soc"))
         assert [view["path"] for view in config["views"]] == ["settings"]
+
+    def test_no_view_is_only_static_prose(self):
+        """A view of nothing but instructions is worse than no view at all.
+
+        A templated Markdown card counts as content -- the plan table is prose
+        only in the sense that Lovelace renders it as Markdown -- so this looks
+        for an entity mentioned anywhere in the view, template included.
+        """
+        for key in ALL_KEYS:
+            for view in build_dashboard(resolved(key))["views"]:
+                one = {"views": [view]}
+                templated = any(
+                    entity_id(key) in card.get("content", "")
+                    for card in walk_cards(one)
+                )
+                assert referenced_entities(one) or templated, (key, view["path"])
 
     @pytest.mark.parametrize("missing", ALL_KEYS)
     def test_any_single_entity_missing_still_builds(self, missing: str):
@@ -456,6 +606,9 @@ class TestTemplatesRender:
 
     def test_wear_workings_render_with_a_derived_allowance(self):
         wear = entity_id("wear_allowance")
+        # These attribute names are the sensor's, verbatim. Writing the fixture
+        # with tidier names of my own is what let the real card render "Cycling
+        # pays above a ?p spread" while this test passed.
         attributes = {
             wear: {
                 "source": "derived from pack cost",
@@ -463,8 +616,8 @@ class TestTemplatesRender:
                 "expected_cycles": 1500.0,
                 "usable_kwh": 17.6,
                 "lifetime_throughput_kwh": 26400.0,
-                "spread_needed": 2.1,
-                "negative_price_threshold": -1.8,
+                "spread_needed_to_cycle": 2.1,
+                "negative_price_to_dump_and_reimport": -1.8,
             }
         }
         rendered = self._render(

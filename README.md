@@ -539,19 +539,25 @@ actually has:
 
 | View | What is on it |
 |---|---|
-| **Overview** | What it is doing now and why, state of charge, the arming switch, the next six hours as a table |
-| **Plan** | The forward plan, prices, this slot's detail, 24 hours of price and SoC history |
+| **Overview** | What it is doing now and why, state of charge, the arming switch, the next three hours as a table |
+| **Plan** | The forward plan for six hours, prices, this half-hour's detail, 24 hours of price and SoC history |
 | **Performance** | The weekly report — spend against both counterfactuals, forecast error, plan fidelity, round-trip efficiency — plus the wear allowance workings |
 | **Loads & events** | Flexible load schedule and advice, grid sessions, outage risk |
 | **Settings** | Every live-tunable number and switch in one place |
 
-Three deliberate properties:
+Four deliberate properties:
 
 - **Stock cards only.** ApexCharts and mini-graph-card make prettier plots, but
   they are separate HACS installs, and a dashboard that renders as a column of
   red "Custom element doesn't exist" boxes is worse than no dashboard. The
   forward plan is a Markdown table built from the plan sensor's attributes, so it
   works on a bare install.
+- **Every row is renamed.** Home Assistant builds a friendly name by joining the
+  device name to the entity name, so left alone every row on the page would read
+  "AI ESS Controller Planned action" and anything laid out in columns would
+  truncate to "AI ESS Controll...". Each entity gets a short name of its own, and
+  the section heading above it carries the context instead. Rename any of them
+  and your name is what the dashboard shows.
 - **It becomes yours.** It is an ordinary storage dashboard: edit it, rearrange
   it, delete it. It is created *once* and never rewritten, so your changes stick
   and a deleted dashboard stays deleted. Want it back? The **Rebuild dashboard**

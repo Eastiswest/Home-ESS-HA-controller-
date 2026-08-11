@@ -370,6 +370,85 @@ class TestDashboardInstall:
         assert "views" in written.read_text()
 
 
+class TestDashboardRenders:
+    """Render every Markdown card the way the frontend does, against live state.
+
+    The dashboard's tables are Jinja over sensor attributes, and a template that
+    names an attribute the sensor does not publish fails silently: Home Assistant
+    renders it as nothing and the card shows "Cycling pays above a ?p spread".
+    Nothing catches that except rendering the real template against the real
+    entity, because a hand-written fixture agrees with whatever the template
+    happens to say. That bug shipped; this is what would have found it.
+    """
+
+    async def _cards(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        _lovelace(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        await hass.async_block_till_done()
+
+        from custom_components.ess_controller.panel import build_for_entry
+
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        config = build_for_entry(hass, entry)
+        found: list[str] = []
+        for view in config["views"]:
+            for section in view.get("sections", []):
+                for card in section.get("cards", []):
+                    if card.get("type") == "markdown":
+                        found.append(card["content"])
+        assert found, "no markdown cards to render"
+        return found
+
+    async def _render(self, hass, content: str) -> str:
+        from homeassistant.helpers.template import Template
+
+        return Template(content, hass).async_render(parse_result=False)
+
+    async def test_every_markdown_card_renders(self, hass):
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            assert rendered.strip(), content[:120]
+
+    async def test_no_card_leaks_a_missing_attribute(self, hass):
+        """The symptom of a wrong attribute name, in the forms it takes."""
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            for leak in ("?p", "None", "nan", "unknown source"):
+                assert leak not in rendered, (leak, rendered[:300])
+
+    async def test_the_plan_table_has_a_row_per_slot(self, hass):
+        from custom_components.ess_controller.dashboard import (
+            OVERVIEW_TABLE_SLOTS,
+            PLAN_TABLE_SLOTS,
+        )
+
+        # The summary page shows a shorter table than the Plan page, so both
+        # lengths must turn up exactly once.
+        seen = []
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            if "| Time |" not in rendered:
+                continue
+            rows = [line for line in rendered.splitlines() if line.startswith("| ")]
+            assert "p |" in rows[-1]  # the price rendered as a number
+            seen.append(len(rows) - 1)  # less the header
+        assert sorted(seen) == sorted([OVERVIEW_TABLE_SLOTS, PLAN_TABLE_SLOTS])
+
+    async def test_the_wear_card_shows_both_thresholds(self, hass):
+        """The card the wrong attribute names broke."""
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            if "p/kWh**" not in rendered:
+                continue
+            assert "Cycling pays above a **" in rendered
+            assert "Dumping to re-import pays below **" in rendered
+            return
+        pytest.fail("the wear card never rendered")
+
+
 class TestOctopusErrors:
     """Config-flow error keys, which need voluptuous and so cannot live in the
     fast suite. Reporting "check your network" for a mistyped product code is a

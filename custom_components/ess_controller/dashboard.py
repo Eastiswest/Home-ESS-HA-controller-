@@ -6,7 +6,7 @@ five views, stock cards only — which is installed into the sidebar on setup an
 is a perfectly ordinary dashboard afterwards: editable, deletable, and never
 rewritten once created.
 
-Two constraints shape it:
+Four constraints shape it:
 
 * **Stock cards only.** ApexCharts and mini-graph-card make far prettier plots,
   but they are separate HACS installs, and a dashboard that renders as a column
@@ -17,6 +17,16 @@ Two constraints shape it:
   a missing entity shows an error row. Cards are built from the keys that
   resolved and dropped entirely when nothing in them did, so a partial install
   degrades to a smaller dashboard rather than a broken one.
+* **Every row is renamed.** Entity friendly names carry the device name, so
+  left alone every single row reads "AI ESS Controller Planned action" and a
+  glance card truncates all four of its columns to "AI ESS Controll...". The
+  device name is redundant on a dashboard that is entirely about that device, so
+  ``LABELS`` gives each key a short name and every reference uses it. This is the
+  difference between a wall of identical grey text and something readable.
+* **Sections, not masonry.** The default masonry view packs cards into ragged
+  columns by height, which looks like a filing error. ``type: sections`` lays
+  them out on a grid with headings, and puts the four numbers you actually watch
+  into badges along the top.
 
 Home Assistant-free: it takes a mapping of entity key to entity id and returns
 plain dictionaries, so the whole structure is testable without a running
@@ -35,7 +45,110 @@ DASHBOARD_ICON = "mdi:home-battery-outline"
 # enough to cover the next decision, short enough to read on a phone.
 PLAN_TABLE_SLOTS = 12
 
+# The Overview gets a shorter one. Sections are grid items, so a row does not
+# start until the tallest section in the row above it ends -- a twelve-row table
+# on the summary page leaves a table-high blank beside every neighbour.
+OVERVIEW_TABLE_SLOTS = 6
+
 PLACEHOLDER_VIEW_PATH = "waiting"
+
+# Short names, one per entity key.
+#
+# Home Assistant builds a friendly name by joining the device name to the entity
+# name, which is right in a list of every entity in the house and wrong on a
+# dashboard where every card belongs to the same device: "AI ESS Controller
+# Planned action" wastes the first eighteen characters of every row, and any card
+# that lays entities out in columns truncates all of them to the useless prefix.
+# These are deliberately terse -- the heading above a card supplies the context
+# the entity name would otherwise have to carry.
+LABELS: dict[str, str] = {
+    # What it is doing
+    "plan_action": "Doing now",
+    "next_action": "Next half-hour",
+    "control_status": "Control",
+    "target_soc": "Target",
+    "planned_charge_power": "Charge power",
+    "planned_discharge_power": "Discharge power",
+    "charging_planned": "Charging",
+    "discharging_planned": "Discharging",
+    "exporting_planned": "Exporting",
+    # Money
+    "import_price": "Import price",
+    "export_price": "Export price",
+    "cheap_slot": "Cheap slot",
+    "plan_cost": "Cost over the horizon",
+    "plan_saving": "Saving vs self-use",
+    "weekly_saving": "Saving this week",
+    "tariff_recommendation": "Best tariff for you",
+    # Energy
+    "planned_grid_import": "Grid import",
+    "planned_grid_export": "Grid export",
+    "solar_forecast_today": "Solar left today",
+    "solar_forecast_tomorrow": "Solar tomorrow",
+    "load_forecast_today": "Load left today",
+    "load_forecast_tomorrow": "Load tomorrow",
+    # Battery
+    "battery_soc": "State of charge",
+    "usable_capacity": "Usable capacity",
+    "wear_allowance": "Wear in use",
+    "learning_progress": "Learning progress",
+    # Health
+    "plan_valid": "Plan",
+    "write_verified": "Inverter writes",
+    "control_active": "Controlling",
+    "inverter_available": "Inverter link",
+    # Events
+    "grid_session": "Grid session",
+    "session_active": "Running now",
+    "free_electricity_now": "Free electricity",
+    "outage_risk": "Outage risk",
+    "outage_risk_active": "Outage expected",
+    "shifted_loads": "Scheduled loads",
+    "flexible_load_running": "Load due now",
+    # Switches
+    "optimiser_enabled": "Optimiser",
+    "inverter_control": "Write to inverter",
+    "allow_grid_charge": "Charge from the grid",
+    "allow_export": "Export",
+    "allow_battery_export": "Battery export",
+    "sessions_enabled": "Act on grid sessions",
+    "shifting_enabled": "Shift flexible loads",
+    "appliance_control": "Switch appliances",
+    "outage_protection": "Outage protection",
+    "derive_wear_from_cost": "Derive from pack cost",
+    # Numbers
+    "min_soc": "Minimum charge",
+    "max_soc": "Maximum charge",
+    "reserve_soc": "Emergency reserve",
+    "max_charge_power": "Charge limit",
+    "max_discharge_power": "Discharge limit",
+    "cycle_cost": "Wear allowance",
+    "battery_cost": "Pack cost",
+    "battery_expected_cycles": "Expected cycles",
+    "battery_residual_value": "Residual value",
+    "default_daily_load": "Typical daily use",
+    "cooling_threshold": "Cooling above",
+    "cooling_rate": "Cooling per °C",
+    "heating_threshold": "Heating below",
+    "heating_rate": "Heating per °C",
+    # Controls
+    "strategy": "Strategy",
+    "replan": "Re-plan now",
+    "clear_override": "Clear override",
+    "reset_learning": "Reset learning",
+    "recommend_tariffs": "Compare tariffs",
+    "create_dashboard": "Rebuild dashboard",
+}
+
+
+def label(key: str) -> str:
+    """The short name for a key, falling back to something readable.
+
+    A key with no entry is a bug rather than a crash: a new entity that nobody
+    remembered to name here should show up as "Solar clipping", not break the
+    dashboard build and take the sidebar entry with it.
+    """
+    return LABELS.get(key) or key.replace("_", " ").capitalize()
 
 
 def placeholder_dashboard(title: str = DASHBOARD_TITLE) -> dict[str, Any]:
@@ -110,14 +223,26 @@ def dashboards_mapping(data: Any) -> dict[str, Any] | None:
     return found if isinstance(found, dict) else None
 
 
+def _compact(cards: list[Any | None]) -> list[Any]:
+    return [card for card in cards if card]
+
+
+# ---------------------------------------------------------------- single cards
+
+
 def _entities_card(
-    title: str, keys: list[str], resolved: dict[str, str], **extra: Any
+    keys: list[str], resolved: dict[str, str], **extra: Any
 ) -> dict[str, Any] | None:
-    """An entities card containing whichever of ``keys`` exist."""
-    rows = [resolved[key] for key in keys if key in resolved]
+    """An entities card containing whichever of ``keys`` exist.
+
+    No ``title``: the section heading above it says what it is, and a card title
+    under a heading reads as the same words twice. Dense numeric lists are the one
+    place rows beat tiles -- fourteen tiles of settings is a lot of scrolling.
+    """
+    rows = [{"entity": resolved[key], "name": label(key)} for key in keys if key in resolved]
     if not rows:
         return None
-    card: dict[str, Any] = {"type": "entities", "title": title, "entities": rows}
+    card: dict[str, Any] = {"type": "entities", "entities": rows, "state_color": True}
     card.update(extra)
     return card
 
@@ -125,73 +250,180 @@ def _entities_card(
 def _gauge(key: str, resolved: dict[str, str], **extra: Any) -> dict[str, Any] | None:
     if key not in resolved:
         return None
-    return {"type": "gauge", "entity": resolved[key], **extra}
+    card = {"type": "gauge", "entity": resolved[key], "name": label(key)}
+    card.update(extra)
+    return card
 
 
-def _glance(
-    title: str, keys: list[str], resolved: dict[str, str]
-) -> dict[str, Any] | None:
-    rows = [resolved[key] for key in keys if key in resolved]
-    if not rows:
-        return None
-    return {"type": "glance", "title": title, "entities": rows, "state_color": True}
+def _tile(key: str, resolved: dict[str, str], **extra: Any) -> dict[str, Any] | None:
+    """A tile card, which is the card the modern Home Assistant look is made of.
 
-
-def _markdown(content: str) -> dict[str, Any]:
-    return {"type": "markdown", "content": content}
-
-
-def _buttons(keys: list[str], resolved: dict[str, str]) -> dict[str, Any] | None:
-    cards = [
-        {
-            "type": "button",
-            "entity": resolved[key],
-            "tap_action": {"action": "toggle"},
-            "show_state": False,
-        }
-        for key in keys
-        if key in resolved
-    ]
-    if not cards:
-        return None
-    return {"type": "horizontal-stack", "cards": cards}
-
-
-def _compact(cards: list[dict[str, Any] | None]) -> list[dict[str, Any]]:
-    return [card for card in cards if card]
-
-
-def _with_footnote(
-    cards: list[dict[str, Any]], content: str, extra: dict[str, Any] | None = None
-) -> list[dict[str, Any]]:
-    """Append an explanatory card, but only to a view that has real content.
-
-    A static prose card counts as a card, which would keep a view alive even
-    when every entity in it is missing -- and an empty install would then get a
-    dashboard of nothing but instructions. Prose follows substance.
+    Icon, short name and state on one line, coloured by state, tappable for more
+    info. Where a tile drives something -- a switch, the strategy select -- the
+    control goes *inline* on the same row rather than as a second line, so a
+    column of them stays a column rather than becoming a ladder.
     """
-    if not cards:
-        return cards
-    cards.append(_markdown(content))
-    if extra:
-        cards.append(extra)
+    if key not in resolved:
+        return None
+    card: dict[str, Any] = {
+        "type": "tile",
+        "entity": resolved[key],
+        "name": label(key),
+    }
+    card.update(extra)
+    return card
+
+
+def _tiles(keys: list[str], resolved: dict[str, str], **extra: Any) -> list[dict[str, Any]]:
+    return _compact([_tile(key, resolved, **extra) for key in keys])
+
+
+def _toggles(keys: list[str], resolved: dict[str, str]) -> list[dict[str, Any]]:
+    """Prominent switches, as tiles with the toggle on the same row.
+
+    A tile with inline features reports ``min_columns: 12``, so each one takes a
+    whole row of its section. That is the right trade for two or three switches
+    someone reaches for often, and the wrong one for a list of ten -- those go in
+    an entities card instead.
+    """
+    return _tiles(
+        keys,
+        resolved,
+        features=[{"type": "toggle"}],
+        features_position="inline",
+        hide_state=True,
+    )
+
+
+def _select(key: str, resolved: dict[str, str]) -> dict[str, Any] | None:
+    # ``hide_state``: the dropdown underneath already shows the current option,
+    # and without this the tile prints it immediately above as well.
+    return _tile(
+        key,
+        resolved,
+        features=[{"type": "select-options"}],
+        hide_state=True,
+        grid_options={"columns": "full"},
+    )
+
+
+def _actions(keys: list[str], resolved: dict[str, str]) -> list[dict[str, Any]]:
+    """Tiles that press a button entity.
+
+    Spelled out as ``perform-action`` rather than left to ``toggle``: pressing is
+    not toggling, and a tile whose tap does nothing is worse than no tile.
+    """
+    cards: list[dict[str, Any]] = []
+    for key in keys:
+        if key not in resolved:
+            continue
+        cards.append(
+            {
+                "type": "tile",
+                "entity": resolved[key],
+                "name": label(key),
+                "hide_state": True,
+                "tap_action": {
+                    "action": "perform-action",
+                    "perform_action": "button.press",
+                    "target": {"entity_id": resolved[key]},
+                },
+            }
+        )
     return cards
 
 
-def _plan_table(plan_entity: str) -> str:
+def _markdown(content: str) -> dict[str, Any]:
+    # Prose and tables want the whole width; left to the grid they would sit in a
+    # half-width column with a table scrolling sideways inside them.
+    return {
+        "type": "markdown",
+        "content": content,
+        "grid_options": {"columns": "full"},
+    }
+
+
+def _badge(key: str, resolved: dict[str, str], **extra: Any) -> dict[str, Any] | None:
+    if key not in resolved:
+        return None
+    badge: dict[str, Any] = {
+        "type": "entity",
+        "entity": resolved[key],
+        "name": label(key),
+        "show_name": True,
+        "state_content": "state",
+    }
+    badge.update(extra)
+    return badge
+
+
+# ------------------------------------------------------------------- sections
+
+
+def _section(
+    heading: str, icon: str, cards: list[Any | None]
+) -> dict[str, Any] | None:
+    """A grid section with a heading, or nothing if it would be empty.
+
+    The heading is a card, so it cannot be what keeps a section alive: a section
+    of nothing but its own title is exactly the sort of thing that makes a
+    generated dashboard look generated.
+    """
+    real = _compact(cards)
+    if not real:
+        return None
+    return {
+        "type": "grid",
+        "cards": [
+            {"type": "heading", "heading": heading, "icon": icon},
+            *real,
+        ],
+    }
+
+
+def _view(
+    title: str,
+    path: str,
+    icon: str,
+    sections: list[dict[str, Any] | None],
+    badges: list[dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "type": "sections",
+        "title": title,
+        "path": path,
+        "icon": icon,
+        "max_columns": 3,
+        "sections": _compact(sections),
+    }
+    if badges:
+        real = _compact(badges)
+        if real:
+            view["badges"] = real
+    return view
+
+
+def has_content(view: dict[str, Any]) -> bool:
+    """Whether a view is worth putting in the tab bar."""
+    return bool(view.get("sections") or view.get("cards"))
+
+
+def _plan_table(plan_entity: str, slots: int = PLAN_TABLE_SLOTS) -> str:
     """A Markdown table of the forward plan, rendered from sensor attributes.
 
     Deliberately a template rather than a chart card: the plan lives in the
     ``slots`` attribute as a list of dicts, and Jinja can turn that into a table
     with nothing installed. Prices and the action are what a person actually
     reads off it; the full detail is in the attribute for anyone templating.
+
+    No heading of its own -- the section it sits in has one, and two identical
+    headings stacked is how a generated dashboard announces itself.
     """
     return (
-        "### Next six hours\n\n"
         "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
         "{% if not slots %}No plan yet — waiting for prices.{% else %}"
         "| Time | Price | Doing | SoC after |\n|---|---|---|---|\n"
-        "{% for slot in slots[:" + str(PLAN_TABLE_SLOTS) + "] %}"
+        "{% for slot in slots[:" + str(slots) + "] %}"
         "| {{ as_timestamp(slot.start) | timestamp_custom('%H:%M', true) }} "
         "| {{ '%.1f' | format(slot.import_price) }}p "
         "| {{ slot.action | replace('_', ' ') | capitalize }} "
@@ -214,9 +446,14 @@ def _wear_workings(wear_entity: str) -> str:
     The wear allowance is the most consequential number in the system and the
     least obvious, so the dashboard shows the workings rather than just the
     result.
+
+    The two threshold names are the sensor's own: ``spread_needed_to_cycle`` and
+    ``negative_price_to_dump_and_reimport``. Shortening them here to something
+    more readable is what made this card render "Cycling pays above a **?p**
+    spread" -- a template naming an attribute that does not exist fails silently,
+    and a unit test written against invented attributes agrees with it.
     """
     return (
-        "### Wear allowance\n\n"
         "{% set e = '" + wear_entity + "' %}"
         "**{{ states(e) }} p/kWh** "
         "-- {{ state_attr(e, 'source') or 'unknown source' }}\n\n"
@@ -227,9 +464,14 @@ def _wear_workings(wear_entity: str) -> str:
         "{{ state_attr(e, 'lifetime_throughput_kwh') | round | int }} kWh "
         "of throughput.\n\n"
         "{% endif %}"
-        "Cycling pays above a **{{ state_attr(e, 'spread_needed') or '?' }}p** spread. "
-        "Dumping to re-import pays below "
-        "**{{ state_attr(e, 'negative_price_threshold') or '?' }}p**."
+        "{% set spread = state_attr(e, 'spread_needed_to_cycle') %}"
+        "{% set dump = state_attr(e, 'negative_price_to_dump_and_reimport') %}"
+        "{% if spread is not none %}"
+        "Cycling pays above a **{{ spread }}p** spread. "
+        "{% endif %}"
+        "{% if dump is not none %}"
+        "Dumping to re-import pays below **{{ dump }}p**."
+        "{% endif %}"
     )
 
 
@@ -241,7 +483,6 @@ def _performance_report(saving_entity: str) -> str:
     broken template rather than "not enough data yet".
     """
     return (
-        "### This week\n\n"
         "{% set e = '" + saving_entity + "' %}"
         "{% set money = state_attr(e, 'money') %}"
         "{% set control = state_attr(e, 'control') %}"
@@ -283,7 +524,6 @@ def _performance_report(saving_entity: str) -> str:
 
 def _flexible_loads(shifted_entity: str) -> str:
     return (
-        "### Flexible loads\n\n"
         "{% set e = '" + shifted_entity + "' %}"
         "**{{ state_attr(e, 'advice') or 'nothing scheduled' }}**\n\n"
         "{% set placements = state_attr(e, 'placements') %}"
@@ -302,276 +542,366 @@ def _flexible_loads(shifted_entity: str) -> str:
 
 
 def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
-    cards = _compact(
+    plan = resolved.get("plan_cost")
+    return _view(
+        "Overview",
+        "overview",
+        "mdi:home-lightning-bolt-outline",
         [
-            _glance(
-                "Now",
-                ["plan_action", "next_action", "control_status", "import_price"],
-                resolved,
+            _section(
+                "Right now",
+                "mdi:flash",
+                [
+                    _gauge(
+                        "battery_soc",
+                        resolved,
+                        min=0,
+                        max=100,
+                        severity={"green": 40, "yellow": 20, "red": 0},
+                        grid_options={"columns": 6},
+                    ),
+                    _tile(
+                        "plan_action",
+                        resolved,
+                        icon="mdi:battery-charging-medium",
+                        grid_options={"columns": 6},
+                    ),
+                    _tile("next_action", resolved, grid_options={"columns": 6}),
+                    _tile("import_price", resolved, grid_options={"columns": 6}),
+                    _markdown(_plan_reason(plan)) if plan else None,
+                ],
             ),
-            _gauge(
-                "battery_soc",
-                resolved,
-                name="State of charge",
-                min=0,
-                max=100,
-                severity={"green": 40, "yellow": 20, "red": 0},
+            _section(
+                "Next three hours",
+                "mdi:clock-outline",
+                [
+                    _markdown(_plan_table(plan, OVERVIEW_TABLE_SLOTS))
+                    if plan
+                    else None
+                ],
             ),
-            _entities_card(
+            _section(
                 "Control",
+                "mdi:tune",
                 [
-                    "optimiser_enabled",
-                    "inverter_control",
-                    "strategy",
-                    "control_active",
-                    "inverter_available",
+                    *_toggles(["optimiser_enabled", "inverter_control"], resolved),
+                    _select("strategy", resolved),
+                    *_tiles(["control_active", "inverter_available"], resolved),
+                    *_actions(["replan", "clear_override"], resolved),
                 ],
-                resolved,
             ),
-            _markdown(_plan_reason(resolved["plan_cost"]))
-            if "plan_cost" in resolved
-            else None,
-            _markdown(_plan_table(resolved["plan_cost"]))
-            if "plan_cost" in resolved
-            else None,
-            _entities_card(
+            _section(
                 "Today",
+                "mdi:calendar-today",
                 [
-                    "plan_cost",
-                    "plan_saving",
-                    "planned_grid_import",
-                    "planned_grid_export",
-                    "solar_forecast_today",
-                    "load_forecast_today",
-                    "solar_forecast_tomorrow",
-                    "load_forecast_tomorrow",
+                    _entities_card(
+                        [
+                            "plan_cost",
+                            "plan_saving",
+                            "planned_grid_import",
+                            "planned_grid_export",
+                            "solar_forecast_today",
+                            "load_forecast_today",
+                            "solar_forecast_tomorrow",
+                            "load_forecast_tomorrow",
+                        ],
+                        resolved,
+                    )
                 ],
-                resolved,
             ),
-            _entities_card(
+            _section(
                 "Watch out for",
-                [
-                    "plan_valid",
-                    "write_verified",
-                    "grid_session",
-                    "free_electricity_now",
-                    "outage_risk",
-                ],
-                resolved,
+                "mdi:alert-outline",
+                _tiles(
+                    [
+                        "plan_valid",
+                        "write_verified",
+                        "grid_session",
+                        "free_electricity_now",
+                        "outage_risk",
+                    ],
+                    resolved,
+                ),
             ),
-            _buttons(["replan", "clear_override"], resolved),
-        ]
+        ],
+        badges=[
+            _badge("battery_soc", resolved),
+            _badge("import_price", resolved),
+            _badge("plan_action", resolved),
+            _badge("control_status", resolved),
+        ],
     )
-    return {
-        "title": "Overview",
-        "path": "overview",
-        "icon": "mdi:view-dashboard-outline",
-        "cards": cards,
-    }
 
 
 def _plan_view(resolved: dict[str, str]) -> dict[str, Any]:
-    cards = _compact(
+    plan = resolved.get("plan_cost")
+    history = [
+        {"entity": resolved[key], "name": label(key)}
+        for key in ("import_price", "battery_soc")
+        if key in resolved
+    ]
+    return _view(
+        "Plan",
+        "plan",
+        "mdi:chart-timeline-variant",
+        # Sections fill columns in order, so a twelve-row table declared first
+        # leaves a column-high gap beside it. Short sections first, the table
+        # last: it then owns the third column and the rest pack into one and two.
         [
-            _markdown(_plan_table(resolved["plan_cost"]))
-            if "plan_cost" in resolved
-            else None,
-            _entities_card(
+            _section(
                 "Prices",
-                ["import_price", "export_price", "cheap_slot"],
-                resolved,
+                "mdi:currency-gbp",
+                _tiles(["import_price", "export_price", "cheap_slot"], resolved),
             ),
-            _entities_card(
-                "This slot",
+            _section(
+                "This half-hour",
+                "mdi:battery-charging",
                 [
-                    "plan_action",
-                    "planned_charge_power",
-                    "planned_discharge_power",
-                    "target_soc",
-                    "charging_planned",
-                    "discharging_planned",
-                    "exporting_planned",
+                    _entities_card(
+                        [
+                            "plan_action",
+                            "planned_charge_power",
+                            "planned_discharge_power",
+                            "target_soc",
+                            "charging_planned",
+                            "discharging_planned",
+                            "exporting_planned",
+                        ],
+                        resolved,
+                    )
                 ],
-                resolved,
             ),
-            # A price history graph is the one chart stock cards do well, and it
-            # is the context the forward table lacks: is today dear or cheap?
-            {
-                "type": "history-graph",
-                "title": "Price and state of charge, last 24 hours",
-                "hours_to_show": 24,
-                "entities": [
-                    resolved[key]
-                    for key in ("import_price", "battery_soc")
-                    if key in resolved
+            _section(
+                "Next six hours",
+                "mdi:clock-outline",
+                [_markdown(_plan_table(plan)) if plan else None],
+            ),
+            _section(
+                "Last 24 hours",
+                "mdi:chart-line",
+                [
+                    # A history graph is the one chart stock cards do well, and it
+                    # is the context the forward table lacks: is today dear or
+                    # cheap?
+                    {
+                        "type": "history-graph",
+                        "hours_to_show": 24,
+                        "entities": history,
+                        "grid_options": {"columns": "full"},
+                    }
+                    if history
+                    else None
                 ],
-            }
-            if "import_price" in resolved or "battery_soc" in resolved
-            else None,
-            _entities_card(
+            ),
+            _section(
                 "Permissions",
-                ["allow_grid_charge", "allow_export", "allow_battery_export"],
-                resolved,
+                "mdi:key-outline",
+                _toggles(
+                    ["allow_grid_charge", "allow_export", "allow_battery_export"],
+                    resolved,
+                ),
             ),
-        ]
+        ],
+        badges=[
+            _badge("import_price", resolved),
+            _badge("plan_action", resolved),
+            _badge("target_soc", resolved),
+        ],
     )
-    return {"title": "Plan", "path": "plan", "icon": "mdi:chart-timeline", "cards": cards}
 
 
 def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
-    cards = _compact(
+    weekly = resolved.get("weekly_saving")
+    wear = resolved.get("wear_allowance")
+    return _view(
+        "Performance",
+        "performance",
+        "mdi:chart-box-outline",
         [
-            _markdown(_performance_report(resolved["weekly_saving"]))
-            if "weekly_saving" in resolved
-            else None,
-            _markdown(_wear_workings(resolved["wear_allowance"]))
-            if "wear_allowance" in resolved
-            else None,
-            _gauge(
-                "learning_progress",
-                resolved,
-                name="Learning progress",
-                min=0,
-                max=100,
-                severity={"red": 0, "yellow": 33, "green": 66},
+            _section(
+                "This week",
+                "mdi:cash-multiple",
+                [_markdown(_performance_report(weekly)) if weekly else None],
             ),
-            _entities_card(
-                "Battery",
-                ["battery_soc", "usable_capacity", "wear_allowance"],
-                resolved,
+            _section(
+                "Wear",
+                "mdi:battery-heart-variant",
+                [
+                    _markdown(_wear_workings(wear)) if wear else None,
+                    _entities_card(
+                        ["battery_soc", "usable_capacity", "wear_allowance"], resolved
+                    ),
+                ],
             ),
-            _entities_card("Tariffs", ["tariff_recommendation"], resolved),
-        ]
+            _section(
+                "Learning",
+                "mdi:school-outline",
+                [
+                    _gauge(
+                        "learning_progress",
+                        resolved,
+                        min=0,
+                        max=100,
+                        severity={"red": 0, "yellow": 33, "green": 66},
+                        grid_options={"columns": 6},
+                    ),
+                    _tile("tariff_recommendation", resolved),
+                    *_actions(["recommend_tariffs", "reset_learning"], resolved),
+                ],
+            ),
+            _section(
+                "Export the history",
+                "mdi:file-download-outline",
+                [
+                    _markdown(
+                        "Run the **ess_controller.export_performance** action from "
+                        "Developer tools → Actions to get the recorded half-hours "
+                        "out as a summary, as structured data, or as a CSV file "
+                        "written to `config/ess_controller/`. That file is what to "
+                        "hand to a spreadsheet — or to an AI assistant — and ask "
+                        "what to change."
+                    )
+                    # Prose follows substance: instructions for exporting a history
+                    # that cannot exist would be the only thing on the page.
+                    if weekly or wear
+                    else None
+                ],
+            ),
+        ],
+        badges=[
+            _badge("weekly_saving", resolved),
+            _badge("wear_allowance", resolved),
+            _badge("learning_progress", resolved),
+        ],
     )
-    cards = _with_footnote(
-        cards,
-        "### Export the history\n\n"
-        "Run the **ess_controller.export_performance** action from "
-        "Developer tools → Actions to get the recorded half-hours out as "
-        "a summary, structured data, or a CSV file written to "
-        "`config/ess_controller/`. That file is what to hand to a "
-        "spreadsheet — or to an AI assistant — and ask what to change.",
-        _buttons(["recommend_tariffs", "reset_learning"], resolved),
-    )
-    return {
-        "title": "Performance",
-        "path": "performance",
-        "icon": "mdi:chart-box-outline",
-        "cards": cards,
-    }
 
 
 def _loads_view(resolved: dict[str, str]) -> dict[str, Any]:
-    cards = _compact(
+    shifted = resolved.get("shifted_loads")
+    return _view(
+        "Loads & events",
+        "loads",
+        "mdi:washing-machine",
         [
-            _markdown(_flexible_loads(resolved["shifted_loads"]))
-            if "shifted_loads" in resolved
-            else None,
-            _entities_card(
-                "Load shifting",
+            _section(
+                "Flexible loads",
+                "mdi:clock-fast",
                 [
-                    "shifting_enabled",
-                    "appliance_control",
-                    "shifted_loads",
-                    "flexible_load_running",
+                    _markdown(_flexible_loads(shifted)) if shifted else None,
+                    *_toggles(["shifting_enabled", "appliance_control"], resolved),
+                    *_tiles(["shifted_loads", "flexible_load_running"], resolved),
                 ],
-                resolved,
             ),
-            _entities_card(
+            _section(
                 "Grid incentives",
+                "mdi:transmission-tower",
                 [
-                    "sessions_enabled",
-                    "grid_session",
-                    "session_active",
-                    "free_electricity_now",
+                    *_toggles(["sessions_enabled"], resolved),
+                    *_tiles(
+                        ["grid_session", "session_active", "free_electricity_now"],
+                        resolved,
+                    ),
                 ],
-                resolved,
             ),
-            _entities_card(
+            _section(
                 "Power cuts",
-                ["outage_protection", "outage_risk", "outage_risk_active"],
-                resolved,
+                "mdi:power-plug-off-outline",
+                [
+                    *_toggles(["outage_protection"], resolved),
+                    *_tiles(["outage_risk", "outage_risk_active"], resolved),
+                ],
             ),
-        ]
+        ],
+        badges=[
+            _badge("shifted_loads", resolved),
+            _badge("grid_session", resolved),
+            _badge("outage_risk", resolved),
+        ],
     )
-    return {
-        "title": "Loads & events",
-        "path": "loads",
-        "icon": "mdi:washing-machine",
-        "cards": cards,
-    }
 
 
 def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
-    cards = _compact(
+    numbers = _entities_card(
         [
-            _entities_card(
-                "Battery limits",
-                [
-                    "min_soc",
-                    "max_soc",
-                    "reserve_soc",
-                    "max_charge_power",
-                    "max_discharge_power",
-                ],
-                resolved,
-            ),
-            _entities_card(
-                "Wear",
-                [
-                    "derive_wear_from_cost",
-                    "battery_cost",
-                    "battery_expected_cycles",
-                    "battery_residual_value",
-                    "cycle_cost",
-                    "wear_allowance",
-                ],
-                resolved,
-            ),
-            _entities_card(
-                "Load model",
-                [
-                    "default_daily_load",
-                    "cooling_threshold",
-                    "cooling_rate",
-                    "heating_threshold",
-                    "heating_rate",
-                ],
-                resolved,
-            ),
-            _entities_card(
-                "Behaviour",
-                [
-                    "optimiser_enabled",
-                    "inverter_control",
-                    "strategy",
-                    "allow_grid_charge",
-                    "allow_export",
-                    "allow_battery_export",
-                    "sessions_enabled",
-                    "shifting_enabled",
-                    "appliance_control",
-                    "outage_protection",
-                ],
-                resolved,
-            ),
-        ]
+            "min_soc",
+            "max_soc",
+            "reserve_soc",
+            "max_charge_power",
+            "max_discharge_power",
+        ],
+        resolved,
     )
-    cards = _with_footnote(
-        cards,
-        "### Deeper settings\n\n"
-        "Entities, tariff sources, forecast sources, flexible load "
-        "definitions and outage thresholds live in **Settings → Devices & "
-        "services → AI ESS Controller → Configure**. Everything on this "
-        "page takes effect on the next plan, without a reload.",
-        _buttons(["replan", "clear_override", "reset_learning"], resolved),
+    wear = _entities_card(
+        [
+            "derive_wear_from_cost",
+            "battery_cost",
+            "battery_expected_cycles",
+            "battery_residual_value",
+            "cycle_cost",
+            "wear_allowance",
+        ],
+        resolved,
     )
-    return {
-        "title": "Settings",
-        "path": "settings",
-        "icon": "mdi:tune-variant",
-        "cards": cards,
-    }
+    load = _entities_card(
+        [
+            "default_daily_load",
+            "cooling_threshold",
+            "cooling_rate",
+            "heating_threshold",
+            "heating_rate",
+        ],
+        resolved,
+    )
+    # Ten switches as inline tiles is ten full-width rows and a column twice the
+    # height of everything beside it. An entities card puts each on one compact
+    # row with its toggle at the right, which is what this list wants to be.
+    behaviour = [
+        _select("strategy", resolved),
+        _entities_card(
+            [
+                "optimiser_enabled",
+                "inverter_control",
+                "allow_grid_charge",
+                "allow_export",
+                "allow_battery_export",
+                "sessions_enabled",
+                "shifting_enabled",
+                "appliance_control",
+                "outage_protection",
+            ],
+            resolved,
+        ),
+    ]
+    anything = bool(_compact([numbers, wear, load]) or _compact(behaviour))
+    return _view(
+        "Settings",
+        "settings",
+        "mdi:tune-variant",
+        [
+            _section("Battery limits", "mdi:battery-70", [numbers]),
+            _section("Wear", "mdi:battery-heart-variant", [wear]),
+            _section("Load model", "mdi:home-thermometer-outline", [load]),
+            _section("Behaviour", "mdi:robot-outline", behaviour),
+            _section(
+                "Deeper settings",
+                "mdi:cog-outline",
+                [
+                    _markdown(
+                        "Entities, tariff sources, forecast sources, flexible load "
+                        "definitions and outage thresholds live in **Settings → "
+                        "Devices & services → AI ESS Controller → Configure**. "
+                        "Everything on this page takes effect on the next plan, "
+                        "without a reload."
+                    )
+                    if anything
+                    else None,
+                    *_actions(
+                        ["replan", "clear_override", "reset_learning"], resolved
+                    ),
+                ],
+            ),
+        ],
+    )
 
 
 def build_dashboard(
@@ -595,5 +925,5 @@ def build_dashboard(
         # Not a "strategy" dashboard: a plain view list is what the UI editor can
         # take over, which is the point -- this is a starting point the user owns,
         # not something the integration keeps control of.
-        "views": [view for view in views if view["cards"]],
+        "views": [view for view in views if has_content(view)],
     }
