@@ -1147,3 +1147,68 @@ class TestChartsWhenApexIsInstalled:
         plain = fingerprint(build_dashboard(resolved()))
         charted = fingerprint(build_dashboard(resolved(), charts=True))
         assert plain != charted
+
+
+class TestTheBuyColumnSeparatesSunFromGrid:
+    """ "Grid charge" is set whenever *any* of a charge has to be bought.
+
+    That is the right label for control -- even a sliver from the grid means the
+    inverter needs grid charging permitted -- but it reads as though the whole
+    slot is being imported, which at 43p looks like a serious mistake and is not
+    one. A slot topping up from the sun and taking 0.05 kWh off the grid was
+    indistinguishable from one importing flat out, so the number goes on the page.
+    """
+
+    @staticmethod
+    def render(slot: dict) -> str:
+        import jinja2
+
+        template = _plan_table("sensor.plan", bars=False)
+        env = jinja2.Environment(autoescape=False)
+        env.globals["state_attr"] = lambda *_: [slot]
+        env.globals["as_timestamp"] = lambda value: 0.0
+        env.filters["timestamp_custom"] = lambda *_a, **_k: "17:00"
+        return env.from_string(template).render()
+
+    @staticmethod
+    def slot(**kwargs) -> dict:
+        base = {
+            "start": "2026-08-12T17:00:00+00:00",
+            "end": "2026-08-12T17:30:00+00:00",
+            "import_price": 43.0,
+            "action": "charge",
+            "soc_end": 95.0,
+            "charge_power_kw": 0.6,
+            "pv_kwh": 0.25,
+            "load_kwh": 0.0,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_a_mostly_solar_charge_shows_the_small_purchase(self):
+        # 0.3 kWh of charge, 0.25 kWh of it sunshine.
+        rendered = self.render(self.slot())
+        assert "0.05" in rendered
+
+    def test_a_pure_solar_charge_shows_nothing_bought(self):
+        rendered = self.render(
+            self.slot(action="charge_solar_only", charge_power_kw=0.4, pv_kwh=0.5)
+        )
+        assert "—" in rendered
+
+    def test_a_full_grid_charge_shows_the_whole_amount(self):
+        rendered = self.render(self.slot(charge_power_kw=3.6, pv_kwh=0.0))
+        assert "1.80" in rendered
+
+    def test_household_load_is_not_counted_as_battery_charge(self):
+        """Grid import for the house is not the battery being bought."""
+        rendered = self.render(self.slot(charge_power_kw=0.0, pv_kwh=0.0, load_kwh=2.0))
+        assert "—" in rendered
+
+    def test_the_sun_covering_the_house_first_is_respected(self):
+        # 1 kWh of sun, 0.9 used by the house: only 0.1 spare for the battery.
+        rendered = self.render(self.slot(charge_power_kw=0.6, pv_kwh=1.0, load_kwh=0.9))
+        assert "0.20" in rendered
+
+    def test_the_column_is_explained(self):
+        assert "off the grid into the battery" in _plan_table("sensor.plan")

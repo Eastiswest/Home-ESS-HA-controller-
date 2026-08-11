@@ -59,6 +59,10 @@ OVERVIEW_TABLE_SLOTS = 6
 
 PLACEHOLDER_VIEW_PATH = "waiting"
 
+# Planning slots are half-hours, matching how the tariff is published, so a rate
+# in kW is this many hours' worth of energy.
+SLOT_HOURS = 0.5
+
 # Short names, one per entity key.
 #
 # Home Assistant builds a friendly name by joining the device name to the entity
@@ -700,9 +704,27 @@ def _plan_table(
     # "SoC" beside a live battery reading invites reading it as the battery's
     # state now. It is the plan's projection for the end of that half-hour.
     header = (
-        "| Time | Price | | Doing | Planned SoC |\n|---|--:|---|---|--:|\n"
+        "| Time | Price | | Doing | Buy | Planned SoC |\n|---|--:|---|---|--:|--:|\n"
         if bars
-        else "| Time | Price | Doing | Planned SoC |\n|---|--:|---|--:|\n"
+        else "| Time | Price | Doing | Buy | Planned SoC |\n|---|--:|---|--:|--:|\n"
+    )
+    # How much of the battery's charge this half-hour is actually bought.
+    #
+    # "Grid charge" is set whenever *any* of the charge has to come from the grid,
+    # because even a sliver means the inverter needs grid charging permitted --
+    # that is a real control difference and the label has to reflect it. But it
+    # reads as though the whole slot is being bought, which at 43p is alarming and
+    # wrong: a slot topping up from the sun and taking 0.05 kWh from the grid was
+    # indistinguishable from one importing at full rate. The number is the answer,
+    # so the number goes on the page.
+    buy_cell = (
+        "{% set rate = slot.charge_power_kw | default(0) | float(0) %}"
+        "{% set charge = rate * " + str(SLOT_HOURS) + " %}"
+        "{% set sun = slot.pv_kwh | default(0) | float(0) %}"
+        "{% set used = slot.load_kwh | default(0) | float(0) %}"
+        "{% set spare = [sun - used, 0] | max %}"
+        "{% set bought = [charge - spare, 0] | max %}"
+        "| {% if bought > 0.005 %}{{ '%.2f' | format(bought) }}{% else %}—{% endif %} "
     )
     bar_cell = (
         (
@@ -751,9 +773,12 @@ def _plan_table(
         + "| "
         + _action_expr("slot.action")
         + " "
-        "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
+        + buy_cell
+        + "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
         "{% endfor %}"
-        "\n{% if prices | select('lt', 0) | list | count %}"
+        "\nkWh under **Buy** is what comes off the grid into the battery; the rest "
+        "of a charge is sunshine.\n\n"
+        "{% if prices | select('lt', 0) | list | count %}"
         "◄ paid to import. "
         "{% endif %}"
         "{% if shown | selectattr('price_is_forecast') | list | count %}"
