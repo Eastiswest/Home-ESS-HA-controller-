@@ -192,6 +192,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.entry_id, None
         )
         if coordinator is not None:
+            # A hold raises the inverter's own reserve, and that setting outlives
+            # us: going away mid-hold would leave the battery pinned shut.
+            await coordinator.async_restore_reserve()
             # Losing a partial day of learning on every restart would slow the
             # model down considerably, so flush before going away.
             await coordinator.async_shutdown_store()

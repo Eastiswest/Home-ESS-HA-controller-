@@ -1469,3 +1469,83 @@ class TestApexDetection:
 
         hass.data["lovelace"].resources = _Broken()
         assert has_apexcharts(hass) is False
+
+
+class TestAHoldDoesNotOutliveTheIntegration:
+    """A hold raises the inverter's own reserve, and that setting is persistent.
+
+    Unload the entry mid-hold and the inverter is left refusing to discharge
+    below the SoC it was holding -- so the house runs off the grid indefinitely
+    with nothing on any screen to explain it. Disabling the optimiser already
+    hands the inverter back; removing or reloading has to as well.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return entry, hass.data[DOMAIN][entry.entry_id]
+
+    async def test_unloading_mid_hold_restores_the_reserve(self, hass):
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        _entry, coordinator = await self._coordinator(hass)
+        coordinator.settings.enabled = True
+        coordinator.settings.dry_run = False
+        coordinator.last_command = ControlCommand(
+            action=SlotAction.IDLE, min_soc=94.0, hold_absorbs_solar=True
+        )
+        assert await coordinator.async_restore_reserve() is True
+
+    async def test_nothing_is_written_when_no_hold_was_in_force(self, hass):
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        _entry, coordinator = await self._coordinator(hass)
+        coordinator.settings.dry_run = False
+        coordinator.last_command = ControlCommand(action=SlotAction.SELF_USE)
+        assert await coordinator.async_restore_reserve() is False
+
+    async def test_a_strict_hold_needs_no_reserve_restored(self, hass):
+        """Manual mode is undone by the mode write, not by the reserve."""
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        _entry, coordinator = await self._coordinator(hass)
+        coordinator.settings.dry_run = False
+        coordinator.last_command = ControlCommand(
+            action=SlotAction.IDLE, hold_absorbs_solar=False
+        )
+        assert await coordinator.async_restore_reserve() is False
+
+    async def test_an_advisory_install_never_writes(self, hass):
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        _entry, coordinator = await self._coordinator(hass)
+        # Advisory mode: dry run, so nothing may be written at all.
+        coordinator.settings.dry_run = True
+        coordinator.last_command = ControlCommand(
+            action=SlotAction.IDLE, hold_absorbs_solar=True
+        )
+        assert await coordinator.async_restore_reserve() is False
+
+    async def test_unload_calls_it(self, hass):
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        entry, coordinator = await self._coordinator(hass)
+        coordinator.settings.dry_run = False
+        coordinator.last_command = ControlCommand(
+            action=SlotAction.IDLE, hold_absorbs_solar=True
+        )
+        called: list[bool] = []
+        original = coordinator.async_restore_reserve
+
+        async def _spy():
+            called.append(True)
+            return await original()
+
+        coordinator.async_restore_reserve = _spy
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert called == [True]

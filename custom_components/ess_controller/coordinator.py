@@ -1704,6 +1704,44 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._adapter.reset_last_applied()
         await self.async_request_refresh()
 
+    async def async_restore_reserve(self) -> bool:
+        """Put the inverter's reserve back where the user set it, on the way out.
+
+        A hold is expressed by raising the inverter's own reserve to the state of
+        charge it is holding, which is what lets the array keep charging. That
+        setting outlives this integration: unload the entry mid-hold and the
+        inverter is left refusing to discharge below 94%, running the house off
+        the grid for ever with nothing on screen to explain it. Disabling the
+        optimiser already hands the inverter back; removing or reloading the entry
+        has to as well.
+
+        Narrow on purpose: it writes only when a hold actually raised the floor, so
+        an ordinary reload does not add a write for the sake of it. Returns whether
+        anything was written.
+        """
+        command = self.last_command
+        if command is None or command.action is not SlotAction.IDLE:
+            return False
+        if not command.hold_absorbs_solar or not self.settings.may_write:
+            return False
+        try:
+            await self._adapter.async_apply(
+                ControlCommand(
+                    action=SlotAction.SELF_USE,
+                    min_soc=self.settings.reserve_soc,
+                    max_soc=self.settings.max_soc,
+                    allow_grid_charge=self.settings.allow_grid_charge,
+                    reason="releasing the hold on the way out",
+                ),
+                dry_run=False,
+                verify=False,
+            )
+        except Exception:
+            # Home Assistant may already be tearing the service registry down.
+            _LOGGER.warning("Could not restore the inverter reserve on unload")
+            return False
+        return True
+
     async def async_shutdown_store(self) -> None:
         await self.learning_store.async_save()
         await self.runtime_store.async_save()
