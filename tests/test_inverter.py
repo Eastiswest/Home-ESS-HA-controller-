@@ -1006,3 +1006,123 @@ class TestExportLimitFollowsThePermission:
         apply(adapter, command(SlotAction.SELF_USE, export_limit_kw=3.68))
         by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
         assert by_entity["number.solax_export_control_user_limit"]["value"] > 0
+
+
+class TestHoldWithoutAReserveControl:
+    """A hold expressed as self-use only holds if the reserve can be raised.
+
+    A real install exposes no minimum-SoC control at all -- diagnostics showed
+    ``min_soc: false`` -- so the soft hold became plain self-use and the battery
+    discharged through the very half-hour the plan meant to save it for. Manual
+    mode with charge and discharge stopped is the cruder instrument, and where it
+    is the only one available it is the right one.
+    """
+
+    @staticmethod
+    def without_min_soc(hass):
+        from custom_components.ess_controller.inverter.roles import (
+            ROLE_MIN_SOC,
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        entities.pop(ROLE_MIN_SOC, None)
+        return SolaxModbusAdapter(hass, entities)
+
+    def test_it_falls_back_to_stopping_the_battery(self):
+        hass = build_solax_hass()
+        hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
+        hass.states.set(
+            "select.solax_manual_mode_select", "Force Charge", options=SOLAX_MANUAL
+        )
+        adapter = self.without_min_soc(hass)
+        apply(adapter, command(SlotAction.IDLE))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["select.solax_charger_use_mode"]["option"] == "Manual Mode"
+        assert by_entity["select.solax_manual_mode_select"]["option"] == (
+            "Stop Charge and Discharge"
+        )
+
+    def test_a_hold_is_never_silently_just_self_use(self):
+        hass = build_solax_hass()
+        hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
+        adapter = self.without_min_soc(hass)
+        apply(adapter, command(SlotAction.IDLE))
+        modes = [
+            c[2].get("option")
+            for c in hass.services.calls
+            if c[2]["entity_id"] == "select.solax_charger_use_mode"
+        ]
+        assert "Self Use" not in modes
+
+    def test_with_a_reserve_control_the_soft_hold_is_still_preferred(self):
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_battery_capacity", 62.4)
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.IDLE))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert "select.solax_manual_mode_select" not in by_entity
+        assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 62.0
+
+    def test_no_soc_reading_also_falls_back(self):
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_battery_capacity", "unknown")
+        hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
+        hass.states.set(
+            "select.solax_manual_mode_select", "Force Charge", options=SOLAX_MANUAL
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.IDLE))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["select.solax_manual_mode_select"]["option"] == (
+            "Stop Charge and Discharge"
+        )
+
+
+class TestPeakShavingIsNotGridCharging:
+    """Suffix matching bound "charge from grid" to the peak-shaving switch.
+
+    A real install resolved ``switch.<prefix>_peakshaving_charge_from_grid`` for
+    the grid-charge role. That is a different feature; toggling it did nothing,
+    and the plan believed grid charging was permitted when nothing had changed.
+    """
+
+    def test_the_peak_shaving_switch_is_not_bound(self):
+        from custom_components.ess_controller.inverter.roles import (
+            ROLE_GRID_CHARGE,
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_peakshaving_charge_from_grid", "off")
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        assert "peakshaving" not in entities.get(ROLE_GRID_CHARGE, "")
+
+    def test_the_real_switch_is_still_found(self):
+        from custom_components.ess_controller.inverter.roles import (
+            ROLE_GRID_CHARGE,
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_peakshaving_charge_from_grid", "off")
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "off")
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        assert entities[ROLE_GRID_CHARGE] == "switch.solax_selfuse_night_charge_enable"
+
+    def test_finding_nothing_is_reported_rather_than_passed_over(self):
+        from custom_components.ess_controller.inverter.roles import (
+            ROLE_GRID_CHARGE,
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        hass = build_solax_hass()
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        entities.pop(ROLE_GRID_CHARGE, None)
+        adapter = SolaxModbusAdapter(hass, entities)
+        result = apply(adapter, command(SlotAction.SELF_USE))
+        assert any("grid-charge control" in note for note in result.skipped)

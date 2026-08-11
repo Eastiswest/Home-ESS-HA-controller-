@@ -65,6 +65,17 @@ class RoleSpec:
     suffixes: tuple[str, ...]
     required: bool = False
     description: str = ""
+    exclude: tuple[str, ...] = ()
+    """Object-ID fragments that disqualify a match, however well the suffix fits.
+
+    Suffix matching is loose on purpose, because inverter integrations rename
+    things between firmware versions. Occasionally it is *too* loose: a real
+    install bound "charge from grid" to
+    ``switch.solax1_inverter_peakshaving_charge_from_grid``, which is the
+    peak-shaving feature and has nothing to do with charging from the grid during
+    self-use. Toggling it did nothing, silently, and the plan believed grid
+    charging was permitted when it was not.
+    """
 
 
 # Roles for wills106's SolaX Modbus integration, which is what a Solax X1/X3
@@ -126,6 +137,9 @@ SOLAX_ROLE_SPECS: tuple[RoleSpec, ...] = (
         ("switch", "select"),
         ("selfuse_night_charge_enable", "charge_from_grid", "grid_charge"),
         description="Whether charging from the grid is permitted",
+        # Peak shaving has its own charge-from-grid switch, for a different
+        # feature entirely. Better to find nothing and say so than to write to it.
+        exclude=("peakshaving", "peak_shaving"),
     ),
     RoleSpec(
         ROLE_SOC,
@@ -243,6 +257,8 @@ def _match_role(
         for domain in spec.domains:
             for entity_id, object_id in by_domain.get(domain, []):
                 if not object_id.endswith(suffix):
+                    continue
+                if any(bad in object_id for bad in spec.exclude):
                     continue
                 if wanted_prefix and object_id.startswith(wanted_prefix):
                     return entity_id

@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.14.3"
+VERSION: Final = "0.15.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -228,6 +228,7 @@ ADAPTER_NONE: Final = "none"
 
 ADAPTERS: Final = [ADAPTER_SOLAX_MODBUS, ADAPTER_GENERIC, ADAPTER_NONE]
 
+TERMINAL_MODE_REPLACEMENT: Final = "replacement_cost"
 TERMINAL_MODE_HORIZON_MEDIAN: Final = "horizon_median"
 TERMINAL_MODE_HORIZON_MEAN: Final = "horizon_mean"
 TERMINAL_MODE_FIXED: Final = "fixed"

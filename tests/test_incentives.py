@@ -380,7 +380,9 @@ class TestSessionsChangeThePlan:
         )
 
     def test_free_session_fills_the_battery(self):
-        slots = horizon([25.0] * 12, load=0.3, start_hour=12)
+        # A full day: the reason to fill a pack during a free window is the load
+        # that follows it, and a six-hour horizon contains none.
+        slots = horizon([25.0] * 48, load=0.3, start_hour=12)
         imports = PriceSeries(
             [PriceSlot(start=s.start, end=s.end, price=s.import_price) for s in slots]
         )

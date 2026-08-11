@@ -511,7 +511,8 @@
         "fixed": "A fixed value",
         "zero": "Worthless"
       },
-      "horizon_median": "Typical price over the horizon (recommended)"
+      "horizon_median": "Typical price over the horizon",
+      "replacement_cost": "What it costs to refill (recommended)"
     }
   },
   "entity": {

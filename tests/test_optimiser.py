@@ -308,8 +308,11 @@ class TestNegativePricePreparation:
     soak up as much as possible while being paid to take it."""
 
     def _horizon(self, export_price: float = 0.0):
-        prices = [20.0] * 6 + [-10.0] * 4 + [30.0] * 6
-        return build_slots(prices, export=[export_price] * 16, load=0.3)
+        # A full day, because the value of a full battery rests on the load ahead
+        # of it: over six hours there is nothing for a hoard to be spent on, and a
+        # plan judged on six hours cannot be expected to fill one.
+        prices = [20.0] * 6 + [-10.0] * 4 + [30.0] * 38
+        return build_slots(prices, export=[export_price] * 48, load=0.3)
 
     def test_discharges_before_a_negative_window(self):
         plan = optimise(self._horizon(5.0), 90.0, make_battery(), make_grid())
@@ -467,7 +470,7 @@ class TestTerminalValuationDoesNotHoard:
         assert median == pytest.approx(20.0)
         assert median < mean
 
-    def test_median_is_the_default(self):
+    def test_median_is_the_default_rate(self):
         assert OptimiserSettings().terminal_mode == "horizon_median"
 
     def test_a_flat_horizon_values_energy_at_that_price(self):
@@ -477,12 +480,32 @@ class TestTerminalValuationDoesNotHoard:
         assert rate == pytest.approx(24.0)
 
     def test_free_slots_do_not_make_the_battery_worthless(self):
-        """A percentile low enough to sit inside a cheap block valued stored
-        energy at zero, and the plan then declined free electricity."""
+        """A percentile sitting inside a cheap block valued stored energy at zero,
+        and the plan then declined free electricity. Measuring the tail, where the
+        refill would actually happen, is what avoids the circularity."""
         from custom_components.ess_controller.optimiser.dp import _terminal_rate
 
         slots = build_slots([0.0] * 4 + [25.0] * 8)
         assert _terminal_rate(slots, OptimiserSettings()) == pytest.approx(25.0)
+
+    def test_the_credit_is_capped_at_the_shortfall_ahead(self):
+        """The price of leftover energy was never the real problem: the quantity
+        was. A site whose array nearly covers its load will not use a full pack,
+        so crediting one assumes a need that is not there."""
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        # Solar covers all but a little of the load: almost nothing to credit.
+        covered = build_slots([20.0] * 48, pv=0.45, load=0.5)
+        assert _terminal_energy_cap(covered) < 3.0
+        # Midwinter, no array: the whole day's load is ahead of it.
+        dark = build_slots([20.0] * 48, pv=0.0, load=0.5)
+        assert _terminal_energy_cap(dark) == pytest.approx(24.0)
+
+    def test_a_surplus_day_credits_nothing_rather_than_going_negative(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        drenched = build_slots([20.0] * 48, pv=2.0, load=0.2)
+        assert _terminal_energy_cap(drenched) == 0.0
 
     def test_does_not_fill_the_pack_it_cannot_empty(self):
         """No export, a small house load, and a horizon that is mostly cheap.
@@ -686,3 +709,91 @@ class TestExportPermissionIsPhysical:
         slots = build_slots([25.0] * 12, pv=1.0, load=0.25)
         plan = optimise(slots, 95.0, make_battery(), grid)
         assert sum(s.grid_export_kwh for s in plan.slots) > 0.0
+
+
+class TestARealSummerHorizon:
+    """Replayed from a working install's diagnostics, where the plan lost money.
+
+    A 24-hour Agile horizon on a summer day: 10.2 kWh of forecast solar against
+    11.2 kWh of forecast load, a 22 kWh pack starting at 56%. The plan built for
+    it bought 8.2 kWh and cost 166p, against 8p for leaving the inverter alone --
+    a loss of about £58 a year, from two causes that no synthetic test had caught.
+
+    Kept as a fixture because the shape of a real day is what exposed both: the
+    prices, the solar curve and the household's own load, all together.
+    """
+
+    @staticmethod
+    def load():
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        raw = json.loads(
+            (Path(__file__).parent / "fixtures" / "real_summer_horizon.json").read_text()
+        )
+        slots = [
+            HorizonSlot(
+                start=datetime.fromisoformat(s["start"]),
+                end=datetime.fromisoformat(s["end"]),
+                import_price=s["import_price"],
+                export_price=s["export_price"],
+                pv_kwh=s["pv_kwh"],
+                load_kwh=s["load_kwh"],
+            )
+            for s in raw["slots"]
+        ]
+        return (
+            slots,
+            raw["start_soc"],
+            BatterySpec(**raw["battery"]),
+            GridSpec(**raw["grid"]),
+        )
+
+    def plan(self, **kwargs):
+        slots, soc, battery, grid = self.load()
+        return optimise(slots, soc, battery, grid, OptimiserSettings(**kwargs))
+
+    def test_it_is_never_worse_than_leaving_the_inverter_alone(self):
+        plan = self.plan()
+        assert plan.total_cost <= plan.self_use_cost + 1e-6
+
+    def test_it_does_not_buy_what_the_sun_will_provide(self):
+        plan = self.plan()
+        assert sum(s.grid_import_kwh for s in plan.slots) < 1.0
+
+    def test_the_credit_cap_reflects_the_shortfall_not_the_pack(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        slots, _, battery, _ = self.load()
+        cap = _terminal_energy_cap(slots)
+        # Barely a kilowatt-hour of unmet load, against 16.5 kWh of usable pack.
+        assert cap < 2.0
+        assert cap < battery.usable_kwh / 5
+
+    def test_the_battery_is_not_frozen(self):
+        """An import-only site had discharge transitions rejected as infeasible,
+        because the level grid was coarser than the household's half-hourly
+        demand -- and the refinement checked the wrong permission, so a site with
+        export refused but battery export nominally allowed stayed frozen."""
+        plan = self.plan()
+        assert sum(s.discharge_ac_kwh for s in plan.slots) > 1.0
+
+    def test_the_reason_says_why_it_is_doing_nothing_clever(self):
+        plan = self.plan()
+        assert "self-consumption" in plan.reason.lower()
+
+    def test_the_old_valuation_is_what_made_it_expensive(self):
+        """Kept as evidence: crediting the whole pack at a typical half-hourly
+        price is what bought 8 kWh of unnecessary energy."""
+        slots, soc, battery, grid = self.load()
+        from custom_components.ess_controller.optimiser import dp
+
+        original = dp._terminal_energy_cap
+        try:
+            dp._terminal_energy_cap = lambda _slots: 1e9
+            greedy = optimise(slots, soc, battery, grid, OptimiserSettings())
+        finally:
+            dp._terminal_energy_cap = original
+        assert greedy.total_cost > greedy.self_use_cost + 100.0
+        assert sum(s.grid_import_kwh for s in greedy.slots) > 5.0

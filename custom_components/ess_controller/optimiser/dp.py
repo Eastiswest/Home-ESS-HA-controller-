@@ -234,7 +234,24 @@ MAX_REFINED_LEVELS = 240
 SPILL_TIE_BREAK = 0.01
 
 
-# Where on the horizon's price distribution stored energy is valued: the middle.
+# Where on the horizon's price distribution stored energy is valued.
+#
+# ``replacement_cost`` uses the cheap end, because what a leftover kWh is worth is
+# what it costs to put back. A low percentile rather than the bare minimum so a
+# single free or negative half-hour cannot collapse the valuation to nothing.
+TERMINAL_REPLACEMENT_FRACTION = 0.10
+
+# ...and measured over the *tail* of the horizon, not all of it. The refill would
+# happen after the horizon ends, so the prices that matter are the ones nearest
+# that point. Reading the cheap end of the whole horizon is circular: on a day
+# with a negative-price window it values stored energy at the very bargain it is
+# currently exploiting, concludes energy is worthless, and declines to be paid to
+# fill the battery. At least this many slots, so a short horizon still averages
+# over something.
+TERMINAL_TAIL_MIN_SLOTS = 6
+
+# Half-hours in a day, for the windows that look "one day back from the end".
+SLOTS_PER_DAY = 48
 TERMINAL_MEDIAN_FRACTION = 0.5
 
 
@@ -266,7 +283,15 @@ def _smallest_useful_move(
     Returns ``None`` when nothing constrains it, meaning the configured
     resolution stands.
     """
-    if grid.allow_battery_export:
+    # Both permissions bind here, and checking only one of them left the bug
+    # half-fixed. ``allow_battery_export`` is the direct statement that the
+    # battery may not push to the grid; ``allow_export`` withdraws the export
+    # capacity entirely, which caps battery discharge at the household demand just
+    # as hard. A site with export refused but battery-export nominally allowed --
+    # the ordinary import-only configuration -- kept the coarse grid and stayed
+    # frozen, so the plan bought the house's power through the evening peak while
+    # sitting on a charged battery.
+    if grid.allow_battery_export and grid.allow_export:
         return None
     deficits = [
         (slot.load_kwh - slot.pv_kwh) / battery.discharge_efficiency
@@ -295,9 +320,22 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
     in the terminal credit, which is imaginary: the horizon rolls forward and that
     energy is never actually cashed in.
 
-    The *median* is the price of a typical half-hour, which is what the remainder
-    in the pack will really displace, and it is not moved by a few spikes.
-    ``horizon_mean`` is kept for anyone who wants the old behaviour.
+    The median was a large improvement and still not right. What a leftover kWh is
+    worth is not what a typical half-hour costs -- it is what it costs to *put
+    back*, which is the cheap end of the horizon. Replayed against a real
+    twenty-four hour horizon from a working install, the median valuation bought
+    7.7 kWh and spent 149p; valuing the remainder at the cheap end bought 1.4 kWh
+    and spent 39p, ending the day at much the same charge. The 110p difference was
+    energy bought at a premium to sit in the pack.
+
+    ``replacement_cost`` therefore takes a low percentile of the *tail* of the
+    horizon: the cheap end, but not the bare minimum, so a single free half-hour
+    cannot collapse the valuation to nothing -- and the tail rather than the whole
+    horizon, because the refill happens after the horizon ends and reading the
+    cheap end of the whole thing is circular. Measured over everything, a day with
+    a negative-price window values stored energy at the very bargain it is
+    exploiting, decides energy is worthless, and declines to be paid to fill the
+    battery. ``horizon_median`` and ``horizon_mean`` remain selectable.
 
     Clamped at zero. On a heavily negative day the horizon rate can itself go
     negative, which would make stored energy a *liability* and drive the plan to
@@ -313,7 +351,34 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
     prices = [s.import_price for s in slots]
     if settings.terminal_mode == TERMINAL_MODE_HORIZON_MEAN:
         return max(sum(prices) / len(prices), 0.0)
-    return max(percentile(prices, TERMINAL_MEDIAN_FRACTION), 0.0)
+    if settings.terminal_mode == TERMINAL_MODE_HORIZON_MEDIAN:
+        return max(percentile(prices, TERMINAL_MEDIAN_FRACTION), 0.0)
+    tail = prices[-max(len(prices) // 2, TERMINAL_TAIL_MIN_SLOTS) :]
+    return max(percentile(tail, TERMINAL_REPLACEMENT_FRACTION), 0.0)
+
+
+def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
+    """How much of the battery's charge is worth crediting at the horizon end.
+
+    The price of leftover energy was never the real problem; the *quantity* was.
+    Whatever rate is chosen, crediting the whole pack assumes every kWh in it will
+    eventually be needed -- and on a site whose array nearly covers its load, it
+    will not. Tomorrow's sun displaces it. A real horizon from a working install
+    showed the plan buying 7.7 kWh for 149p against 8p for doing nothing, because
+    energy it would never use was booked at a typical half-hourly price.
+
+    So the credit is capped at the shortfall the site is actually forecast to have:
+    load it cannot meet from the array over the last day of the horizon. In winter,
+    with no solar, that is the whole pack and the valuation is unchanged. In summer
+    it is close to nothing, and the plan stops buying what the sun will give it.
+
+    Measured over the last day rather than the whole horizon because that is the
+    part that speaks to what happens after it ends.
+    """
+    if not slots:
+        return 0.0
+    window = slots[-min(len(slots), SLOTS_PER_DAY) :]
+    return max(sum(s.load_kwh - s.pv_kwh for s in window), 0.0)
 
 
 def optimise(
@@ -379,7 +444,8 @@ def optimise(
     rate = _terminal_rate(slots, settings) * settings.terminal_weight
     # Only the energy that survives the inverter on the way out has value.
     value_per_kwh = rate * battery.discharge_efficiency
-    future = [-(j * step) * value_per_kwh for j in range(levels + 1)]
+    credit_cap = _terminal_energy_cap(slots)
+    future = [-min(j * step, credit_cap) * value_per_kwh for j in range(levels + 1)]
 
     # --- backward sweep ----------------------------------------------------
     choices: list[list[int]] = [[-1] * (levels + 1) for _ in range(n)]
@@ -478,13 +544,37 @@ def optimise(
         level = next_level
 
     plan.total_cost = total_cost
-    plan.terminal_value = (level * step) * value_per_kwh
+    plan.terminal_value = min(level * step, credit_cap) * value_per_kwh
     plan.baseline_cost = simulate_idle(
         slots, quantised_start_soc, battery, grid, created
     ).total_cost
-    plan.self_use_cost = simulate_self_use(
-        slots, quantised_start_soc, battery, grid, created
-    ).total_cost
+    self_use = simulate_self_use(slots, quantised_start_soc, battery, grid, created)
+    plan.self_use_cost = self_use.total_cost
+
+    # Never hand back a plan that is worse than leaving the inverter alone.
+    #
+    # The optimiser is only optimal with respect to its own model, and when the
+    # model has been wrong the result has been expensive: a real twenty-four hour
+    # horizon produced a plan costing 203p against 8p for plain self-consumption,
+    # because energy banked past the horizon was credited at more than it could
+    # ever be worth. Both sides are scored the same way here -- realised cost
+    # minus what is left in the battery, valued identically -- so a plan only
+    # survives if it genuinely beats doing nothing clever. Discretising the
+    # battery into levels also means the DP cannot always express the continuous
+    # self-use trajectory exactly, and this catches that too.
+    self_use.terminal_value = (
+        min(battery.soc_to_energy(self_use.slots[-1].soc_end), credit_cap) * value_per_kwh
+        if self_use.slots
+        else 0.0
+    )
+    if self_use.net_cost < plan.net_cost - EPS:
+        self_use.baseline_cost = plan.baseline_cost
+        self_use.self_use_cost = plan.self_use_cost
+        self_use.reason = (
+            "Self-consumption is cheaper than anything worth scheduling here"
+        )
+        return self_use
+
     plan.reason = _describe(plan, battery)
     return plan
 

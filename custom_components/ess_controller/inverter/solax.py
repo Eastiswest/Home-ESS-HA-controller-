@@ -198,8 +198,21 @@ class SolaxModbusAdapter(InverterAdapter):
             if unlocked and current_lock is not None and not already_unlocked:
                 writes.append(_select_write(lock_entity, unlocked, ROLE_LOCK))
 
+        # A hold expressed as self-use only holds if the reserve can be raised to
+        # the current charge. Where the inverter exposes no minimum-SoC control --
+        # and a real install exposes none -- that "hold" is plain self-use and the
+        # battery cheerfully discharges through the half-hour the plan meant to
+        # save it. Manual mode with charge and discharge stopped is the cruder
+        # instrument, and where it is the only one, it is the right one.
+        soft_hold = (
+            action is SlotAction.IDLE
+            and command.hold_absorbs_solar
+            and self._manage_min_soc
+            and bool(self.entity(ROLE_MIN_SOC))
+            and state_float(self.hass, self.entity(ROLE_SOC)) is not None
+        )
         if action in (SlotAction.CHARGE, SlotAction.DISCHARGE) or (
-            action is SlotAction.IDLE and not command.hold_absorbs_solar
+            action is SlotAction.IDLE and not soft_hold
         ):
             manual_target = {
                 SlotAction.CHARGE: self.OPT_FORCE_CHARGE,
@@ -312,6 +325,12 @@ class SolaxModbusAdapter(InverterAdapter):
     ) -> list[Write]:
         entity_id = self.entity(ROLE_GRID_CHARGE)
         if not entity_id:
+            # Worth saying rather than passing over in silence: without this
+            # control, "Charge from the grid" is advisory and whatever the inverter
+            # is set to is what happens.
+            skipped.append(
+                "no grid-charge control found; the inverter's own setting decides"
+            )
             return []
         # A forced charge inherently draws from the grid, so the toggle only
         # matters while the inverter is running its own self-use logic.

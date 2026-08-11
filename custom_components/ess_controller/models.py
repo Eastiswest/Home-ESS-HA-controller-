@@ -221,6 +221,17 @@ class Plan:
     infeasible: bool = False
 
     @property
+    def net_cost(self) -> float:
+        """Realised cost less what is still in the battery at the end.
+
+        The number two plans have to be compared on. Judging them on
+        ``total_cost`` alone rewards arriving empty and punishes arriving full, so
+        a plan that sensibly buys cheap energy for tomorrow looks like a loss and
+        one that spends the pack down looks like a win.
+        """
+        return self.total_cost - self.terminal_value
+
+    @property
     def saving_vs_baseline(self) -> float:
         return self.baseline_cost - self.total_cost
 
@@ -268,6 +279,8 @@ class Plan:
             "self_use_cost": round(self.self_use_cost, 2),
             "saving_vs_baseline": round(self.saving_vs_baseline, 2),
             "saving_vs_self_use": round(self.saving_vs_self_use, 2),
+            "terminal_value": round(self.terminal_value, 2),
+            "net_cost": round(self.net_cost, 2),
             "reason": self.reason,
             "infeasible": self.infeasible,
             "slots": [s.as_dict() for s in self.slots],
