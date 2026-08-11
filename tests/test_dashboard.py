@@ -872,3 +872,81 @@ class TestSparkline:
 
     def test_no_plan_says_so(self):
         assert "No plan yet" in self._render([])
+
+
+class TestNextChangeIsExplained:
+    """ "Doing now" and "Next change" can never be equal, by construction.
+
+    The sensor reports the next slot whose action *differs* from the current one,
+    so it is always something else -- which made two correct sensors look like
+    they contradicted each other, especially under the old label "Next
+    half-hour" when the change was six hours away.
+    """
+
+    def test_the_label_does_not_promise_the_next_half_hour(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        assert LABELS["next_action"] == "Next change"
+        assert "half-hour" not in LABELS["next_action"]
+
+    def test_the_overview_says_when_the_change_happens(self):
+        from custom_components.ess_controller.dashboard import _plan_reason
+
+        content = _plan_reason(entity_id("plan_cost"), entity_id("next_action"))
+        assert "Next change:" in content
+        assert entity_id("next_action") in content
+
+    def test_it_renders_the_time_and_price(self):
+        import datetime as dt
+
+        jinja2 = pytest.importorskip("jinja2")
+        from custom_components.ess_controller.dashboard import _plan_reason
+
+        attributes = {
+            entity_id("plan_cost"): {"reason": "hold battery"},
+            entity_id("next_action"): {
+                "starts": "2026-08-11T20:00:00+00:00",
+                "import_price": 4.31,
+            },
+        }
+        env = jinja2.Environment(autoescape=False)
+        env.filters["timestamp_custom"] = lambda v, f, local=True, default=None: (
+            dt.datetime.fromtimestamp(v, dt.UTC).strftime(f) if v is not None else default
+        )
+        env.globals.update(
+            state_attr=lambda e, a: attributes.get(e, {}).get(a),
+            states=lambda e: "charge" if "next_action" in e else "unknown",
+            as_timestamp=lambda v, default=None: dt.datetime.fromisoformat(
+                str(v)
+            ).timestamp(),
+        )
+        rendered = env.from_string(
+            _plan_reason(entity_id("plan_cost"), entity_id("next_action"))
+        ).render()
+        assert "**Why this plan:** hold battery" in rendered
+        assert "**Next change:** Charge at 20:00, 4.3p." in rendered
+
+    def test_nothing_is_claimed_when_the_plan_never_changes(self):
+        """A flat plan leaves the sensor unknown, and silence is the right answer."""
+
+        jinja2 = pytest.importorskip("jinja2")
+        from custom_components.ess_controller.dashboard import _plan_reason
+
+        env = jinja2.Environment(autoescape=False)
+        env.filters["timestamp_custom"] = lambda v, f, local=True, default=None: v
+        env.globals.update(
+            state_attr=lambda e, a: {"reason": "hold battery"}.get(a),
+            states=lambda e: "unknown",
+            as_timestamp=lambda v, default=None: 0,
+        )
+        rendered = env.from_string(
+            _plan_reason(entity_id("plan_cost"), entity_id("next_action"))
+        ).render()
+        assert "Next change" not in rendered
+
+    def test_it_still_works_with_no_next_change_sensor(self):
+        from custom_components.ess_controller.dashboard import _plan_reason
+
+        content = _plan_reason(entity_id("plan_cost"))
+        assert "Why this plan" in content
+        assert "Next change" not in content

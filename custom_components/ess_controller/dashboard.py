@@ -71,7 +71,11 @@ PLACEHOLDER_VIEW_PATH = "waiting"
 LABELS: dict[str, str] = {
     # What it is doing
     "plan_action": "Doing now",
-    "next_action": "Next half-hour",
+    # NOT the next half-hour. The sensor reports the next slot whose action
+    # *differs* from the current one, which can be hours away -- so it can never
+    # equal "Doing now", and labelling it "Next half-hour" made two correct
+    # sensors look like they contradicted each other.
+    "next_action": "Next change",
     "control_status": "Control",
     "target_soc": "Target",
     "planned_charge_power": "Charge power",
@@ -537,11 +541,33 @@ def _plan_table(plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS) -> str:
     )
 
 
-def _plan_reason(plan_entity: str) -> str:
+def _plan_reason(plan_entity: str, next_entity: str | None = None) -> str:
+    """Why the plan looks the way it does, and when it next changes.
+
+    The "next change" sensor reports the next slot whose action *differs* from the
+    current one, which can be hours away -- so on its own it reads as imminent
+    when it is not. Saying when turns two apparently contradictory readings into
+    one sentence.
+    """
+    when = (
+        (
+            "{% set nxt = '" + next_entity + "' %}"
+            "{% set at = state_attr(nxt, 'starts') %}"
+            "{% if at and states(nxt) not in ['unknown', 'unavailable'] %}\n\n"
+            "**Next change:** {{ states(nxt) | replace('_', ' ') | capitalize }} at "
+            "{{ as_timestamp(at) | timestamp_custom('%H:%M', true) }}"
+            "{% if state_attr(nxt, 'import_price') is not none %}"
+            ", {{ '%.1f' | format(state_attr(nxt, 'import_price')) }}p"
+            "{% endif %}."
+            "{% endif %}"
+        )
+        if next_entity
+        else ""
+    )
     return (
         "{% set reason = state_attr('" + plan_entity + "', 'reason') %}"
         "{% if reason %}**Why this plan:** {{ reason }}"
-        "{% else %}No plan yet — waiting for prices.{% endif %}"
+        "{% else %}No plan yet — waiting for prices.{% endif %}" + when
     )
 
 
@@ -673,7 +699,9 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
                     ),
                     _tile("next_action", resolved, grid_options={"columns": 6}),
                     _tile("import_price", resolved, grid_options={"columns": 6}),
-                    _markdown(_plan_reason(plan)) if plan else None,
+                    _markdown(_plan_reason(plan, resolved.get("next_action")))
+                    if plan
+                    else None,
                 ],
             ),
             _section(
