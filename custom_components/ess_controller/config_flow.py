@@ -84,6 +84,8 @@ from .const import (
     CONF_OCTOPUS_REGION,
     CONF_ONLY_JOINED_SESSIONS,
     CONF_OUTAGE_CALENDAR,
+    CONF_OUTAGE_CALENDAR_ALL_EVENTS,
+    CONF_OUTAGE_CALENDAR_KEYWORDS,
     CONF_OUTAGE_ENABLED,
     CONF_OUTAGE_HIGH_RESERVE_SOC,
     CONF_OUTAGE_LOOKAHEAD_HOURS,
@@ -130,6 +132,8 @@ from .const import (
     DEFAULT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_SOC,
     DEFAULT_MIN_SOC,
+    DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
+    DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
     DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
     DEFAULT_OUTAGE_RESERVE_SOC,
@@ -533,6 +537,16 @@ class EssFlowMixin:
                     ["binary_sensor", "input_boolean"]
                 ),
                 _suggest(current, CONF_OUTAGE_CALENDAR, None): _entity(["calendar"]),
+                _suggest(
+                    current,
+                    CONF_OUTAGE_CALENDAR_KEYWORDS,
+                    DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
+                ): selector.TextSelector(),
+                _suggest(
+                    current,
+                    CONF_OUTAGE_CALENDAR_ALL_EVENTS,
+                    DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
+                ): selector.BooleanSelector(),
                 _suggest(
                     current, CONF_OUTAGE_WIND_THRESHOLD, DEFAULT_OUTAGE_WIND_THRESHOLD
                 ): _number(0, 250, 1),

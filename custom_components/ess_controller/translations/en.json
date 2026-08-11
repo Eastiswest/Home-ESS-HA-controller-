@@ -173,11 +173,15 @@
           "outage_wind_high_threshold": "Severe wind gust threshold",
           "outage_reserve_soc": "Reserve to hold when risk is elevated",
           "outage_high_reserve_soc": "Reserve to hold when risk is high",
-          "outage_lookahead_hours": "How far ahead to act"
+          "outage_lookahead_hours": "How far ahead to act",
+          "outage_calendar_keywords": "Calendar keywords that mean an outage",
+          "outage_calendar_all_events": "Treat every calendar event as an outage"
         },
         "data_description": {
           "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
-          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind."
+          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind.",
+          "outage_calendar_keywords": "Comma-separated. Only events whose title contains one of these words are treated as a planned interruption, so pointing the field at a general calendar does not turn every appointment into a power cut.",
+          "outage_calendar_all_events": "Turn on only if the calendar is dedicated to supply interruptions and its event titles are too terse to match a keyword."
         }
       },
       "shifting": {
@@ -425,11 +429,15 @@
           "outage_wind_high_threshold": "Severe wind gust threshold",
           "outage_reserve_soc": "Reserve to hold when risk is elevated",
           "outage_high_reserve_soc": "Reserve to hold when risk is high",
-          "outage_lookahead_hours": "How far ahead to act"
+          "outage_lookahead_hours": "How far ahead to act",
+          "outage_calendar_keywords": "Calendar keywords that mean an outage",
+          "outage_calendar_all_events": "Treat every calendar event as an outage"
         },
         "data_description": {
           "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
-          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind."
+          "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind.",
+          "outage_calendar_keywords": "Comma-separated. Only events whose title contains one of these words are treated as a planned interruption, so pointing the field at a general calendar does not turn every appointment into a power cut.",
+          "outage_calendar_all_events": "Turn on only if the calendar is dedicated to supply interruptions and its event titles are too terse to match a keyword."
         }
       },
       "shifting": {

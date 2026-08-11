@@ -877,3 +877,129 @@ class TestAgilePredictSessionFailure:
         assert coordinator.plan.slots
         assert coordinator.price_forecast["available"] is False
         assert coordinator.price_forecast["error_kind"] == "unreachable"
+
+
+class TestDayOneCompetence:
+    """A fresh install must plan sensibly before it has learned anything.
+
+    This is the property that decides whether someone has to drive the battery by
+    hand for a week. With nothing configured beyond the wizard defaults, the plan
+    has to know the sun will rise, know roughly what the house draws, and not hold
+    the pack hostage to a calendar entry.
+    """
+
+    async def _fresh(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_solar_is_predicted_without_any_forecast_entity(self, hass):
+        """The bug this fixes: every slot was exactly 0.0, so the plan assumed
+        the sun would not rise and bought the whole day from the grid."""
+        hass.config.latitude = 51.5
+        hass.config.longitude = -0.13
+        coordinator = await self._fresh(hass)
+        await coordinator.async_refresh()
+
+        assert coordinator.plan is not None
+        daylight = [s for s in coordinator.plan.slots if s.pv_kwh > 0]
+        assert daylight, "no slot predicted any generation"
+
+    async def test_the_solar_estimate_is_the_right_order_of_magnitude(self, hass):
+        """Over-predicting is worse than the zero it replaced: it under-charges
+        overnight and leaves the house buying at the evening peak."""
+        hass.config.latitude = 51.5
+        hass.config.longitude = -0.13
+        coordinator = await self._fresh(hass)
+        await coordinator.async_refresh()
+
+        totals = coordinator.forecast_totals()
+        tomorrow = totals.get("tomorrow")
+        assert tomorrow is not None
+        # The wizard default array is small; whatever it is, a full day of it
+        # must be neither zero nor absurd.
+        peak_kw = float(coordinator.options.get("solar_peak_power_kw", 4.0))
+        assert 0.15 * peak_kw < tomorrow["solar_kwh"] < 6.0 * peak_kw
+
+    async def test_load_is_predicted_from_the_typical_profile(self, hass):
+        coordinator = await self._fresh(hass)
+        await coordinator.async_refresh()
+        totals = coordinator.forecast_totals()
+        assert totals["tomorrow"]["load_kwh"] > 0
+
+    async def test_a_fresh_install_is_not_at_outage_risk(self, hass):
+        """Nothing configured must mean no reserve boost."""
+        coordinator = await self._fresh(hass)
+        await coordinator.async_refresh()
+        assert coordinator.outage.level == "none"
+
+    async def _with_calendar(self, hass, summary: str, **options):
+        """A live coordinator watching a calendar with one upcoming event.
+
+        Outage protection is switched on directly on the settings object rather
+        than through options: the option only seeds the default at first setup, so
+        writing it afterwards leaves the feature off -- which would make these
+        tests pass whatever the filter did.
+        """
+        from homeassistant.util import dt as dt_util
+
+        start = dt_util.utcnow() + timedelta(hours=2)
+        hass.states.async_set(
+            "calendar.watched",
+            "on",
+            {
+                "message": summary,
+                "start_time": start.isoformat(),
+                "end_time": (start + timedelta(hours=1)).isoformat(),
+            },
+        )
+        coordinator = await self._fresh(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                "outage_calendar": "calendar.watched",
+                **options,
+            },
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator.settings.outage_protection = True
+        await coordinator.async_refresh()
+        return coordinator
+
+    async def test_a_real_planned_interruption_registers(self, hass):
+        """The signal has to survive the filter, or the feature is gone."""
+        coordinator = await self._with_calendar(
+            hass, "Planned power interruption - Elm Street"
+        )
+        assert coordinator.outage.level == "high"
+        assert "Elm Street" in coordinator.outage.reason
+        assert coordinator.effective_min_soc >= 80.0
+
+    async def test_an_unrelated_calendar_event_is_not_a_power_cut(self, hass):
+        """The reported symptom: outage risk "high" in settled summer weather,
+        because a bin collection was being read as a supply interruption."""
+        coordinator = await self._with_calendar(hass, "Bin collection")
+        assert coordinator.outage.level == "none", coordinator.outage.reason
+
+    async def test_the_same_event_does_register_when_told_to_trust_the_calendar(
+        self, hass
+    ):
+        """Proves the previous test passes because of the filter, not because the
+        event never reached the assessment at all."""
+        coordinator = await self._with_calendar(
+            hass, "Bin collection", outage_calendar_all_events=True
+        )
+        assert coordinator.outage.level == "high"
+
+    async def test_a_custom_keyword_list_is_honoured(self, hass):
+        coordinator = await self._with_calendar(
+            hass, "Netzabschaltung", outage_calendar_keywords="netzabschaltung"
+        )
+        assert coordinator.outage.level == "high"

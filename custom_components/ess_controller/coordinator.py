@@ -65,6 +65,8 @@ from .const import (
     CONF_OCTOPUS_REGION,
     CONF_ONLY_JOINED_SESSIONS,
     CONF_OUTAGE_CALENDAR,
+    CONF_OUTAGE_CALENDAR_ALL_EVENTS,
+    CONF_OUTAGE_CALENDAR_KEYWORDS,
     CONF_OUTAGE_HIGH_RESERVE_SOC,
     CONF_OUTAGE_LOOKAHEAD_HOURS,
     CONF_OUTAGE_RESERVE_SOC,
@@ -94,6 +96,8 @@ from .const import (
     DEFAULT_GRID_IMPORT_LIMIT,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
+    DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
     DEFAULT_OUTAGE_LOOKAHEAD_HOURS,
     DEFAULT_OUTAGE_RESERVE_SOC,
@@ -1007,6 +1011,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             peak_power_kw=float(
                 self.options.get(CONF_SOLAR_PEAK_POWER, DEFAULT_SOLAR_PEAK_POWER)
             ),
+            # Home Assistant already knows where the house is, so the day-one
+            # clear-sky estimate costs the user no extra configuration.
+            latitude=self.hass.config.latitude,
+            longitude=self.hass.config.longitude,
         )
         load = LoadForecaster(
             self.learning_store.model,
@@ -1169,6 +1177,24 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if start is None or end is None:
             return []
         summary = str(state.attributes.get("message") or "planned outage")
+        # Not every calendar event is a power cut. Without this filter a bin
+        # collection became a high-risk planned interruption and held 80% of the
+        # pack back all day.
+        if not outage_mod.is_outage_event(
+            summary,
+            outage_mod.parse_keywords(
+                self.options.get(
+                    CONF_OUTAGE_CALENDAR_KEYWORDS, DEFAULT_OUTAGE_CALENDAR_KEYWORDS
+                )
+            ),
+            bool(
+                self.options.get(
+                    CONF_OUTAGE_CALENDAR_ALL_EVENTS, DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS
+                )
+            ),
+        ):
+            _LOGGER.debug("Ignoring calendar event %r: not about the supply", summary)
+            return []
         return [(start, end, summary)]
 
     def shiftable_loads(self) -> list:

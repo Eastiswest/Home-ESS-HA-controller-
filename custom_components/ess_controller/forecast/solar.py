@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ..learning.model import LearningModel
+from .clearsky import clear_sky_kwh
 from .energy import EnergySeries, EnergySlot
 from .weather import WeatherSeries
 
@@ -217,10 +218,16 @@ class SolarForecaster:
         model: LearningModel,
         peak_power_kw: float,
         use_learning: bool = True,
+        latitude: float | None = None,
+        longitude: float | None = None,
     ) -> None:
         self._model = model
         self._peak_kw = max(peak_power_kw, 0.0)
         self._use_learning = use_learning
+        # Needed only for the day-one clear-sky estimate. Absent means no
+        # estimate, which is the old behaviour of predicting nothing.
+        self._latitude = latitude
+        self._longitude = longitude
 
     def predict_slot(
         self,
@@ -251,9 +258,13 @@ class SolarForecaster:
             minute=local_start.minute,
             cloud=cloud,
             forecast_kwh=external_kwh,
-            default_kwh=0.0,
+            # Negative marks "the model had nothing", which is different from a
+            # learned zero at midnight and needs a different answer.
+            default_kwh=-1.0,
             uv_index=uv_index,
         )
+        if source == "default" or kwh < 0.0:
+            kwh, source = self._day_one(local_start, duration_hours, cloud)
         return SolarPrediction(
             kwh=self._clamp(kwh, duration_hours),
             source=source,
@@ -261,6 +272,29 @@ class SolarForecaster:
             cloud=cloud,
             uv_index=uv_index,
         )
+
+    def _day_one(
+        self, local_start: datetime, duration_hours: float, cloud: float | None
+    ) -> tuple[float, str]:
+        """What to predict before there is a forecast or any history.
+
+        Zero was the old answer, and it is the one answer guaranteed to be wrong:
+        the optimiser plans as though the sun will not rise, buys the whole day
+        from the grid, and the user drives the battery by hand until the model
+        catches up. A clear-sky estimate is crude but it is the right order of
+        magnitude, and the learned correction supersedes it within days.
+        """
+        if self._latitude is None or self._longitude is None:
+            return 0.0, "none"
+        kwh = clear_sky_kwh(
+            self._latitude,
+            self._longitude,
+            local_start,
+            duration_hours,
+            self._peak_kw,
+            cloud,
+        )
+        return kwh, "clearsky" if cloud is None else "clearsky+cloud"
 
     def _clamp(self, kwh: float, duration_hours: float) -> float:
         """No prediction may exceed what the array can physically produce."""
@@ -313,6 +347,7 @@ class SolarForecaster:
         return {
             "peak_power_kw": self._peak_kw,
             "learning_enabled": self._use_learning,
+            "clearsky_available": self._latitude is not None,
             "solar_buckets": len(self._model.solar_absolute),
             "ratio_buckets": len(self._model.solar_ratio),
         }

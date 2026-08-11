@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.8.1"
+VERSION: Final = "0.9.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -130,6 +130,15 @@ CONF_OUTAGE_WIND_HIGH_THRESHOLD: Final = "outage_wind_high_threshold"
 CONF_OUTAGE_RESERVE_SOC: Final = "outage_reserve_soc"
 CONF_OUTAGE_HIGH_RESERVE_SOC: Final = "outage_high_reserve_soc"
 CONF_OUTAGE_LOOKAHEAD_HOURS: Final = "outage_lookahead_hours"
+# Which calendar events count as a planned interruption. Without this, any event
+# on the chosen calendar became a high-risk power cut -- a bin collection would
+# hold 80% of the pack back all day.
+CONF_OUTAGE_CALENDAR_KEYWORDS: Final = "outage_calendar_keywords"
+CONF_OUTAGE_CALENDAR_ALL_EVENTS: Final = "outage_calendar_all_events"
+DEFAULT_OUTAGE_CALENDAR_KEYWORDS: Final = (
+    "power,outage,interruption,supply,electricity,planned,shutdown"
+)
+DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS: Final = False
 
 # Flexible load shifting
 CONF_SHIFTING_ENABLED: Final = "shifting_enabled"

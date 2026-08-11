@@ -1147,3 +1147,67 @@ class TestProductCatalogue:
         from custom_components.ess_controller.recommend import candidates_from_codes
 
         assert candidates_from_codes(["AGILE-24-10-01"], "Z", "import") == []
+
+
+class TestCalendarEventFiltering:
+    """Not every calendar event is a power cut.
+
+    The field is labelled "calendar", so people point it at a calendar -- and
+    until this filter existed, every event on it became a RISK_HIGH planned
+    interruption, holding 80% of the pack back for the day. A bin collection cost
+    real money.
+    """
+
+    def _filter(self, summary: str, raw: str | None = None, all_events: bool = False):
+        from custom_components.ess_controller.outage import (
+            is_outage_event,
+            parse_keywords,
+        )
+
+        return is_outage_event(summary, parse_keywords(raw), all_events)
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            "Planned power interruption",
+            "PLANNED SUPPLY INTERRUPTION",
+            "Electricity supply works",
+            "Power cut - Elm Street",
+            "Scheduled shutdown",
+            "outage",
+        ],
+    )
+    def test_supply_events_are_recognised(self, summary):
+        assert self._filter(summary) is True
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            "Bin collection",
+            "Dentist 3pm",
+            "Kieran's birthday",
+            "Team standup",
+            "Recycling",
+            "",
+        ],
+    )
+    def test_everyday_events_are_ignored(self, summary):
+        assert self._filter(summary) is False
+
+    def test_a_custom_keyword_list_replaces_the_default(self):
+        assert self._filter("Netzabschaltung", raw="netzabschaltung") is True
+        assert self._filter("Planned power cut", raw="netzabschaltung") is False
+
+    def test_an_empty_list_falls_back_to_the_defaults(self):
+        """An empty box must not silently disable the whole signal."""
+        for raw in ("", "   ", ",,,"):
+            assert self._filter("Planned power interruption", raw=raw) is True
+            assert self._filter("Bin collection", raw=raw) is False
+
+    def test_all_events_is_the_escape_hatch(self):
+        """For a DNO calendar whose titles are too terse to match anything."""
+        assert self._filter("LV-4471", all_events=True) is True
+        assert self._filter("", all_events=True) is True
+
+    def test_matching_ignores_case_and_position(self):
+        assert self._filter("Re: your ELECTRICITY works next week") is True

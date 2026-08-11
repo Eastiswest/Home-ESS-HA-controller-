@@ -499,6 +499,24 @@ the region field appears next to the switch.
 
 ### Forecasting
 
+**It works on day one, and improves from there.** That is a deliberate property,
+because the alternative is driving the battery by hand for a week. Three layers,
+best first, and each supersedes the one below it:
+
+| Layer | Solar | Load |
+|---|---|---|
+| **Learned history** | Your own generation, bucketed by month, time of day and sky | Your own consumption, bucketed by time, weekday and temperature |
+| **External forecast** | A solar forecast integration's hourly figures, corrected by a learned ratio that starts at 1.0 | — |
+| **Physical / typical** | Clear-sky estimate from your latitude, array size and cloud cover | A typical domestic diurnal profile scaled to your daily total |
+
+So on the very first plan, before anything has been learned: solar comes from the
+sun's actual position and your array size, load comes from a typical profile
+scaled to your daily kWh, and prices come from Agile. That is enough to charge
+overnight at the right times and hold through the evening peak. Learning then
+sharpens it — and if you map a solar forecast, the learned correction starts at
+1.0, so the very first plan already uses it properly rather than waiting.
+
+
 Point it at your solar forecast sensors (add both today and tomorrow to cover the
 horizon), a weather entity, and your PV / load / grid power sensors.
 
