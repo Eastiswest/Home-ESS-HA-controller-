@@ -41,13 +41,20 @@ DASHBOARD_URL_PATH = "ess-controller"
 DASHBOARD_TITLE = "ESS Controller"
 DASHBOARD_ICON = "mdi:home-battery-outline"
 
-# How many upcoming half-hours the plan table shows. Twelve is six hours: long
-# enough to cover the next decision, short enough to read on a phone.
-PLAN_TABLE_SLOTS = 12
+# The Plan view shows the *whole* horizon, however far that reaches.
+#
+# It used to show twelve slots -- six hours -- for no better reason than that a
+# short table reads well on a phone. But Octopus publishes to 23:00 tomorrow,
+# AgilePredict forecasts a fortnight, and the optimiser plans across the entire
+# horizon: capping the display at six hours threw away most of what the system
+# knew and hid the decision that matters, which is usually tomorrow's cheap
+# window rather than the next half-hour. Rows are grouped by day so a 72-row
+# table stays navigable.
+PLAN_TABLE_SLOTS: int | None = None
 
-# The Overview gets a shorter one. Sections are grid items, so a row does not
-# start until the tallest section in the row above it ends -- a twelve-row table
-# on the summary page leaves a table-high blank beside every neighbour.
+# The Overview keeps a short one, because it is a summary and because sections are
+# grid items: a row does not start until the tallest section above it ends, so a
+# full-horizon table there would leave a table-high blank beside every neighbour.
 OVERVIEW_TABLE_SLOTS = 6
 
 PLACEHOLDER_VIEW_PATH = "waiting"
@@ -410,33 +417,121 @@ def has_content(view: dict[str, Any]) -> bool:
     return bool(view.get("sections") or view.get("cards"))
 
 
-def _plan_table(plan_entity: str, slots: int = PLAN_TABLE_SLOTS) -> str:
-    """A Markdown table of the forward plan, rendered from sensor attributes.
+# How wide the price bars are drawn, in characters. Twelve reads clearly on a
+# phone and leaves room for the numbers beside it.
+BAR_WIDTH = 12
 
-    Deliberately a template rather than a chart card: the plan lives in the
-    ``slots`` attribute as a list of dicts, and Jinja can turn that into a table
-    with nothing installed. Prices and the action are what a person actually
-    reads off it; the full detail is in the attribute for anyone templating.
 
-    No heading of its own -- the section it sits in has one, and two identical
-    headings stacked is how a generated dashboard announces itself.
+# Eight levels of block character, which is enough to read a price curve at a
+# glance and few enough that each step is visually distinct.
+SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+
+
+def _plan_sparkline(plan_entity: str) -> str:
+    """The whole horizon as one line of block characters.
+
+    This is the shape, and the shape is what a person actually wants: where the
+    trough is, how deep, and how far away. A table answers that only after
+    reading seventy-two rows.
+
+    A real line chart is not available -- ``history-graph`` plots recorded state
+    and cannot draw the future, and ApexCharts is a separate HACS install this
+    dashboard deliberately does not require -- so it is drawn with block
+    characters in a code span, one per half-hour, with a break at midnight.
+    Scaled between the cheapest and dearest slot on the horizon, so a negative
+    price sits at the bottom of the scale where it belongs.
     """
     return (
         "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
         "{% if not slots %}No plan yet — waiting for prices.{% else %}"
-        "| Time | Price | Doing | SoC after |\n|---|---|---|---|\n"
-        "{% for slot in slots[:" + str(slots) + "] %}"
+        "{% set prices = slots | map(attribute='import_price') | list %}"
+        "{% set low = prices | min %}{% set high = prices | max %}"
+        "{% set span = (high - low) if high > low else 1 %}"
+        "{% set bars = namespace(out='', day='') %}"
+        "{% for slot in slots %}"
+        "{% set day = as_timestamp(slot.start) | timestamp_custom('%j', true) %}"
+        "{% if day != bars.day and not loop.first %}"
+        "{% set bars.out = bars.out ~ '│' %}"
+        "{% endif %}"
+        "{% set bars.day = day %}"
+        "{% set level = ((slot.import_price - low) / span * "
+        + str(len(SPARK_LEVELS) - 1)
+        + ") | round | int %}"
+        "{% set bars.out = bars.out ~ '" + SPARK_LEVELS + "'[level] %}"
+        "{% endfor %}"
+        "`{{ bars.out }}`\n\n"
+        "{{ '%.1f' | format(low) }}p to {{ '%.1f' | format(high) }}p over "
+        "{{ (slots | count / 2) | round | int }} hours, from "
+        "{{ as_timestamp(slots[0].start) | timestamp_custom('%H:%M', true) }}. "
+        "│ marks midnight."
+        "{% endif %}"
+    )
+
+
+def _plan_table(plan_entity: str, slots: int | None = PLAN_TABLE_SLOTS) -> str:
+    """The forward plan as a horizontal bar chart, in Markdown.
+
+    A table of numbers is not a shape, and the shape is the whole point: what a
+    person wants from the plan is to see where the trough is, not to read
+    seventy-two prices. A proper line chart is not available -- ``history-graph``
+    plots recorded state and cannot draw the future, and ApexCharts is a separate
+    HACS install this dashboard deliberately does not require -- so the bars are
+    drawn with block characters in a code span, which needs nothing installed and
+    renders anywhere.
+
+    Bars are scaled to the dearest slot on show, so the picture is always of
+    *this* horizon rather than of some fixed price range. Negative prices get
+    their own marker: they are the most valuable slots on the page and a
+    zero-length bar would bury them.
+    """
+    limit = "" if slots is None else f"[:{slots}]"
+    return (
+        "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
+        "{% if not slots %}No plan yet — waiting for prices.{% else %}"
+        "{% set shown = slots" + limit + " %}"
+        "{% set prices = shown | map(attribute='import_price') | list %}"
+        # Scaled to the dearest slot, not to the largest magnitude. Scaling by
+        # absolute value gave a -5p slot a full-length bar, which reads as
+        # expensive when it is the best half-hour on the page.
+        "{% set dear = prices | select('gt', 0) | list %}"
+        "{% set top = dear | max if dear else 1 %}"
+        "{% set ns = namespace(day='') %}"
+        "{% for slot in shown %}"
+        # A new day starts a new table under its own heading. One long table is a
+        # wall; the same rows broken by day are a schedule.
+        "{% set day = as_timestamp(slot.start) | timestamp_custom('%a %-d %b', true) %}"
+        "{% if day != ns.day %}"
+        "{% if not loop.first %}\n{% endif %}"
+        "**{{ day }}**\n\n"
+        "| Time | Price | | Doing | SoC |\n|---|--:|---|---|--:|\n"
+        "{% set ns.day = day %}"
+        "{% endif %}"
+        "{% set p = slot.import_price %}"
+        "{% set filled = [(p / top * "
+        + str(BAR_WIDTH)
+        + ") | round | int, "
+        + str(BAR_WIDTH)
+        + "] | min if p > 0 else 0 %}"
         "| {{ as_timestamp(slot.start) | timestamp_custom('%H:%M', true) }} "
         # A predicted price is marked rather than dressed up as announced: an
         # asterisk costs a character and is the difference between "the plan says
         # 4p at 2am" and "the plan guesses 4p at 2am".
-        "| {{ '%.1f' | format(slot.import_price) }}p"
+        "| {{ '%.1f' | format(p) }}p"
         "{{ '*' if slot.price_is_forecast else '' }} "
+        # A negative price is off the scale in the good direction, so it gets its
+        # own fixed marker rather than a proportional bar.
+        "| `{% if p < 0 %}◄◄{{ '·' * " + str(BAR_WIDTH - 2) + " }}"
+        "{% else %}{{ '█' * filled }}{{ '·' * ("
+        + str(BAR_WIDTH)
+        + " - filled) }}{% endif %}` "
         "| {{ slot.action | replace('_', ' ') | capitalize }} "
         "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
         "{% endfor %}"
-        "{% if slots | selectattr('price_is_forecast') | list | count %}\n"
-        "\\* predicted, not yet announced by Octopus\n"
+        "\n{% if prices | select('lt', 0) | list | count %}"
+        "◄ paid to import. "
+        "{% endif %}"
+        "{% if shown | selectattr('price_is_forecast') | list | count %}"
+        "\\* predicted, not yet announced by Octopus."
         "{% endif %}"
         "{% endif %}"
     )
@@ -678,7 +773,12 @@ def _plan_view(resolved: dict[str, str]) -> dict[str, Any]:
                 ],
             ),
             _section(
-                "Next six hours",
+                "Price shape",
+                "mdi:chart-bell-curve-cumulative",
+                [_markdown(_plan_sparkline(plan)) if plan else None],
+            ),
+            _section(
+                "The whole plan",
                 "mdi:clock-outline",
                 [_markdown(_plan_table(plan)) if plan else None],
             ),

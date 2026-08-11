@@ -1092,3 +1092,61 @@ class TestAccurateForecastIsLeftAlone:
         )
         assert kwh == pytest.approx(0.44)
         assert source != "default"
+
+
+class TestCorrectionIsVisible:
+    """The correction has to be inspectable, not a matter of faith.
+
+    "It is learning, trust me" is not good enough for something spending money,
+    and the absence of any readout is why a forecast being used at face value
+    looked identical to a forecast being ignored.
+    """
+
+    def _model(self, samples=0, ratio_kwh=0.5):
+        from custom_components.ess_controller.learning.model import (
+            LearningModel,
+            SolarObservation,
+        )
+
+        model = LearningModel()
+        for _ in range(samples):
+            model.observe_solar(
+                SolarObservation(
+                    month=8, hour=12, minute=0, kwh=ratio_kwh, forecast_kwh=1.0
+                )
+            )
+        return model
+
+    def _describe(self, model):
+        return model.describe_solar_correction(month=8, hour=12, minute=0)
+
+    def test_a_fresh_model_says_it_is_using_the_forecast_as_published(self):
+        described = self._describe(self._model())
+        assert described["applied_ratio"] == 1.0
+        assert described["source"] == "default"
+
+    def test_it_reports_how_many_samples_a_bucket_needs(self):
+        described = self._describe(self._model())
+        assert described["samples_needed_to_trust"] >= 2
+
+    def test_every_bucket_level_is_listed_with_its_sample_count(self):
+        described = self._describe(self._model(samples=2))
+        assert [level["samples"] for level in described["levels"]] == [2, 2, 2, 2]
+        assert all(level["trusted"] is False for level in described["levels"])
+
+    def test_progress_towards_trust_is_visible_before_it_applies(self):
+        """Two samples in: nothing applied yet, but the evidence is on show."""
+        described = self._describe(self._model(samples=2))
+        assert described["applied_ratio"] == 1.0
+        assert described["levels"][0]["ratio"] == pytest.approx(0.5, abs=0.05)
+
+    def test_once_trusted_the_applied_ratio_reflects_it(self):
+        described = self._describe(self._model(samples=5))
+        assert described["applied_ratio"] < 0.8
+        assert described["source"] != "default"
+        assert described["levels"][0]["trusted"] is True
+
+    def test_the_broadest_bucket_becomes_trusted_in_three_observations(self):
+        """One observation of a given half-hour per day, so about three days."""
+        described = self._describe(self._model(samples=3))
+        assert described["source"] != "default", described

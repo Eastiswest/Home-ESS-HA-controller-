@@ -420,23 +420,55 @@ class TestDashboardRenders:
             for leak in ("?p", "None", "nan", "unknown source"):
                 assert leak not in rendered, (leak, rendered[:300])
 
-    async def test_the_plan_table_has_a_row_per_slot(self, hass):
-        from custom_components.ess_controller.dashboard import (
-            OVERVIEW_TABLE_SLOTS,
-            PLAN_TABLE_SLOTS,
-        )
+    async def test_the_plan_table_covers_the_whole_horizon(self, hass):
+        """The Overview summarises; the Plan view shows everything it knows.
 
-        # The summary page shows a shorter table than the Plan page, so both
-        # lengths must turn up exactly once.
-        seen = []
+        Six hours was an arbitrary cap, and it hid the decision that usually
+        matters -- tomorrow's cheap window rather than the next half-hour.
+        """
+        from custom_components.ess_controller.dashboard import OVERVIEW_TABLE_SLOTS
+
+        lengths = []
         for content in await self._cards(hass):
             rendered = await self._render(hass, content)
             if "| Time |" not in rendered:
                 continue
-            rows = [line for line in rendered.splitlines() if line.startswith("| ")]
-            assert "p |" in rows[-1]  # the price rendered as a number
-            seen.append(len(rows) - 1)  # less the header
-        assert sorted(seen) == sorted([OVERVIEW_TABLE_SLOTS, PLAN_TABLE_SLOTS])
+            rows = [
+                line
+                for line in rendered.splitlines()
+                if line.startswith("| ") and "| Time |" not in line
+            ]
+            assert "p " in rows[-1]  # the price rendered as a number
+            # One header and separator per day, so count data rows only.
+            lengths.append(len([r for r in rows if not r.startswith("|---")]))
+
+        assert len(lengths) == 2, lengths
+        summary, full = sorted(lengths)
+        assert summary == OVERVIEW_TABLE_SLOTS
+        # The plan runs 36 hours by default: far more than six.
+        assert full > 24, full
+
+    async def test_the_plan_is_drawn_as_bars(self, hass):
+        """A table of numbers is not a shape, and the shape is the point."""
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            if "| Time |" not in rendered:
+                continue
+            assert "`" in rendered, "no bar column"
+            assert "█" in rendered or "◄" in rendered, rendered[:200]
+            return
+        pytest.fail("the plan table never rendered")
+
+    async def test_the_plan_is_grouped_by_day(self, hass):
+        """A 72-row table is a wall; the same rows broken by day are a schedule."""
+        for content in await self._cards(hass):
+            rendered = await self._render(hass, content)
+            if "| Time |" not in rendered or rendered.count("| Time |") < 2:
+                continue
+            # More than one header means more than one day, each with a title.
+            assert rendered.count("**") >= 4, rendered[:300]
+            return
+        pytest.fail("no multi-day table rendered")
 
     async def test_the_wear_card_shows_both_thresholds(self, hass):
         """The card the wrong attribute names broke."""

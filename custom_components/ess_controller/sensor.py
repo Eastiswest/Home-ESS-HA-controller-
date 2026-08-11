@@ -276,7 +276,12 @@ SENSORS: tuple[EssSensorDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         suggested_display_precision=2,
         value=lambda c: _day_total(c, "today", "solar_kwh"),
-        attributes=lambda c: c.forecast_totals(),
+        attributes=lambda c: {
+            **c.forecast_totals(),
+            # So the learned correction can be watched converging rather than
+            # taken on trust.
+            "learned_correction": c.solar_learning(),
+        },
     ),
     EssSensorDescription(
         key="solar_forecast_tomorrow",

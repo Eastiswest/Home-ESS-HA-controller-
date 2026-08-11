@@ -11,7 +11,6 @@ import pytest
 
 from custom_components.ess_controller.dashboard import (
     DASHBOARD_TITLE,
-    PLAN_TABLE_SLOTS,
     build_dashboard,
 )
 
@@ -438,7 +437,19 @@ class TestTemplates:
     def test_plan_table_templates_against_the_plan_sensor(self):
         content = self._markdown(build_dashboard(resolved()))
         assert f"state_attr('{entity_id('plan_cost')}', 'slots')" in content
-        assert f"slots[:{PLAN_TABLE_SLOTS}]" in content
+
+    def test_the_plan_view_shows_the_whole_horizon(self):
+        """Six hours was an arbitrary cap that hid tomorrow's cheap window."""
+        from custom_components.ess_controller.dashboard import (
+            OVERVIEW_TABLE_SLOTS,
+            PLAN_TABLE_SLOTS,
+        )
+
+        assert PLAN_TABLE_SLOTS is None
+        content = self._markdown(build_dashboard(resolved()))
+        # The Overview still slices; the Plan view must not.
+        assert f"slots[:{OVERVIEW_TABLE_SLOTS}]" in content
+        assert "{% set shown = slots %}" in content
 
     def test_templates_balance_their_jinja_blocks(self):
         content = self._markdown(build_dashboard(resolved()))
@@ -526,7 +537,9 @@ class TestTemplatesRender:
                 "slots": [
                     {
                         "start": f"2026-02-18T0{hour}:00:00+00:00",
-                        "import_price": -5.0 + hour,
+                        # Spans both signs so the negative marker and the
+                        # proportional bar are both exercised.
+                        "import_price": -5.0 + hour * 10,
                         "action": "charge_solar_only",
                         "soc_end": 40.0 + hour,
                     }
@@ -539,8 +552,18 @@ class TestTemplatesRender:
             for card in self._cards(build_dashboard(resolved()))
         ]
         table = next(text for text in rendered if "| Time |" in text)
-        assert "| 00:00 | -5.0p | Charge solar only | 40% |" in table
+        # Cheap is a short bar, dear is a long one, and a negative price gets its
+        # own marker because it is off the scale in the good direction.
+        assert "| 00:00 | -5.0p | `◄◄" in table
+        assert "◄ paid to import." in table
+        # 25p is the dearest of -5/5/15/25, so it fills the bar; 5p is a fifth of
+        # it and must not.
+        dearest = next(row for row in table.splitlines() if "| 03:00 |" in row)
+        assert "████████████" in dearest, dearest
+        cheapish = next(row for row in table.splitlines() if "| 01:00 |" in row)
+        assert "██·" in cheapish, cheapish
         assert table.count("\n|") >= 5  # header, separator, four slots
+        assert "**Wed 18 Feb**" in table  # grouped by day
         assert any("grid-charge 19.8 kWh" in text for text in rendered)
 
     def test_plan_table_renders_the_fallback_with_no_plan(self):
@@ -769,3 +792,83 @@ class TestPlaceholder:
         assert is_placeholder({}) is False
         assert is_placeholder({"views": "nonsense"}) is False
         assert is_placeholder({"views": [None]}) is False
+
+
+class TestSparkline:
+    """The horizon as one line of blocks -- the shape, not the numbers.
+
+    Rendered against a realistic Agile day rather than a synthetic ramp, because
+    what matters is whether a person can see the overnight trough and the evening
+    peak, and a monotonic fixture would prove nothing about that.
+    """
+
+    def _slots(self) -> list[dict]:
+        import datetime as dt
+        import math
+
+        start = dt.datetime(2026, 8, 12, 0, 0, tzinfo=dt.UTC)
+        slots = []
+        for n in range(72):
+            when = start + dt.timedelta(minutes=30 * n)
+            hour = when.hour + when.minute / 60
+            price = (
+                18
+                + 12 * math.sin((hour - 9) / 24 * 2 * math.pi)
+                + 9 * math.exp(-((hour - 18) ** 2) / 3)
+            )
+            if 2 <= hour < 4 and n < 48:
+                price = -3.5  # a negative window overnight
+            slots.append({"start": when.isoformat(), "import_price": round(price, 2)})
+        return slots
+
+    def _render(self, slots: list[dict]) -> str:
+        import datetime as dt
+
+        jinja2 = pytest.importorskip("jinja2")
+        from custom_components.ess_controller.dashboard import _plan_sparkline
+
+        env = jinja2.Environment(autoescape=False)
+        env.filters["timestamp_custom"] = lambda v, f, local=True, default=None: (
+            dt.datetime.fromtimestamp(v, dt.UTC).strftime(f) if v is not None else default
+        )
+        env.globals.update(
+            state_attr=lambda e, a: {"slots": slots}.get(a),
+            as_timestamp=lambda v, default=None: dt.datetime.fromisoformat(
+                str(v)
+            ).timestamp(),
+        )
+        return env.from_string(_plan_sparkline("sensor.plan")).render()
+
+    def test_one_character_per_slot_plus_a_midnight_break(self):
+        rendered = self._render(self._slots())
+        bar = rendered.split("`")[1]
+        assert len(bar) == 72 + 1, bar  # 36 hours, one midnight crossing
+
+    def test_the_cheapest_slot_is_at_the_bottom_of_the_scale(self):
+        """A negative price must read as the best slot, not an outlier."""
+        rendered = self._render(self._slots())
+        bar = rendered.split("`")[1]
+        assert bar[4] == "▁", bar  # 02:00, the negative window
+
+    def test_the_evening_peak_is_at_the_top_of_the_scale(self):
+        rendered = self._render(self._slots())
+        bar = rendered.split("`")[1]
+        assert "█" in bar[34:40], bar[30:44]  # around 18:00
+
+    def test_the_range_and_span_are_stated(self):
+        rendered = self._render(self._slots())
+        assert "-3.5p to" in rendered
+        assert "36 hours" in rendered
+        assert "midnight" in rendered
+
+    def test_a_flat_tariff_does_not_divide_by_zero(self):
+        flat = [
+            {"start": f"2026-08-12T{h:02d}:00:00+00:00", "import_price": 25.0}
+            for h in range(6)
+        ]
+        rendered = self._render(flat)
+        assert "`" in rendered
+        assert "nan" not in rendered.lower()
+
+    def test_no_plan_says_so(self):
+        assert "No plan yet" in self._render([])

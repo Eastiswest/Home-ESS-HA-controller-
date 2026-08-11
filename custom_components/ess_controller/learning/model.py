@@ -411,6 +411,46 @@ class LearningModel:
     def load_samples(self) -> int:
         return self.load.total_samples()
 
+    def describe_solar_correction(
+        self,
+        month: int,
+        hour: int,
+        minute: int,
+        cloud: float | None = None,
+        uv_index: float | None = None,
+    ) -> dict[str, Any]:
+        """What the learned correction is doing to an external forecast right now.
+
+        The ratio is the whole reason a generic forecast becomes a model of *your*
+        array -- inverter clipping, cell temperature on a hot roof, module
+        degradation, soiling, and the provider's own irradiance bias are all
+        systematic, which is exactly what a ratio absorbs. But it is invisible
+        unless it is published, and "trust me, it is learning" is not good enough
+        when the thing is spending money. This is what makes it watchable.
+        """
+        keys = self.solar_keys(month, hour, minute, cloud, uv_index)
+        levels = []
+        for key in keys:
+            bucket = self.solar_ratio.get(key)
+            levels.append(
+                {
+                    "key": key,
+                    "samples": bucket.samples if bucket else 0,
+                    "ratio": round(bucket.mean, 3) if bucket else None,
+                    "trusted": bool(bucket and bucket.trusted),
+                }
+            )
+        ratio, source = self.solar_ratio.lookup(keys, default=1.0, trusted_only=True)
+        applied = min(max(ratio, 0.25), 2.0)
+        return {
+            # 1.0 with source "default" means the forecast is being used exactly
+            # as published, which is correct until there is evidence of a bias.
+            "applied_ratio": round(applied, 3),
+            "source": source,
+            "samples_needed_to_trust": MIN_SAMPLES_TRUSTED,
+            "levels": levels,
+        }
+
     def confidence(self) -> dict[str, Any]:
         """A coarse readout of how much the model has learned so far."""
         solar_obs = self.solar_observations

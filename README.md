@@ -602,7 +602,7 @@ actually has:
 | View | What is on it |
 |---|---|
 | **Overview** | What it is doing now and why, state of charge, the arming switch, the next three hours as a table |
-| **Plan** | The forward plan for six hours, prices, this half-hour's detail, 24 hours of price and SoC history |
+| **Plan** | The price shape as a sparkline, then **the whole horizon** slot by slot with a bar per price, grouped by day; prices, this half-hour's detail, 24 hours of history |
 | **Performance** | The weekly report — spend against both counterfactuals, forecast error, plan fidelity, round-trip efficiency — plus the wear allowance workings |
 | **Loads & events** | Flexible load schedule and advice, grid sessions, outage risk |
 | **Settings** | Every live-tunable number and switch in one place |
@@ -611,9 +611,13 @@ Four deliberate properties:
 
 - **Stock cards only.** ApexCharts and mini-graph-card make prettier plots, but
   they are separate HACS installs, and a dashboard that renders as a column of
-  red "Custom element doesn't exist" boxes is worse than no dashboard. The
-  forward plan is a Markdown table built from the plan sensor's attributes, so it
-  works on a bare install.
+  red "Custom element doesn't exist" boxes is worse than no dashboard. There is
+  also no stock card that can plot the *future* at all — `history-graph` draws
+  recorded state — so the plan is charted with block characters instead: a
+  sparkline of the whole horizon, and a bar per slot in the detail table. Scaled
+  to the cheapest and dearest slot on the horizon, with negative prices at the
+  bottom of the scale where they belong, and `│` marking midnight. It reads like a
+  price curve and needs nothing installed.
 - **Every row is renamed.** Home Assistant builds a friendly name by joining the
   device name to the entity name, so left alone every row on the page would read
   "AI ESS Controller Planned action" and anything laid out in columns would

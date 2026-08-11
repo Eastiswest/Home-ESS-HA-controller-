@@ -1641,6 +1641,29 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "placements": self.placements,
         }
 
+    def solar_learning(self) -> dict[str, Any]:
+        """How the learned correction is treating the solar forecast right now.
+
+        Reported for the next daylight slot rather than for "now", because at
+        22:00 the correction for a midnight slot says nothing useful and the
+        question a user is asking is always about the next generating period.
+        """
+        model = self.learning_store.model
+        now = dt_util.utcnow()
+        candidates = [
+            slot
+            for slot in (self.plan.slots if self.plan else [])
+            if slot.start >= now and slot.pv_kwh > 0.01
+        ]
+        target = candidates[0].start if candidates else now
+        local = dt_util.as_local(target)
+        described = model.describe_solar_correction(
+            month=local.month, hour=local.hour, minute=local.minute
+        )
+        described["for_slot"] = local.isoformat()
+        described["forecast_mapped"] = bool(self._solar_forecast)
+        return described
+
     def forecast_totals(self) -> dict[str, Any]:
         """Solar and load totals per local day across the plan horizon.
 
