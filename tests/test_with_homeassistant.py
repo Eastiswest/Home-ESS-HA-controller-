@@ -1199,3 +1199,75 @@ class TestInverterRediscovery:
         finally:
             coordinator_mod.discover_entities = original
         assert calls == []
+
+
+class TestRebuildButtonAlwaysWins:
+    """Pressing Rebuild dashboard must replace the stored one, whatever it is.
+
+    Told a user twice to delete the dashboard by hand to pick up a new layout,
+    when this button already does it. That was bad advice about my own software,
+    so the behaviour is pinned here.
+    """
+
+    async def _setup(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        _lovelace(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return entry
+
+    def _store(self, hass):
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+
+        return hass.data[LOVELACE_DATA].dashboards["ess-controller"]
+
+    async def test_it_overwrites_an_edited_dashboard(self, hass):
+        entry = await self._setup(hass)
+        store = self._store(hass)
+
+        edited = await store.async_load(False)
+        edited["views"] = [{"title": "Wrecked", "path": "wrecked", "cards": []}]
+        await store.async_save(edited)
+
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert await coordinator.async_create_dashboard() == "installed"
+
+        rebuilt = await self._store(hass).async_load(False)
+        assert [v["path"] for v in rebuilt["views"]] == [
+            "overview",
+            "plan",
+            "performance",
+            "loads",
+            "settings",
+        ]
+
+    async def test_the_rebuilt_dashboard_is_stamped(self, hass):
+        """So the next upgrade can refresh it without being asked."""
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        entry = await self._setup(hass)
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_create_dashboard()
+        assert is_untouched(await self._store(hass).async_load(False)) is True
+
+    async def test_it_picks_up_a_new_layout(self, hass):
+        """The case the user actually hit: new code, old stored dashboard."""
+        import custom_components.ess_controller.panel as panel_mod
+
+        entry = await self._setup(hass)
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+
+        original = panel_mod.build_for_entry
+        panel_mod.build_for_entry = lambda hass, entry: {
+            "title": "Newer",
+            "views": [{"title": "Newer", "path": "newer", "cards": []}],
+        }
+        try:
+            await coordinator.async_create_dashboard()
+        finally:
+            panel_mod.build_for_entry = original
+
+        assert (await self._store(hass).async_load(False))["title"] == "Newer"

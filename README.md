@@ -629,7 +629,11 @@ Four deliberate properties:
   with a hash of itself, so an upgrade can tell its own untouched output from a
   dashboard you have since changed: untouched ones are refreshed to the new
   layout, edited ones are never written to again. A deleted dashboard stays
-  deleted; the **Rebuild dashboard** button brings it back.
+  deleted.
+
+  **Rebuild dashboard** is the override: it replaces the stored dashboard
+  whatever state it is in. That is the button for "I upgraded and want the new
+  layout", and for "I broke mine". It discards edits on purpose.
 - **It degrades.** Cards are built from the entities that resolved, so disabling
   entities produces a smaller dashboard rather than a broken one.
 
