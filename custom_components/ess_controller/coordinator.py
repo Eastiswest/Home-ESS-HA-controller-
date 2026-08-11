@@ -119,8 +119,10 @@ from .const import (
     STRATEGY_IDLE,
     STRATEGY_OFF,
     STRATEGY_SELF_USE,
-    TERMINAL_MODE_REPLACEMENT,
+    TERMINAL_MODE_HORIZON_MEDIAN,
 )
+from .forecast.confidence import describe as describe_confidence
+from .forecast.confidence import load_factor, solar_factor
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster
 from .forecast.solar import SolarForecaster, build_forecast_series
@@ -474,9 +476,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return OptimiserSettings(
             soc_levels=int(options.get(CONF_SOC_LEVELS, DEFAULT_SOC_LEVELS)),
             terminal_mode=options.get(
-                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_REPLACEMENT
+                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_HORIZON_MEDIAN
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
+        )
+
+    def forecast_confidence(self) -> float:
+        """How far the load and solar models have earned the right to be believed.
+
+        The *lower* of the two maturities, because the plan is only as safe as its
+        weakest input: a perfect solar forecast is no help if the evening load is
+        under-called, and that is exactly the failure that leaves a floored battery
+        buying the back half of the evening at the peak rate.
+        """
+        progress = self.learning_store.model.confidence()
+        return min(
+            float(progress.get("load_maturity", 0.0) or 0.0),
+            float(progress.get("solar_maturity", 0.0) or 0.0),
         )
 
     @property
@@ -1120,6 +1136,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             boundaries, self._weather, dt_util.as_local
         )
 
+        # One place applies the allowance for a young forecast, so the energy
+        # balance, the terminal credit and the dashboard cannot disagree about how
+        # heavy the evening is.
+        confidence = self.forecast_confidence()
+        load_scale = load_factor(confidence)
+        solar_scale = solar_factor(confidence)
+
         slots: list[HorizonSlot] = []
         for (start, end), sun, demand in zip(
             boundaries, solar_predictions, load_predictions, strict=True
@@ -1135,8 +1158,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     end=end,
                     import_price=import_price,
                     export_price=export_price,
-                    pv_kwh=sun.kwh,
-                    load_kwh=demand.kwh,
+                    # Marked down and up while the model is still learning the
+                    # house. A fresh install's flat default shape under-called a
+                    # real evening by 41%, and on a floored pack that is the
+                    # difference between covering the evening and buying the back
+                    # half of it at 46-58p.
+                    pv_kwh=sun.kwh * solar_scale,
+                    load_kwh=demand.kwh * load_scale,
                     # Declared on HorizonSlot from the start and never populated,
                     # which only mattered once there was a forecast worth telling
                     # apart from an announced price.
@@ -1838,6 +1866,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "outage": self.outage,
             "placements": self.placements,
         }
+
+    def confidence_note(self) -> str:
+        """One line on how much the forecasts are being trusted right now."""
+        return describe_confidence(self.forecast_confidence())
 
     def solar_learning(self) -> dict[str, Any]:
         """How the learned correction is treating the solar forecast right now.

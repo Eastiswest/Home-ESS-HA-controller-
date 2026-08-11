@@ -374,6 +374,10 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
 
     Measured over the last day rather than the whole horizon because that is the
     part that speaks to what happens after it ends.
+
+    Reads the slots as given. Any allowance for the forecast being wrong is applied
+    once, where the horizon is built, so that the energy balance and this cap cannot
+    disagree about how heavy the evening is.
     """
     if not slots:
         return 0.0

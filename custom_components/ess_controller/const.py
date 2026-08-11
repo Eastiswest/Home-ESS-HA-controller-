@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.15.0"
+VERSION: Final = "0.16.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -114,11 +114,26 @@ CONF_OCTOPUS_API_KEY: Final = "octopus_api_key"
 CONF_OCTOPUS_ACCOUNT: Final = "octopus_account"
 
 # AgilePredict: predicted Agile prices for the slots Octopus has not announced.
-# Off by default -- it is a call to a third-party service, and nobody should
-# acquire one of those without saying yes to it.
+#
+# On by default for import. The original reasoning -- that an outbound call to a
+# third-party service should be opted into -- had the balance wrong: Octopus
+# announces only to 23:00 tomorrow, so without it the plan is blind past about
+# lunchtime and cannot tell "the cheap window has passed" from "the cheap window
+# is not published yet". A prediction is much better than no information at all,
+# and the setting is right there to turn off.
+#
+# Predicted prices are *not* discounted before the optimiser sees them, and that is
+# deliberate rather than an omission. Distorting a price to express doubt about it
+# invents a fudge factor and makes the plan disagree with the figures on screen. The
+# real protection is structural: only the current half-hour is ever acted on, and
+# the plan is rebuilt every five minutes, so a prediction three days out shapes an
+# intention that will be revised long before it becomes a command. Predicted slots
+# are marked wherever they are shown, so nobody mistakes a guess for an announcement.
+#
+# Export stays off, because a site with no export tariff gains nothing from it.
 CONF_AGILE_PREDICT: Final = "agile_predict"
 CONF_AGILE_PREDICT_EXPORT: Final = "agile_predict_export"
-DEFAULT_AGILE_PREDICT: Final = False
+DEFAULT_AGILE_PREDICT: Final = True
 DEFAULT_AGILE_PREDICT_EXPORT: Final = False
 
 # Grid incentive schemes (Saving Sessions, free electricity / Power Up)

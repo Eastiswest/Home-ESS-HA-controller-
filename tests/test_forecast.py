@@ -1150,3 +1150,76 @@ class TestCorrectionIsVisible:
         """One observation of a given half-hour per day, so about three days."""
         described = self._describe(self._model(samples=3))
         assert described["source"] != "default", described
+
+
+class TestForecastConfidence:
+    """A young forecast is planned against pessimistically, and the reason is that
+    being wrong is not symmetrical.
+
+    On a real install the flat default shape put 17:00-23:30 at 3.9 kWh against
+    about 6.6 kWh actually used. A pack floored at 20% entering the evening on a
+    forecast that light runs out part-way through and buys the rest at 46-58p.
+    Carrying a few kWh it turned out not to need costs the wear on them, under 2p
+    each. So the allowance runs one way.
+    """
+
+    def test_an_untrained_model_plans_for_more_load(self):
+        from custom_components.ess_controller.forecast.confidence import load_factor
+
+        assert load_factor(0.0) > 1.0
+
+    def test_an_untrained_model_plans_for_less_solar(self):
+        from custom_components.ess_controller.forecast.confidence import solar_factor
+
+        assert solar_factor(0.0) < 1.0
+
+    def test_the_allowance_covers_the_error_that_was_measured(self):
+        """3.9 kWh forecast against 6.6 kWh actual is 41% low."""
+        from custom_components.ess_controller.forecast.confidence import load_factor
+
+        assert load_factor(0.0) * 3.88 > 5.0
+
+    def test_a_mature_model_is_taken_at_its_word(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            load_factor,
+            solar_factor,
+        )
+
+        assert load_factor(1.0) == 1.0
+        assert solar_factor(1.0) == 1.0
+
+    def test_the_allowance_shrinks_as_the_model_learns(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            load_factor,
+            solar_factor,
+        )
+
+        for lower, higher in ((0.0, 0.25), (0.25, 0.5), (0.5, 1.0)):
+            assert load_factor(lower) > load_factor(higher)
+            assert solar_factor(lower) < solar_factor(higher)
+
+    def test_it_never_plans_for_less_load_or_more_solar(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            load_factor,
+            solar_factor,
+        )
+
+        for confidence in (-1.0, 0.0, 0.3, 1.0, 2.0):
+            assert load_factor(confidence) >= 1.0
+            assert solar_factor(confidence) <= 1.0
+
+    def test_solar_is_derated_harder_than_load_is_marked_up(self):
+        """An overcast day can take more than a third off an array, and losing the
+        sun on a heavy evening is one bad day rather than two."""
+        from custom_components.ess_controller.forecast.confidence import (
+            UNTRAINED_LOAD_MARGIN,
+            UNTRAINED_SOLAR_DERATE,
+        )
+
+        assert UNTRAINED_SOLAR_DERATE >= UNTRAINED_LOAD_MARGIN * 0.8
+
+    def test_it_says_what_it_is_doing(self):
+        from custom_components.ess_controller.forecast.confidence import describe
+
+        assert "still learning" in describe(0.0)
+        assert "trusted" in describe(1.0)

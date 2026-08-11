@@ -375,7 +375,13 @@ SENSORS: tuple[EssSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=0,
         value=_learning_progress,
-        attributes=lambda c: c.learning_store.model.confidence(),
+        attributes=lambda c: {
+            **c.learning_store.model.confidence(),
+            # What the immaturity is actually costing in caution, in words. Without
+            # this, a plan built against a marked-up load looks like the optimiser
+            # being needlessly timid rather than the forecast being young.
+            "planning_allowance": c.confidence_note(),
+        },
     ),
     EssSensorDescription(
         key="planned_charge_power",

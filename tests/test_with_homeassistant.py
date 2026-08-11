@@ -739,9 +739,32 @@ class TestAgilePredictWiring:
             coordinator_mod, "async_get_clientsession", lambda hass: object()
         )
 
-    async def test_off_by_default_and_nothing_is_recorded(self, hass):
-        """Nobody acquires a third-party dependency without saying yes."""
+    async def test_on_by_default_for_import(self, hass):
+        """Reversed deliberately. Withholding it to avoid an unasked-for outbound
+        call left the plan blind past about lunchtime -- Octopus announces only to
+        23:00 tomorrow -- and unable to tell "the cheap window has passed" from
+        "the cheap window is not published yet". A prediction beats nothing, it is
+        marked as a prediction everywhere it is shown, and the switch is right
+        there."""
+        from custom_components.ess_controller.const import (
+            CONF_AGILE_PREDICT,
+            DEFAULT_AGILE_PREDICT,
+        )
+
+        assert DEFAULT_AGILE_PREDICT is True
         coordinator = await self._coordinator(hass)
+        assert coordinator.options.get(CONF_AGILE_PREDICT, DEFAULT_AGILE_PREDICT) is True
+
+    async def test_export_predictions_stay_off(self, hass):
+        """A site with no export tariff gains nothing from predicting export."""
+        from custom_components.ess_controller.const import DEFAULT_AGILE_PREDICT_EXPORT
+
+        assert DEFAULT_AGILE_PREDICT_EXPORT is False
+
+    async def test_turning_it_off_records_nothing(self, hass):
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+
+        coordinator = await self._coordinator(hass, **{CONF_AGILE_PREDICT: False})
         assert coordinator.price_forecast is None
 
     async def test_enabled_without_a_region_says_so_rather_than_calling(self, hass):
