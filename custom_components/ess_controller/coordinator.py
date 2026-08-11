@@ -151,6 +151,7 @@ from .models import (
     HorizonSlot,
     Override,
     Plan,
+    PlanSlot,
     SiteState,
     SlotAction,
 )
@@ -209,6 +210,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime_store = RuntimeStore(hass, entry.entry_id)
         self.performance_store = PerformanceStore(hass, entry.entry_id)
         self.settings: RuntimeSettings = RuntimeSettings()
+        # (slot start, action) for the half-hour currently being acted on.
+        self._committed: tuple[datetime, SlotAction] | None = None
         self.accumulator = SlotAccumulator()
 
         self.plan: Plan | None = None
@@ -1581,9 +1584,26 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         undone two minutes later by the optimiser.
         """
         base = {
-            "min_soc": self.settings.reserve_soc,
+            # The floor the *plan* was built on, not the deeper emergency reserve.
+            # The two were different, and the difference was invisible: the
+            # optimiser planned never to go below the configured minimum (raised
+            # further when an outage looks likely), while the inverter was told it
+            # could discharge down to the emergency reserve -- so in every
+            # self-use slot the hardware was free to spend energy the plan had
+            # already promised to something else, and an outage boost never
+            # reached the inverter at all.
+            #
+            # During a genuine power cut an islanded inverter follows its own
+            # backup floor, which is not this setting and not ours to manage.
+            "min_soc": self.effective_min_soc,
             "max_soc": self.settings.max_soc,
             "allow_grid_charge": self.settings.allow_grid_charge,
+            "max_charge_kw": self.settings.max_charge_kw,
+            "max_discharge_kw": self.settings.max_discharge_kw,
+            # Zero when export is not permitted, so the switch does something
+            # physical. It used to be written as the connection limit regardless,
+            # which left "Export: off" as a note to the optimiser and nothing more.
+            "export_limit_kw": self._effective_export_limit(),
         }
 
         if self.override is not None:
@@ -1632,18 +1652,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action=SlotAction.SELF_USE, reason="outside plan horizon", **base
             )
 
+        action = self._committed_action(slot)
+
         power = (
             slot.charge_power_kw if slot.charge_ac_kwh > 0 else slot.discharge_power_kw
         )
         if power <= 0:
-            power = self._default_power(slot.action)
+            power = self._default_power(action)
 
         grid = self.grid_spec()
         return ControlCommand(
-            action=slot.action,
+            action=action,
             power_kw=power,
             target_soc=slot.soc_end,
-            export_limit_kw=grid.export_limit_kw,
             # Only give surplus PV to the grid during a hold if the grid pays for
             # it. On an import-only tariff it is worth nothing exported and
             # something stored, so the hold must let the array keep charging.
@@ -1652,6 +1673,46 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             slot_end=slot.end,
             **base,
         )
+
+    def _effective_export_limit(self) -> float:
+        """The export ceiling to write: the connection limit, or nothing at all."""
+        grid = self.grid_spec()
+        return grid.export_limit_kw if grid.allow_export else 0.0
+
+    def _committed_action(self, slot: PlanSlot) -> SlotAction:
+        """The action for this half-hour, held steady once it has been applied.
+
+        The plan is rebuilt from live readings every cycle, so the *current*
+        slot's action could change several times inside one half-hour -- charge at
+        19:31, self-use at 19:46 -- as the load forecast and SoC moved under it.
+        That is churn, not intelligence: it puts the inverter through mode changes
+        that achieve nothing, and it makes the dashboard contradict what the
+        battery is doing.
+
+        A tariff slot is the natural unit of a decision, so the first action
+        actually applied inside a slot stands for the rest of it. Later slots are
+        free to move as the plan improves, and anything the user does -- an
+        override, a strategy lock, a settings change, "Re-plan now" -- clears the
+        commitment immediately, because holding a stale decision against an
+        explicit instruction would be the same bug in the other direction.
+        """
+        if self._committed is not None:
+            start, action = self._committed
+            if start == slot.start:
+                if action is not slot.action:
+                    _LOGGER.debug(
+                        "Holding %s for the slot from %s; the plan now prefers %s",
+                        action.value,
+                        slot.start.isoformat(),
+                        slot.action.value,
+                    )
+                return action
+        self._committed = (slot.start, slot.action)
+        return slot.action
+
+    def clear_commitment(self) -> None:
+        """Let the next cycle change the current slot's action again."""
+        self._committed = None
 
     def _default_power(self, action: SlotAction) -> float:
         if action is SlotAction.DISCHARGE:
@@ -1678,11 +1739,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             target_soc=target_soc,
         )
         self._adapter.reset_last_applied()
+        self.clear_commitment()
         await self.async_request_refresh()
 
     async def async_clear_override(self) -> None:
         self.override = None
         self._adapter.reset_last_applied()
+        self.clear_commitment()
         await self.async_request_refresh()
 
     async def async_reset_learning(self) -> None:
@@ -1702,6 +1765,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._report_cache = {}
         # A permission or limit change can alter the correct action right now.
         self._adapter.reset_last_applied()
+        self.clear_commitment()
         await self.async_request_refresh()
 
     async def async_restore_reserve(self) -> bool:

@@ -331,8 +331,12 @@ class TestNegativePricePreparation:
 
         The surplus leaves as unpaid export, not curtailment: you can turn an
         array down, but battery discharge has to go somewhere.
+
+        "No export tariff" is ``allow_export`` *on* with a price of zero -- the
+        energy may physically leave, it just is not paid for. ``allow_export=False``
+        is the different and stronger claim that nothing leaves at all.
         """
-        grid = make_grid(allow_export=False)
+        grid = make_grid(allow_export=True)
         plan = optimise(self._horizon(0.0), 90.0, make_battery(), grid)
         assert plan.slots[5].soc_end < 75.0
         assert sum(s.grid_export_kwh for s in plan.slots) > 0.5
@@ -361,7 +365,7 @@ class TestNegativePricePreparation:
         self-use whenever the surplus earned nothing, so the adapter left the
         inverter in self-use mode and it only covered the house. The headroom
         never appeared and the plan silently failed."""
-        grid = make_grid(allow_export=False)
+        grid = make_grid(allow_export=True)
         plan = optimise(self._horizon(0.0), 90.0, make_battery(), grid)
         dumping = [
             s
@@ -415,7 +419,8 @@ class TestTerminalValueClamp:
         to reach for if the plan cycles harder than you want.
         """
         slots = build_slots([-8.0] * 16, load=0.3)
-        grid = make_grid(allow_export=False)
+        # Permitted to export, paid nothing for it: the ordinary import-only case.
+        grid = make_grid(allow_export=True)
 
         cheap_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=2.0), grid)
         dear_wear = optimise(slots, 60.0, make_battery(cycle_cost_per_kwh=8.0), grid)
@@ -575,3 +580,109 @@ class TestResolutionDoesNotFreezeTheBattery:
         )
         assert plan.slots
         assert MAX_REFINED_LEVELS <= 240
+
+
+class TestStartingChargeIsNeverOverstated:
+    """The plan must not begin believing it has energy the battery lacks.
+
+    ``round`` could start it up to half a level above the measured charge, so the
+    plan spent energy that was not there and quietly undershot its own floor.
+    """
+
+    def test_the_plan_never_starts_above_the_measured_charge(self):
+        battery = make_battery()
+        for soc in (17.3, 33.7, 49.1, 60.4, 78.9, 94.2):
+            plan = optimise(build_slots([25.0] * 8), soc, battery, make_grid())
+            assert plan.slots[0].soc_start <= soc + 1e-9, soc
+
+    def test_the_gap_is_at_most_one_level(self):
+        battery = make_battery()
+        step = battery.usable_kwh / OptimiserSettings().clamped_levels()
+        for soc in (17.3, 60.4, 94.2):
+            plan = optimise(build_slots([25.0] * 8), soc, battery, make_grid())
+            lost = battery.soc_to_energy(soc) - battery.soc_to_energy(
+                plan.slots[0].soc_start
+            )
+            assert 0.0 <= lost <= step + 1e-9
+
+    def test_the_saving_is_not_a_quantisation_artefact(self):
+        """Flooring the start handed the baseline energy the plan did not get, so
+        on a flat tariff the optimised plan reported a *loss* against self-use."""
+        plan = optimise(
+            build_slots([25.0] * 48, load=0.4), 60.0, make_battery(), make_grid()
+        )
+        assert plan.total_cost <= plan.self_use_cost + 1e-6
+
+
+class TestSpilledSolarLosesTies:
+    """Throwing generation away earns nothing and cost nothing, so the objective
+    was exactly indifferent -- and an indifferent optimiser picks whichever branch
+    it reaches first rather than the one a person would want."""
+
+    def test_the_tie_break_is_too_small_to_change_economics(self):
+        from custom_components.ess_controller.optimiser.dp import SPILL_TIE_BREAK
+
+        # Far below a penny, so it cannot outvote a real price or wear difference.
+        assert 0.0 < SPILL_TIE_BREAK <= 0.05
+
+    def test_free_solar_is_stored_rather_than_spilled(self):
+        """Zero prices, no export, and more sun than the house can use: storing
+        and spilling cost the same, so only the tie-break separates them."""
+        battery = make_battery(cycle_cost_per_kwh=0.0)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        slots = build_slots([0.0] * 12, pv=1.0, load=0.25)
+        plan = optimise(
+            slots, 30.0, battery, grid, OptimiserSettings(terminal_mode="zero")
+        )
+        assert sum(s.charge_ac_kwh for s in plan.slots) > 0.0
+        assert plan.slots[-1].soc_end > plan.slots[0].soc_start
+
+    def test_it_still_spills_when_there_is_nowhere_to_put_it(self):
+        """A full pack has no choice, and the tie-break must not pretend it does.
+
+        With no export tariff the surplus still leaves the site -- it just earns
+        nothing -- so what is given away shows up as unpaid export rather than as
+        curtailment at the array.
+        """
+        battery = make_battery(cycle_cost_per_kwh=0.0)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+        slots = build_slots([0.0] * 6, pv=1.0, load=0.25)
+        plan = optimise(slots, 95.0, battery, grid)
+        given_away = sum(s.grid_export_kwh + s.curtailed_kwh for s in plan.slots)
+        assert given_away > 0.0
+
+
+class TestExportPermissionIsPhysical:
+    """ "Export: off" has to stop energy leaving, not merely stop it earning.
+
+    Treating the permission as a price of zero was the wrong reading: the plan
+    pushed surplus and battery charge to the grid while the switch said off, and
+    the only visible consequence was that it made no money doing so. Note this is
+    a different setting from *having no export tariff*, which is the permission on
+    with a price of zero.
+    """
+
+    def test_nothing_leaves_when_export_is_refused(self):
+        grid = make_grid(allow_export=False)
+        slots = build_slots([25.0] * 12, pv=1.0, load=0.25)
+        plan = optimise(slots, 95.0, make_battery(), grid)
+        assert sum(s.grid_export_kwh for s in plan.slots) == pytest.approx(0.0)
+
+    def test_the_surplus_is_curtailed_at_the_array_instead(self):
+        grid = make_grid(allow_export=False)
+        slots = build_slots([25.0] * 12, pv=1.0, load=0.25)
+        plan = optimise(slots, 95.0, make_battery(), grid)
+        assert sum(s.curtailed_kwh for s in plan.slots) > 0.0
+
+    def test_the_battery_cannot_dump_to_the_grid(self):
+        grid = make_grid(allow_export=False)
+        slots = build_slots([-8.0] * 12, load=0.3)
+        plan = optimise(slots, 80.0, make_battery(cycle_cost_per_kwh=0.0), grid)
+        for slot in plan.slots:
+            assert slot.discharge_ac_kwh <= slot.load_kwh + 1e-6
+
+    def test_permitting_export_lets_it_flow_again(self):
+        grid = make_grid(allow_export=True)
+        slots = build_slots([25.0] * 12, pv=1.0, load=0.25)
+        plan = optimise(slots, 95.0, make_battery(), grid)
+        assert sum(s.grid_export_kwh for s in plan.slots) > 0.0

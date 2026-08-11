@@ -335,6 +335,19 @@ class ControlCommand:
     min_soc: float = 10.0
     max_soc: float = 100.0
     export_limit_kw: float | None = None
+    max_charge_kw: float | None = None
+    """Charge rate ceiling to restore when the inverter runs its own logic.
+
+    A forced charge writes the *planned* rate to the inverter's charge-current
+    limit, and nothing used to write it back. A slot throttled to 1 kW therefore
+    left the limit at 1 kW, silently capping solar charging and the next forced
+    charge as well. Carrying the configured maximum lets self-use hand the
+    inverter back its full rate. ``None`` leaves the limit alone.
+    """
+
+    max_discharge_kw: float | None = None
+    """Discharge rate ceiling, restored for the same reason."""
+
     allow_grid_charge: bool = True
     hold_absorbs_solar: bool = True
     """Whether a hold should still let the array charge the battery.
@@ -357,6 +370,8 @@ class ControlCommand:
             "min_soc": self.min_soc,
             "max_soc": self.max_soc,
             "export_limit_kw": self.export_limit_kw,
+            "max_charge_kw": self.max_charge_kw,
+            "max_discharge_kw": self.max_discharge_kw,
             "allow_grid_charge": self.allow_grid_charge,
             "hold_absorbs_solar": self.hold_absorbs_solar,
             "reason": self.reason,
@@ -387,6 +402,12 @@ class ControlCommand:
             return True
         if self.hold_absorbs_solar is not other.hold_absorbs_solar:
             return True
+        for name in ("max_charge_kw", "max_discharge_kw"):
+            mine, theirs = getattr(self, name), getattr(other, name)
+            if (mine is None) != (theirs is None):
+                return True
+            if mine is not None and theirs is not None and abs(mine - theirs) > 0.05:
+                return True
         return self.allow_grid_charge is not other.allow_grid_charge
 
 

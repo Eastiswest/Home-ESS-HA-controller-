@@ -234,6 +234,12 @@ class SolaxModbusAdapter(InverterAdapter):
             # inverter's own reserve rather than by Manual mode -- see
             # _hold_floor.
             writes.extend(self._self_use_writes(use_mode_entity, use_options, skipped))
+            # Handing the inverter back its own logic means handing back its full
+            # rate as well. A forced charge writes the planned rate to the
+            # charge-current limit and nothing used to write it back, so a slot
+            # throttled to 1 kW left solar charging capped at 1 kW for the rest of
+            # the day.
+            writes.extend(self._restore_rate_writes(command, voltage, skipped))
 
         writes.extend(self._grid_charge_writes(command, action, skipped))
         writes.extend(self._min_soc_writes(command, action, skipped))
@@ -251,6 +257,30 @@ class SolaxModbusAdapter(InverterAdapter):
         if _normalised_state(self.hass, use_mode_entity) == _norm(option):
             return []
         return [_select_write(use_mode_entity, option, ROLE_USE_MODE)]
+
+    def _restore_rate_writes(
+        self, command: ControlCommand, voltage: float | None, skipped: list[str]
+    ) -> list[Write]:
+        """Put both current limits back to the configured maxima."""
+        writes: list[Write] = []
+        for role, limit in (
+            (ROLE_CHARGE_LIMIT, command.max_charge_kw),
+            (ROLE_DISCHARGE_LIMIT, command.max_discharge_kw),
+        ):
+            if limit is None or limit <= 0:
+                continue
+            entity_id = self.entity(role)
+            if not entity_id:
+                continue
+            raw = power_limit_value(
+                self.hass, entity_id, limit, voltage, self._nominal_voltage
+            )
+            value = clamp_to_number(self.hass, entity_id, raw)
+            current = state_float(self.hass, entity_id)
+            if current is not None and abs(current - value) <= max(value * 0.03, 0.5):
+                continue
+            writes.append(_number_write(entity_id, value, role))
+        return writes
 
     def _power_writes(
         self,

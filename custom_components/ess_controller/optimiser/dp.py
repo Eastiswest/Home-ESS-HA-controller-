@@ -138,7 +138,14 @@ def _price_delta(
     # possible, but battery discharge has to go somewhere. So the surplus a slot
     # cannot deliver must be absorbable by backing off PV, or the transition is
     # simply not achievable.
-    export_capacity = max(grid.export_limit_kw * hours, 0.0)
+    # Refusing to export means the energy does not leave, not that it leaves for
+    # nothing. Treating the permission as a price of zero was the wrong reading of
+    # it: the plan happily pushed surplus and battery charge to the grid while the
+    # switch said Export: off, and the only visible consequence was that it earned
+    # nothing. With no capacity to export into, surplus has to be curtailed at the
+    # array instead -- and a battery discharge bigger than the array could absorb
+    # becomes infeasible, which is the physically honest answer.
+    export_capacity = max(grid.export_limit_kw * hours, 0.0) if grid.allow_export else 0.0
     export_price = slot.export_price if grid.allow_export else 0.0
 
     if raw_export <= 0.0:
@@ -165,6 +172,17 @@ def _price_delta(
     # A negative export price makes this a cost rather than revenue, which the
     # sign handles on its own.
     cost = grid_import * slot.import_price - grid_export * export_price
+    # Giving generation away earns nothing and costs nothing, so on an
+    # import-only site the objective was exactly indifferent between storing free
+    # solar and losing it -- and an indifferent optimiser picks whichever branch
+    # it happens to reach first. Both routes out count: curtailed at the array,
+    # and exported at a price of zero, which is what an import-only tariff makes
+    # of every surplus kWh. Weakly preferring to keep the energy costs nothing
+    # real; the figure is far too small to outvote a genuine price or wear
+    # difference, and only decides ties. A *negative* export price is already a
+    # cost in its own right and needs no nudge.
+    spilled = curtailed + (grid_export if export_price <= 0.0 else 0.0)
+    cost += spilled * SPILL_TIE_BREAK
     # Wear allowance. Half is charged in each direction so that a full
     # round-trip of X kWh costs X * cycle_cost_per_kwh, which is how users
     # think about "cost per kWh cycled".
@@ -207,6 +225,13 @@ def _price_delta(
 # 18 kWh window is 75 Wh of resolution, which is finer than any half-hour
 # decision needs.
 MAX_REFINED_LEVELS = 240
+
+
+# Charged per kWh of generation the plan expects to give away for nothing --
+# curtailed at the array, or exported at a price of zero -- purely to break ties
+# in favour of keeping it. A hundredth of a penny is far below any real price or
+# wear difference, so it can never outvote the economics.
+SPILL_TIE_BREAK = 0.01
 
 
 # Where on the horizon's price distribution stored energy is valued: the middle.
@@ -337,8 +362,18 @@ def optimise(
     n = len(slots)
 
     start_energy = battery.soc_to_energy(start_soc)
-    start_level = round(start_energy / step)
+    # Floored, not rounded. Rounding to the nearest level can start the plan up
+    # to half a level *above* where the battery actually is, so the plan spends
+    # energy it does not have and quietly undershoots its floor. Optimism about
+    # the starting charge is the one direction this must not err in.
+    start_level = math.floor(start_energy / step)
     start_level = min(max(start_level, 0), levels)
+    # The level grid cannot land exactly on the measured charge, and the baselines
+    # have to be judged from the same starting energy as the plan or the reported
+    # saving carries a quantisation artefact rather than a decision: at a flat
+    # price the plan looked *worse* than plain self-consumption purely because the
+    # baseline was handed the fraction of a kWh the grid had rounded away.
+    quantised_start_soc = battery.energy_to_soc(start_level * step)
 
     # --- terminal valuation ------------------------------------------------
     rate = _terminal_rate(slots, settings) * settings.terminal_weight
@@ -445,10 +480,10 @@ def optimise(
     plan.total_cost = total_cost
     plan.terminal_value = (level * step) * value_per_kwh
     plan.baseline_cost = simulate_idle(
-        slots, start_soc, battery, grid, created
+        slots, quantised_start_soc, battery, grid, created
     ).total_cost
     plan.self_use_cost = simulate_self_use(
-        slots, start_soc, battery, grid, created
+        slots, quantised_start_soc, battery, grid, created
     ).total_cost
     plan.reason = _describe(plan, battery)
     return plan

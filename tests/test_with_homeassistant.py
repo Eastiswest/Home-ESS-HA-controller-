@@ -1549,3 +1549,163 @@ class TestAHoldDoesNotOutliveTheIntegration:
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert called == [True]
+
+
+class TestTheInverterIsToldThePlansFloor:
+    """The plan and the hardware were working to different floors.
+
+    The optimiser planned never to discharge below the configured minimum --
+    raised further when an outage looks likely -- while the inverter was told it
+    could go down to the deeper emergency reserve. In every self-use slot the
+    hardware was therefore free to spend energy the plan had already promised to
+    something else, and an outage boost never reached the inverter at all.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_the_command_carries_the_planning_floor(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.min_soc = 20.0
+        coordinator.settings.reserve_soc = 5.0
+        await coordinator.async_refresh()
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command is not None
+        assert command.min_soc == pytest.approx(coordinator.effective_min_soc)
+        assert command.min_soc > coordinator.settings.reserve_soc
+
+    async def test_an_outage_boost_reaches_the_inverter(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.min_soc = 20.0
+        coordinator.settings.outage_protection = True
+        await coordinator.async_refresh()
+        coordinator.outage.level = "high"
+        coordinator.outage.reserve_soc = 80.0
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command is not None
+        assert command.min_soc == pytest.approx(80.0)
+
+    async def test_the_command_carries_the_rate_ceilings(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command is not None
+        assert command.max_charge_kw == pytest.approx(coordinator.settings.max_charge_kw)
+        assert command.max_discharge_kw == pytest.approx(
+            coordinator.settings.max_discharge_kw
+        )
+
+
+class TestTheCurrentSlotDoesNotChurn:
+    """The plan is rebuilt every cycle, so the half-hour already under way could
+    change action several times inside it -- charge at 19:31, self-use at 19:46 --
+    as the forecast and SoC moved. That is churn, not intelligence."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _slot(coordinator, now):
+        return coordinator.plan.slot_at(now)
+
+    async def test_the_action_holds_for_the_rest_of_the_slot(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = ha_dt.utcnow()
+        slot = self._slot(coordinator, now)
+        assert slot is not None
+        first = coordinator._resolve_command(now).action
+
+        # The plan changes its mind about the half-hour already running.
+        other = next(a for a in SlotAction if a is not first)
+        slot.action = other
+        assert coordinator._resolve_command(now).action is first
+
+    async def test_a_new_slot_is_free_to_differ(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = ha_dt.utcnow()
+        first = coordinator._resolve_command(now).action
+
+        later = coordinator.plan.slots[2]
+        other = next(a for a in SlotAction if a is not first)
+        later.action = other
+        assert coordinator._resolve_command(later.start).action is other
+
+    async def test_an_explicit_replan_reconsiders_now(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = ha_dt.utcnow()
+        first = coordinator._resolve_command(now).action
+        slot = self._slot(coordinator, now)
+        other = next(a for a in SlotAction if a is not first)
+        slot.action = other
+
+        coordinator.clear_commitment()
+        assert coordinator._resolve_command(now).action is other
+
+    async def test_a_settings_change_reconsiders_now(self, hass):
+        """A permission or limit change can alter what the right action is, so a
+        commitment made before it must not survive it."""
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = ha_dt.utcnow()
+        first = coordinator._resolve_command(now).action
+
+        # A commitment to something the plan does not want.
+        stale = next(a for a in SlotAction if a is not first)
+        slot = self._slot(coordinator, now)
+        coordinator._committed = (slot.start, stale)
+
+        await coordinator.async_update_settings(max_charge_kw=2.0)
+        # Either the refresh has already re-committed to the plan's own choice, or
+        # nothing is committed yet -- what must not happen is the stale
+        # commitment surviving a change that could have altered the right answer.
+        assert coordinator._committed != (slot.start, stale)
+
+    async def test_an_override_is_never_held_off(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = ha_dt.utcnow()
+        coordinator._resolve_command(now)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=30))
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command.action is SlotAction.CHARGE

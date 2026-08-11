@@ -221,6 +221,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
     async def async_replan(call: ServiceCall) -> None:
         for coordinator in _coordinators(hass, call):
+            # An explicit re-plan means "reconsider now", including the half-hour
+            # already under way, which is otherwise held steady to stop churn.
+            coordinator.clear_commitment()
             await coordinator.async_request_refresh()
 
     async def async_set_override(call: ServiceCall) -> None:

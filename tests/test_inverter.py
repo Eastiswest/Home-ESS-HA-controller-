@@ -902,3 +902,107 @@ class TestDiscoveryIgnoresOurOwnEntities:
         found = self._discover(hass)
         assert found.get("soc") == "sensor.solax_battery_capacity"
         assert found.get("use_mode") == "select.solax_charger_use_mode"
+
+
+class TestRateLimitsAreHandedBack:
+    """A forced charge writes the *planned* rate to the charge-current limit.
+
+    Nothing used to write it back, so a slot throttled to 1 kW left the limit at
+    1 kW for the rest of the day: solar charging capped, the evening discharge
+    capped, and nothing on any screen to say why.
+    """
+
+    def test_self_use_restores_both_limits(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", 3.0)
+        hass.states.set("number.solax_battery_discharge_max_current", 3.0)
+        adapter = solax_adapter(hass)
+        apply(
+            adapter,
+            command(SlotAction.SELF_USE, max_charge_kw=3.6, max_discharge_kw=3.6),
+        )
+        written = {c[2]["entity_id"] for c in hass.services.calls}
+        assert "number.solax_battery_charge_max_current" in written
+        assert "number.solax_battery_discharge_max_current" in written
+
+    def test_a_hold_restores_them_too(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", 1.0)
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.IDLE, max_charge_kw=3.6, max_discharge_kw=3.6))
+        written = {c[2]["entity_id"] for c in hass.services.calls}
+        assert "number.solax_battery_charge_max_current" in written
+
+    def test_solar_charging_is_not_left_throttled(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", 1.0)
+        adapter = solax_adapter(hass)
+        apply(
+            adapter,
+            command(
+                SlotAction.CHARGE_SOLAR_ONLY, max_charge_kw=3.6, max_discharge_kw=3.6
+            ),
+        )
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        limit = by_entity["number.solax_battery_charge_max_current"]["value"]
+        assert limit > 1.0
+
+    def test_a_forced_charge_still_uses_the_planned_rate(self):
+        """Restoring the maxima must not override a deliberately throttled charge."""
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", 20.0)
+        adapter = solax_adapter(hass)
+        apply(
+            adapter,
+            command(
+                SlotAction.CHARGE, power_kw=1.0, max_charge_kw=3.6, max_discharge_kw=3.6
+            ),
+        )
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        planned = by_entity["number.solax_battery_charge_max_current"]["value"]
+        full = by_entity.get("number.solax_battery_discharge_max_current")
+        assert planned < 20.0
+        # And the discharge limit is left alone during a forced charge.
+        assert full is None
+
+    def test_no_ceilings_given_means_leave_the_limits_alone(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", 1.0)
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.SELF_USE))
+        written = {c[2]["entity_id"] for c in hass.services.calls}
+        assert "number.solax_battery_charge_max_current" not in written
+
+    def test_an_unchanged_limit_is_not_rewritten(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass)
+        apply(
+            adapter,
+            command(SlotAction.SELF_USE, max_charge_kw=3.6, max_discharge_kw=3.6),
+        )
+        first = len(hass.services.calls)
+        apply(
+            adapter,
+            command(SlotAction.SELF_USE, max_charge_kw=3.6, max_discharge_kw=3.6),
+        )
+        assert len(hass.services.calls) == first
+
+
+class TestExportLimitFollowsThePermission:
+    """ "Export: off" reaches the inverter as a zero limit, not as a zero price."""
+
+    def test_refusing_export_writes_a_zero_limit(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_export_control_user_limit", 3680)
+        adapter = solax_adapter(hass, manage_export_limit=True)
+        apply(adapter, command(SlotAction.SELF_USE, export_limit_kw=0.0))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_export_control_user_limit"]["value"] == 0
+
+    def test_permitting_export_writes_the_connection_limit(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_export_control_user_limit", 0)
+        adapter = solax_adapter(hass, manage_export_limit=True)
+        apply(adapter, command(SlotAction.SELF_USE, export_limit_kw=3.68))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_export_control_user_limit"]["value"] > 0
