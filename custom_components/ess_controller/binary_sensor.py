@@ -71,8 +71,16 @@ BINARY_SENSORS: tuple[EssBinarySensorDescription, ...] = (
         attributes=lambda c: {
             "description": (
                 "True when the current import price is in the cheapest third of "
-                "the planning horizon. Useful for scheduling flexible loads such "
-                "as a dishwasher or EV charge."
+                "the planning horizon, ranked against the other half-hours. "
+                "Useful for scheduling flexible loads such as a dishwasher or "
+                "EV charge."
+            ),
+            # The price it is being compared against, so "why is this off?" is a
+            # question the entity can answer about itself.
+            "cheap_at_or_below": (
+                round(threshold, 3)
+                if (threshold := c.price_percentile("import")) is not None
+                else None
             ),
             **c.price_stats("import"),
         },
@@ -185,15 +193,21 @@ def _load_running(coordinator: EssCoordinator) -> bool:
 
 
 def _cheap_now(coordinator: EssCoordinator) -> bool | None:
-    stats = coordinator.price_stats("import")
+    """Whether this half-hour is one of the cheap ones on the horizon.
+
+    Ranked against the other slots, not measured up the price range. The two
+    diverge badly on a peaky tariff, and the range version was wrong in a way that
+    made this sensor useless for the job it exists for: one 58p evening spike
+    stretches the range so far that "a third of the way up" lands at 31p, and
+    two thirds of an Agile day comes out cheap. The card's own description said
+    "cheapest third of the planning horizon", which is the ranked reading -- so
+    the description was right and the arithmetic was not.
+    """
+    threshold = coordinator.price_percentile("import")
     price = coordinator.price_now("import")
-    if not stats or price is None:
+    if threshold is None or price is None:
         return None
-    low = stats["min"]
-    high = stats["max"]
-    if high <= low:
-        return False
-    return (price - low) / (high - low) <= 0.34
+    return price <= threshold
 
 
 async def async_setup_entry(

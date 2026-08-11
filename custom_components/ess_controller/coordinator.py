@@ -43,6 +43,7 @@ from .adjustments import (
 from .const import (
     ADAPTER_GENERIC,
     ADAPTER_SOLAX_MODBUS,
+    CHEAP_SLOT_FRACTION,
     CONF_AGILE_PREDICT,
     CONF_AGILE_PREDICT_EXPORT,
     CONF_BATTERY_CAPACITY,
@@ -155,7 +156,7 @@ from .models import (
     SiteState,
     SlotAction,
 )
-from .optimiser.dp import OptimiserSettings, optimise
+from .optimiser.dp import OptimiserSettings, optimise, percentile
 from .performance import PerformanceSummary, SelfUseShadow, SlotRecord, summarise
 from .performance_store import PerformanceStore
 from .runtime import RuntimeSettings, RuntimeStore
@@ -1932,6 +1933,25 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # for and the only one the forecast is scored against.
             "price_forecast": self.price_forecast if direction == "import" else None,
         }
+
+    def price_percentile(
+        self, direction: str = "import", fraction: float = CHEAP_SLOT_FRACTION
+    ) -> float | None:
+        """The price at ``fraction`` of the way up the remaining horizon.
+
+        A *rank* on the slots, not a position in the price range. Those are very
+        different on a peaky tariff: one 58p evening spike stretches the range so
+        far that a third of the way up it lands at 31p, and two thirds of an Agile
+        day come out "cheap" -- which is no use at all for deciding when to run a
+        dishwasher. A third of the *slots* is the cheapest eight hours of a
+        day, whatever shape the prices are.
+        """
+        series = self._import_prices if direction == "import" else self._export_prices
+        now = dt_util.utcnow()
+        prices = [s.price for s in series.slots if s.end > now]
+        if not prices:
+            return None
+        return percentile(prices, fraction)
 
     def diagnostics(self) -> dict[str, Any]:
         """Everything needed to debug a plan, for the diagnostics download."""

@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.14.2"
+VERSION: Final = "0.14.3"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -169,6 +169,10 @@ CONF_APPLIANCE_CONTROL: Final = "appliance_control"
 
 # Prebuilt dashboard
 CONF_CREATE_DASHBOARD: Final = "create_dashboard"
+
+# What counts as a "cheap" half-hour for flexible loads: the cheapest third of
+# the priced horizon, as a fraction of the slots rather than of the price range.
+CHEAP_SLOT_FRACTION: Final = 1.0 / 3.0
 
 # Performance history
 CONF_LOG_RETENTION_DAYS: Final = "log_retention_days"

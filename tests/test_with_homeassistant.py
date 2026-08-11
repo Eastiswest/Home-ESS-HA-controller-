@@ -1709,3 +1709,79 @@ class TestTheCurrentSlotDoesNotChurn:
         await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=30))
         command = coordinator._resolve_command(ha_dt.utcnow())
         assert command.action is SlotAction.CHARGE
+
+
+class TestCheapSlotIsRanked:
+    """ "Cheap slot" measured position in the price *range*, not rank among slots.
+
+    On a peaky tariff those diverge badly: one 58p evening spike stretches the
+    range so far that a third of the way up lands at 31p, and two thirds of an
+    Agile day comes out "cheap" -- useless for deciding when to run a dishwasher.
+    The card's own description said "cheapest third of the planning horizon",
+    which is the ranked reading, so the description was right and the arithmetic
+    was not.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _prices(coordinator, prices):
+        """Replace the import series with a horizon of known prices."""
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff.base import PriceSeries
+
+        start = ha_dt.utcnow().replace(minute=0, second=0, microsecond=0)
+        slots = [
+            PriceSlot(
+                start=start + timedelta(minutes=30 * i),
+                end=start + timedelta(minutes=30 * (i + 1)),
+                price=price,
+            )
+            for i, price in enumerate(prices)
+        ]
+        coordinator._import_prices = PriceSeries(slots)
+
+    async def test_a_single_spike_does_not_make_the_day_cheap(self, hass):
+        coordinator = await self._coordinator(hass)
+        # Eleven half-hours at 20-30p and one at 70p. Under the range reading the
+        # threshold was 20 + (70-20)/3 = 37p and every ordinary slot was "cheap".
+        self._prices(coordinator, [20.0, 22.0, 24.0, 26.0, 28.0, 30.0] * 2 + [70.0])
+        threshold = coordinator.price_percentile("import")
+        assert threshold is not None
+        assert threshold < 30.0
+
+    async def test_roughly_a_third_of_the_slots_qualify(self, hass):
+        coordinator = await self._coordinator(hass)
+        prices = [float(p) for p in range(10, 70, 2)]
+        self._prices(coordinator, prices)
+        threshold = coordinator.price_percentile("import")
+        cheap = [p for p in prices if p <= threshold]
+        assert 0.25 <= len(cheap) / len(prices) <= 0.42
+
+    async def test_a_flat_tariff_has_a_threshold_at_that_price(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._prices(coordinator, [24.0] * 12)
+        assert coordinator.price_percentile("import") == pytest.approx(24.0)
+
+    async def test_no_prices_means_no_answer(self, hass):
+        from custom_components.ess_controller.tariff.base import PriceSeries
+
+        coordinator = await self._coordinator(hass)
+        coordinator._import_prices = PriceSeries([])
+        assert coordinator.price_percentile("import") is None
+
+    async def test_the_entity_publishes_the_threshold_it_used(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._prices(coordinator, [20.0, 30.0, 40.0, 50.0])
+        state = hass.states.get("binary_sensor.ai_ess_controller_cheap_import_slot")
+        assert state is not None
+        assert "cheap_at_or_below" in state.attributes

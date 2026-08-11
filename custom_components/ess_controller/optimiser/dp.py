@@ -238,7 +238,7 @@ SPILL_TIE_BREAK = 0.01
 TERMINAL_MEDIAN_FRACTION = 0.5
 
 
-def _percentile(values: list[float], fraction: float) -> float:
+def percentile(values: list[float], fraction: float) -> float:
     """Linear-interpolated percentile, so a short horizon still gives an answer."""
     if not values:
         return 0.0
@@ -313,7 +313,7 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
     prices = [s.import_price for s in slots]
     if settings.terminal_mode == TERMINAL_MODE_HORIZON_MEAN:
         return max(sum(prices) / len(prices), 0.0)
-    return max(_percentile(prices, TERMINAL_MEDIAN_FRACTION), 0.0)
+    return max(percentile(prices, TERMINAL_MEDIAN_FRACTION), 0.0)
 
 
 def optimise(
