@@ -160,6 +160,20 @@ export_performance:
       selector:
         boolean:
 
+rebuild_dashboard:
+  name: Rebuild the dashboard
+  description: >-
+    Replace the ESS Controller dashboard in the sidebar with a freshly generated
+    one. Use this after an upgrade to pick up a new layout, or if you have broken
+    or emptied yours. It discards any edits you made to that dashboard.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Target one controller. Omit to rebuild for all of them.
+      required: false
+      selector:
+        text:
+
 generate_dashboard:
   name: Generate dashboard configuration
   description: >-

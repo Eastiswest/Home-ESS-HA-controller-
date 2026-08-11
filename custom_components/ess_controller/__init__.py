@@ -32,6 +32,7 @@ from .const import (
     SERVICE_CLEAR_OVERRIDE,
     SERVICE_EXPORT_PERFORMANCE,
     SERVICE_GENERATE_DASHBOARD,
+    SERVICE_REBUILD_DASHBOARD,
     SERVICE_RECOMMEND_TARIFFS,
     SERVICE_REPLAN,
     SERVICE_RESET_LEARNING,
@@ -292,6 +293,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
             results[coordinator.entry.entry_id] = payload
         return {"dashboards": results}
 
+    async def async_rebuild_dashboard(call: ServiceCall) -> ServiceResponse:
+        """Replace the sidebar dashboard with a freshly generated one.
+
+        The same thing the Rebuild dashboard button does, reachable without having
+        to find it: the button carries ``EntityCategory.CONFIG``, so Home Assistant
+        files it away in a collapsed Configuration block on the device page where
+        nobody looks. Discards edits, deliberately -- this is the "give me the
+        current layout back" action.
+        """
+        results: dict[str, Any] = {}
+        for coordinator in _coordinators(hass, call):
+            results[
+                coordinator.entry.entry_id
+            ] = await coordinator.async_create_dashboard()
+        return {"rebuilt": results}
+
     hass.services.async_register(
         DOMAIN, SERVICE_REPLAN, async_replan, schema=ENTRY_ONLY_SCHEMA
     )
@@ -303,6 +320,13 @@ def _async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_LEARNING, async_reset_learning, schema=ENTRY_ONLY_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REBUILD_DASHBOARD,
+        async_rebuild_dashboard,
+        schema=ENTRY_ONLY_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,

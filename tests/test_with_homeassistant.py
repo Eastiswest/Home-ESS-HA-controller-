@@ -1271,3 +1271,69 @@ class TestRebuildButtonAlwaysWins:
             panel_mod.build_for_entry = original
 
         assert (await self._store(hass).async_load(False))["title"] == "Newer"
+
+
+class TestRebuildIsReachable:
+    """There has to be a way to rebuild that does not depend on finding a button.
+
+    The button carries EntityCategory.CONFIG, so Home Assistant files it away in a
+    collapsed Configuration block on the device page. The first person to need it
+    could not find it, and generate_dashboard -- the only dashboard service that
+    existed -- returns YAML rather than rebuilding anything.
+    """
+
+    async def _setup(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        _lovelace(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        await hass.async_block_till_done()
+
+    async def test_the_service_exists(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        assert hass.services.has_service(DOMAIN, "rebuild_dashboard")
+
+    async def test_calling_it_replaces_the_stored_dashboard(self, hass):
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+
+        await self._setup(hass)
+        store = hass.data[LOVELACE_DATA].dashboards["ess-controller"]
+        wrecked = await store.async_load(False)
+        wrecked["views"] = [{"title": "Wrecked", "path": "wrecked", "cards": []}]
+        await store.async_save(wrecked)
+
+        await hass.services.async_call(
+            DOMAIN, "rebuild_dashboard", {}, blocking=True, return_response=True
+        )
+        # Re-fetch: a reseed installs a fresh LovelaceStorage, so the object held
+        # from before the call still carries the old data in memory.
+        fresh = hass.data[LOVELACE_DATA].dashboards["ess-controller"]
+        rebuilt = await fresh.async_load(False)
+        assert next(v["path"] for v in rebuilt["views"]) == "overview"
+
+    async def test_it_reports_what_it_did(self, hass):
+        await self._setup(hass)
+        response = await hass.services.async_call(
+            DOMAIN, "rebuild_dashboard", {}, blocking=True, return_response=True
+        )
+        assert list(response["rebuilt"].values()) == ["installed"]
+
+    async def test_the_button_is_on_the_settings_view(self, hass):
+        """So next time it is somewhere a person would actually look."""
+        from custom_components.ess_controller.panel import build_for_entry
+
+        await self._setup(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        config = build_for_entry(hass, entry)
+        settings = next(v for v in config["views"] if v["path"] == "settings")
+        targets = [
+            card.get("entity")
+            for section in settings["sections"]
+            for card in section["cards"]
+        ]
+        assert any(isinstance(t, str) and "rebuild_dashboard" in t for t in targets), (
+            targets
+        )

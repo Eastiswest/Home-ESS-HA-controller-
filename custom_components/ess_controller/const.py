@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.11.1"
+VERSION: Final = "0.12.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -290,6 +290,10 @@ SERVICE_RESET_LEARNING: Final = "reset_learning"
 SERVICE_RECOMMEND_TARIFFS: Final = "recommend_tariffs"
 SERVICE_EXPORT_PERFORMANCE: Final = "export_performance"
 SERVICE_GENERATE_DASHBOARD: Final = "generate_dashboard"
+# Distinct from generate_dashboard, which only *returns* YAML. Rebuilding is the
+# thing people actually want, and until this existed the only way to do it was to
+# find a button that Home Assistant hides in a collapsed Configuration block.
+SERVICE_REBUILD_DASHBOARD: Final = "rebuild_dashboard"
 
 ATTR_ACTION: Final = "action"
 ATTR_DURATION: Final = "duration"

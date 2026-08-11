@@ -1076,7 +1076,18 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
                     )
                     if anything
                     else None,
-                    *_actions(["replan", "clear_override", "reset_learning"], resolved),
+                    *_actions(
+                        [
+                            "replan",
+                            "clear_override",
+                            "reset_learning",
+                            # Home Assistant files this away in a collapsed
+                            # Configuration block on the device page, where the
+                            # first person to need it could not find it.
+                            "create_dashboard",
+                        ],
+                        resolved,
+                    ),
                 ],
             ),
         ],
