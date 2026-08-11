@@ -352,6 +352,7 @@ def optimise(
                 soc_start=soc_start,
                 soc_end=soc_end,
                 cost=flow.cost,
+                price_is_forecast=slot.price_is_forecast,
             )
         )
         total_cost += flow.cost
@@ -412,6 +413,7 @@ def _simulate(
                 soc_start=soc_start,
                 soc_end=battery.energy_to_soc(energy),
                 cost=flow.cost,
+                price_is_forecast=slot.price_is_forecast,
             )
         )
         total += flow.cost

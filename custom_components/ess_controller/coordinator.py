@@ -42,6 +42,8 @@ from .adjustments import (
 from .const import (
     ADAPTER_GENERIC,
     ADAPTER_SOLAX_MODBUS,
+    CONF_AGILE_PREDICT,
+    CONF_AGILE_PREDICT_EXPORT,
     CONF_BATTERY_CAPACITY,
     CONF_BATTERY_CAPACITY_ENTITY,
     CONF_BATTERY_HEALTH_ENTITY,
@@ -83,6 +85,8 @@ from .const import (
     CONF_TERMINAL_VALUE_MODE,
     CONF_TERMINAL_VALUE_RATE,
     CONF_WEATHER_ENTITY,
+    DEFAULT_AGILE_PREDICT,
+    DEFAULT_AGILE_PREDICT_EXPORT,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_CHARGE_EFFICIENCY,
     DEFAULT_DISCHARGE_EFFICIENCY,
@@ -155,6 +159,7 @@ from .shifting import (
     parse_shiftable_loads,
     place_loads,
 )
+from .tariff import agile_predict
 from .tariff.base import PriceSeries
 from .tariff.factory import build_provider
 from .tariff.octopus import OctopusApiError
@@ -166,6 +171,14 @@ _SLOT = timedelta(minutes=SLOT_MINUTES)
 # Weather and solar forecasts change slowly; refetching every cycle would spam
 # the upstream integration for no benefit.
 FORECAST_REFRESH = timedelta(minutes=20)
+
+
+def _slot_is_forecast(series: PriceSeries, start: datetime) -> bool:
+    """Whether the price covering ``start`` is predicted rather than announced."""
+    for slot in series:
+        if slot.start <= start < slot.end:
+            return slot.is_forecast
+    return False
 
 
 class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -210,6 +223,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._plan_error: str | None = None
         self.sessions: list[SessionEvent] = []
         self.adjustment_result: AdjustmentResult | None = None
+        # What AgilePredict contributed this cycle, and how it is doing. None
+        # when the feature is off, so diagnostics can tell "disabled" from
+        # "enabled and failing".
+        self.price_forecast: dict[str, Any] | None = None
         self.outage: outage_mod.OutageAssessment = outage_mod.OutageAssessment()
         self.placements: list[LoadPlacement] = []
         self._slot_marks: dict[datetime, dict[str, Any]] = {}
@@ -805,6 +822,131 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         series = build_forecast_series(attribute_sets)
         return series if series else None
 
+    async def _async_apply_price_forecast(
+        self,
+        import_series: PriceSeries,
+        export_series: PriceSeries,
+        now: datetime,
+        horizon_end: datetime,
+    ) -> int:
+        """Fill the unannounced tail from AgilePredict, if the user enabled it.
+
+        Merged *after* the real prices and never over them: ``PriceSeries.merge``
+        lets later sources win, so predicted slots are trimmed to start where the
+        announced run ends. Getting that wrong would replace a known price with a
+        guess, which is the one outcome worse than no forecast at all.
+
+        Returns the number of slots the prediction supplied, and never raises: an
+        unreachable third-party service must degrade to persistence, not stop the
+        plan.
+        """
+        if not self.options.get(CONF_AGILE_PREDICT, DEFAULT_AGILE_PREDICT):
+            self.price_forecast = None
+            return 0
+
+        region = self.options.get(CONF_OCTOPUS_REGION)
+        if not region:
+            self.price_forecast = {"available": False, "error": "no region configured"}
+            return 0
+
+        known_end = import_series.known_until(now) or import_series.end or now
+        if known_end >= horizon_end:
+            # Everything is announced already. Still worth scoring the forecast
+            # against reality, but not worth a request to do it.
+            self.price_forecast = {"available": True, "used": 0, "reason": "all announced"}
+            return 0
+
+        # Even acquiring the session can fail, and an optional price forecast must
+        # never be the reason a plan does not happen.
+        try:
+            session = async_get_clientsession(self.hass)
+        except Exception as err:  # degrade, never propagate
+            _LOGGER.warning("No HTTP session for AgilePredict (%s)", err)
+            self.price_forecast = {
+                "available": False,
+                "region": region,
+                "error": f"no http session: {err}",
+                "error_kind": agile_predict.KIND_UNREACHABLE,
+            }
+            return 0
+
+        state: dict[str, Any] = {"available": True, "region": region}
+        added = 0
+        try:
+            slots = await agile_predict.async_fetch_forecast(
+                session,
+                region,
+                days=agile_predict.days_needed(now, horizon_end),
+                until=horizon_end,
+            )
+        except agile_predict.AgilePredictError as err:
+            _LOGGER.warning(
+                "AgilePredict unavailable (%s); falling back to persistence", err
+            )
+            self.price_forecast = {
+                "available": False,
+                "region": region,
+                "error": str(err),
+                "error_kind": err.kind,
+            }
+            return 0
+
+        # Score against the announced window before trimming: that overlap is
+        # what says whether the model is any good here, and a large signed bias
+        # is how a units or VAT mismatch announces itself.
+        state["accuracy"] = agile_predict.compare_with_actual(
+            slots, list(import_series)
+        )
+
+        future = [slot for slot in slots if slot.start >= known_end]
+        if future:
+            import_series.merge(future)
+            added = len(future)
+        state["used"] = added
+        state["until"] = (
+            dt_util.as_local(future[-1].end).isoformat() if future else None
+        )
+
+        if self.options.get(CONF_AGILE_PREDICT_EXPORT, DEFAULT_AGILE_PREDICT_EXPORT):
+            state["export"] = await self._async_forecast_export(
+                session, export_series, region, now, horizon_end
+            )
+
+        self.price_forecast = state
+        return added
+
+    async def _async_forecast_export(
+        self,
+        session: Any,
+        export_series: PriceSeries,
+        region: str,
+        now: datetime,
+        horizon_end: datetime,
+    ) -> dict[str, Any]:
+        """Same again for Agile Outgoing, which the API serves via ``export=true``.
+
+        Separate and separately switched: plenty of people (including this
+        project's first user) are on Agile import with no export tariff at all,
+        and predicting a price for energy nobody buys would be noise.
+        """
+        known_end = export_series.known_until(now) or export_series.end or now
+        if known_end >= horizon_end:
+            return {"used": 0, "reason": "all announced"}
+        try:
+            slots = await agile_predict.async_fetch_forecast(
+                session,
+                region,
+                days=agile_predict.days_needed(now, horizon_end),
+                export=True,
+                until=horizon_end,
+            )
+        except agile_predict.AgilePredictError as err:
+            return {"used": 0, "error": str(err), "error_kind": err.kind}
+        future = [slot for slot in slots if slot.start >= known_end]
+        if future:
+            export_series.merge(future)
+        return {"used": len(future)}
+
     async def _async_build_horizon(
         self, now: datetime
     ) -> tuple[list[HorizonSlot], str | None]:
@@ -824,11 +966,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return [], "import tariff returned no prices"
 
         # Agile publishes tomorrow's prices around 16:00, so for most of the day
-        # the horizon runs past known data. Extrapolate the remainder from the
-        # same time of day, flagged so the UI can show where certainty ends.
+        # the horizon runs past known data. Two ways to fill the tail, best
+        # first: AgilePredict's model, then persistence for whatever it does not
+        # reach. Both are flagged so the UI can show where certainty ends.
+        predicted = await self._async_apply_price_forecast(
+            import_series, export_series, now, horizon_end
+        )
         extended = import_series.extend_by_persistence(horizon_end, now)
+        parts = []
+        if predicted:
+            parts.append(f"{predicted} slots predicted")
         if extended:
-            note = f"{extended} slots extrapolated"
+            parts.append(f"{extended} slots extrapolated")
+        if parts:
+            note = ", ".join(parts)
         export_series.extend_by_persistence(horizon_end, now)
 
         # Keep the real tariff before incentives so the UI can show both.
@@ -890,6 +1041,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     export_price=export_price,
                     pv_kwh=sun.kwh,
                     load_kwh=demand.kwh,
+                    # Declared on HorizonSlot from the start and never populated,
+                    # which only mattered once there was a forecast worth telling
+                    # apart from an announced price.
+                    price_is_forecast=_slot_is_forecast(import_series, start),
                 )
             )
 
@@ -1527,6 +1682,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 dt_util.as_local(known_until).isoformat() if known_until else None
             ),
             "extrapolated_slots": sum(1 for s in upcoming if s.is_forecast),
+            # Only on import, because that is the only direction the plan pays
+            # for and the only one the forecast is scored against.
+            "price_forecast": self.price_forecast if direction == "import" else None,
         }
 
     def diagnostics(self) -> dict[str, Any]:

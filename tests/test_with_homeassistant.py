@@ -18,6 +18,7 @@ Home Assistant installed.
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -607,3 +608,272 @@ class TestReviewMenu:
             result["flow_id"], {"next_step_id": "finish"}
         )
         assert not hass.data.get(DATA_PARTIAL, {}).get(DOMAIN)
+
+
+class _ShortTariff:
+    """A tariff that has only announced the next two hours.
+
+    Two hours of real prices against a horizon of a day or more: exactly the state
+    Agile is in from midnight until the afternoon release, and the state in which
+    the tail has to come from somewhere.
+    """
+
+    name = "short"
+    available = True
+    ANNOUNCED_SLOTS = 4
+
+    async def async_fetch(self, now, horizon_end):
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff.base import PriceSeries
+
+        start = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+        return PriceSeries(
+            [
+                PriceSlot(
+                    start=start + timedelta(minutes=30 * n),
+                    end=start + timedelta(minutes=30 * (n + 1)),
+                    # Distinct from any forecast marker the tests inject.
+                    price=23.0,
+                )
+                for n in range(self.ANNOUNCED_SLOTS)
+            ]
+        )
+
+    async def async_close(self):
+        return None
+
+    def describe(self):
+        return {"provider": self.name}
+
+
+class TestAgilePredictWiring:
+    """The forecast path, through a real coordinator with the network stubbed.
+
+    The parsing is covered without Home Assistant; what needs a real instance is
+    the wiring: that the option gates it, that an unreachable service still
+    produces a plan, and that predicted prices land in the horizon flagged as
+    predicted rather than passed off as announced.
+    """
+
+    async def _coordinator(self, hass, *, short_window: bool = False, **options):
+        """A live coordinator, optionally with a tariff that runs out early.
+
+        The default setup is a fixed rate, which by definition prices the whole
+        horizon -- so there is no unannounced tail and the forecast correctly does
+        nothing. ``short_window`` swaps in a provider that knows only the next two
+        hours, which is the situation Agile is in for most of the day and the only
+        one where any of this matters.
+        """
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        if options:
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, **options}
+            )
+            await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        if short_window:
+            coordinator._import_provider = _ShortTariff()
+        return coordinator
+
+    @staticmethod
+    def _stub_session(monkeypatch) -> None:
+        """This harness has no http component, so there is no client session.
+
+        Stubbed rather than worked around, because the fetch itself is what these
+        tests are about -- and the coordinator's own handling of a missing session
+        is covered separately.
+        """
+        from custom_components.ess_controller import coordinator as coordinator_mod
+
+        monkeypatch.setattr(
+            coordinator_mod, "async_get_clientsession", lambda hass: object()
+        )
+
+    async def test_off_by_default_and_nothing_is_recorded(self, hass):
+        """Nobody acquires a third-party dependency without saying yes."""
+        coordinator = await self._coordinator(hass)
+        assert coordinator.price_forecast is None
+
+    async def test_enabled_without_a_region_says_so_rather_than_calling(self, hass):
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+
+        coordinator = await self._coordinator(
+            hass, short_window=True, **{CONF_AGILE_PREDICT: True, "octopus_region": None}
+        )
+        await coordinator.async_refresh()
+        state = coordinator.price_forecast
+        assert state is not None
+        assert state["available"] is False
+        assert "region" in state["error"]
+
+    async def test_an_unreachable_service_still_produces_a_plan(self, hass, monkeypatch):
+        """The whole point of the fallback: the plan must not depend on it."""
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+        from custom_components.ess_controller.tariff import agile_predict
+
+        async def boom(*args, **kwargs):
+            raise agile_predict.AgilePredictError("down", agile_predict.KIND_UNREACHABLE)
+
+        self._stub_session(monkeypatch)
+        monkeypatch.setattr(agile_predict, "async_fetch_forecast", boom)
+        coordinator = await self._coordinator(
+            hass, short_window=True, **{CONF_AGILE_PREDICT: True, "octopus_region": "C"}
+        )
+        await coordinator.async_refresh()
+        assert coordinator.plan is not None
+        assert coordinator.plan.slots
+        assert coordinator.price_forecast["error_kind"] == "unreachable"
+
+    async def test_predicted_prices_reach_the_plan_and_are_flagged(
+        self, hass, monkeypatch
+    ):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff import agile_predict
+
+        # A distinctive price no persistence extrapolation could invent.
+        marker = 42.5
+
+        async def fake(session, region, **kwargs):
+            start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+            return [
+                PriceSlot(
+                    start=start + timedelta(minutes=30 * n),
+                    end=start + timedelta(minutes=30 * (n + 1)),
+                    price=marker,
+                    is_forecast=True,
+                )
+                for n in range(96)
+            ]
+
+        self._stub_session(monkeypatch)
+        monkeypatch.setattr(agile_predict, "async_fetch_forecast", fake)
+        coordinator = await self._coordinator(
+            hass, short_window=True, **{CONF_AGILE_PREDICT: True, "octopus_region": "C"}
+        )
+        await coordinator.async_refresh()
+
+        state = coordinator.price_forecast
+        assert state["available"] is True
+        assert state["used"] > 0
+
+        predicted = [s for s in coordinator.plan.slots if s.price_is_forecast]
+        assert predicted, "no slot was marked as predicted"
+        assert all(s.import_price == marker for s in predicted)
+        # And the announced ones kept their own prices.
+        announced = [s for s in coordinator.plan.slots if not s.price_is_forecast]
+        assert all(s.import_price != marker for s in announced)
+
+    async def test_the_plan_note_reports_what_was_predicted(self, hass, monkeypatch):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff import agile_predict
+
+        async def fake(session, region, **kwargs):
+            start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+            return [
+                PriceSlot(
+                    start=start + timedelta(minutes=30 * n),
+                    end=start + timedelta(minutes=30 * (n + 1)),
+                    price=9.0,
+                    is_forecast=True,
+                )
+                for n in range(96)
+            ]
+
+        self._stub_session(monkeypatch)
+        monkeypatch.setattr(agile_predict, "async_fetch_forecast", fake)
+        coordinator = await self._coordinator(
+            hass, short_window=True, **{CONF_AGILE_PREDICT: True, "octopus_region": "C"}
+        )
+        await coordinator.async_refresh()
+        stats = coordinator.price_stats("import")
+        assert stats["price_forecast"]["used"] > 0
+
+    async def test_the_option_appears_in_the_flow_for_an_octopus_tariff(self, hass):
+        """A switch nobody can find is a switch nobody has."""
+        from custom_components.ess_controller.config_flow import EssOptionsFlow
+        from custom_components.ess_controller.const import (
+            CONF_AGILE_PREDICT,
+            CONF_IMPORT_PROVIDER,
+            PROVIDER_OCTOPUS_API,
+        )
+
+        await async_setup_component_if_needed(hass)
+        flow = EssOptionsFlow()
+        schema = flow._direction_schema(
+            {CONF_IMPORT_PROVIDER: PROVIDER_OCTOPUS_API}, "import"
+        )
+        keys = {str(key.schema) for key in schema.schema}
+        assert CONF_AGILE_PREDICT in keys
+
+    async def test_the_option_is_hidden_for_a_fixed_tariff(self, hass):
+        """There is no unannounced tail on a fixed rate to predict."""
+        from custom_components.ess_controller.config_flow import EssOptionsFlow
+        from custom_components.ess_controller.const import (
+            CONF_AGILE_PREDICT,
+            CONF_IMPORT_PROVIDER,
+            PROVIDER_FIXED,
+        )
+
+        await async_setup_component_if_needed(hass)
+        flow = EssOptionsFlow()
+        schema = flow._direction_schema({CONF_IMPORT_PROVIDER: PROVIDER_FIXED}, "import")
+        keys = {str(key.schema) for key in schema.schema}
+        assert CONF_AGILE_PREDICT not in keys
+
+
+async def async_setup_component_if_needed(hass) -> None:
+    from homeassistant.setup import async_setup_component
+
+    await async_setup_component(hass, DOMAIN, {})
+
+
+class TestAgilePredictSessionFailure:
+    """A missing HTTP session must not be able to stop a plan.
+
+    This is not hypothetical: the first version created the session before the
+    try block, and in an instance without the http component that exception went
+    all the way out of the coordinator update -- no plan at all, because an
+    optional price forecast could not get a socket.
+    """
+
+    async def test_no_session_degrades_instead_of_raising(self, hass, monkeypatch):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller import coordinator as coordinator_mod
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+
+        def no_session(hass):
+            raise RuntimeError("no http component")
+
+        monkeypatch.setattr(coordinator_mod, "async_get_clientsession", no_session)
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, CONF_AGILE_PREDICT: True, "octopus_region": "C"},
+        )
+        await hass.async_block_till_done()
+
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._import_provider = _ShortTariff()
+        await coordinator.async_refresh()
+
+        assert coordinator.last_update_success is True
+        assert coordinator.plan is not None
+        assert coordinator.plan.slots
+        assert coordinator.price_forecast["available"] is False
+        assert coordinator.price_forecast["error_kind"] == "unreachable"

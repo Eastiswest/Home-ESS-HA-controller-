@@ -72,13 +72,15 @@
           "octopus_account": "Octopus account number (optional)",
           "import_tou_schedule": "Time-of-use schedule",
           "import_fixed_rate": "Fixed or fallback rate",
-          "import_price_scale": "Price units"
+          "import_price_scale": "Price units",
+          "agile_predict": "Predict unannounced prices (AgilePredict)"
         },
         "data_description": {
           "import_rate_entity": "Entities carrying a list of forward rates, such as the Octopus Energy integration's rate events.",
           "octopus_account": "Supply this with an API key and the tariff codes will be looked up for you.",
           "import_tou_schedule": "For example 00:30-04:30=9.5,04:30-00:30=28.0 in local time.",
-          "import_fixed_rate": "Used as a fallback if the chosen source returns no prices."
+          "import_fixed_rate": "Used as a fallback if the chosen source returns no prices.",
+          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
         }
       },
       "tariff_export": {
@@ -92,7 +94,11 @@
           "octopus_account": "Octopus account number (optional)",
           "export_tou_schedule": "Time-of-use schedule",
           "export_fixed_rate": "Fixed or fallback rate",
-          "export_price_scale": "Price units"
+          "export_price_scale": "Price units",
+          "agile_predict_export": "Predict unannounced export prices (AgilePredict)"
+        },
+        "data_description": {
+          "agile_predict_export": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
         }
       },
       "forecast": {
@@ -334,7 +340,11 @@
           "octopus_account": "Octopus account number (optional)",
           "import_tou_schedule": "Time-of-use schedule",
           "import_fixed_rate": "Fixed or fallback rate",
-          "import_price_scale": "Price units"
+          "import_price_scale": "Price units",
+          "agile_predict": "Predict unannounced prices (AgilePredict)"
+        },
+        "data_description": {
+          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
         }
       },
       "tariff_export": {
@@ -348,7 +358,11 @@
           "octopus_account": "Octopus account number (optional)",
           "export_tou_schedule": "Time-of-use schedule",
           "export_fixed_rate": "Fixed or fallback rate",
-          "export_price_scale": "Price units"
+          "export_price_scale": "Price units",
+          "agile_predict_export": "Predict unannounced export prices (AgilePredict)"
+        },
+        "data_description": {
+          "agile_predict_export": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
         }
       },
       "forecast": {

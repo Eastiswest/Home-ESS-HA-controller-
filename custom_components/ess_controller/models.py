@@ -156,6 +156,14 @@ class PlanSlot:
     cost: float
     """Net cost for this slot in minor units (negative = earning)."""
 
+    price_is_forecast: bool = False
+    """True when this slot was priced from a prediction, not an announced rate.
+
+    Carried through from the horizon so the dashboard can mark the rows where
+    certainty ends, and so a plan can be judged on how much of it rested on a
+    guess. Defaulted, because most of the horizon is announced.
+    """
+
     @property
     def duration_hours(self) -> float:
         return (self.end - self.start).total_seconds() / 3600.0
@@ -193,6 +201,7 @@ class PlanSlot:
             "soc_start": round(self.soc_start, 1),
             "soc_end": round(self.soc_end, 1),
             "cost": round(self.cost, 2),
+            "price_is_forecast": self.price_is_forecast,
         }
 
 

@@ -460,6 +460,43 @@ detected automatically; override it under *Price units* if the guess is wrong.
 When you add an export tariff later, switch the export provider and the optimiser
 starts arbitraging into it — no rewrite needed.
 
+#### Predicting the prices Octopus has not announced
+
+Octopus publishes tomorrow's Agile rates at about 16:00, so for most of the day
+the planning horizon runs past the end of real prices. Something has to fill the
+gap, and there are two options.
+
+By default it is **day-ahead persistence**: yesterday's price at the same time of
+day. That is honest and weak. It keeps the overnight trough and the evening peak
+roughly where they belong, and it knows nothing whatsoever about tomorrow's wind.
+
+Tick **Predict unannounced prices (AgilePredict)** on the import tariff step and
+the tail comes from [AgilePredict](https://agilepredict.com) instead — an
+ensemble model over weather and demand data, published per region, by the author
+of PV Opt. There is a matching switch on the export step for Agile Outgoing.
+
+Four things worth knowing:
+
+- **It never overwrites a real price.** Predicted slots are trimmed to begin
+  where the announced run ends. A guess replacing a known rate is the one outcome
+  worse than having no forecast at all.
+- **Predicted slots are marked.** They carry `price_is_forecast`, the plan table
+  shows the price with an asterisk, and the learner ignores them so one model's
+  error cannot compound into the next.
+- **It degrades to persistence.** If the service is down, slow, or returns
+  nonsense, the plan is built exactly as it was before and a warning goes in the
+  log. Nothing about the system depends on a free third-party service staying up.
+- **It scores itself.** AgilePredict returns a fortnight, so it always overlaps
+  the announced window. That overlap is free marking: `price_forecast.accuracy`
+  on the import price sensor carries the mean absolute error and the signed bias
+  over the slots where both a prediction and a real price exist. Look at it after
+  a week to decide whether it earns its place in your region.
+
+Off by default, because it is a call to somebody else's server and nobody should
+acquire one of those without saying yes to it. It needs your region letter, which
+the Octopus API provider already collects; on the Octopus-integration provider
+the region field appears next to the switch.
+
 ### Forecasting
 
 Point it at your solar forecast sensors (add both today and tomorrow to cover the

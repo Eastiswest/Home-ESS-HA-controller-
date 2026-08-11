@@ -425,10 +425,18 @@ def _plan_table(plan_entity: str, slots: int = PLAN_TABLE_SLOTS) -> str:
         "| Time | Price | Doing | SoC after |\n|---|---|---|---|\n"
         "{% for slot in slots[:" + str(slots) + "] %}"
         "| {{ as_timestamp(slot.start) | timestamp_custom('%H:%M', true) }} "
-        "| {{ '%.1f' | format(slot.import_price) }}p "
+        # A predicted price is marked rather than dressed up as announced: an
+        # asterisk costs a character and is the difference between "the plan says
+        # 4p at 2am" and "the plan guesses 4p at 2am".
+        "| {{ '%.1f' | format(slot.import_price) }}p"
+        "{{ '*' if slot.price_is_forecast else '' }} "
         "| {{ slot.action | replace('_', ' ') | capitalize }} "
         "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
-        "{% endfor %}{% endif %}"
+        "{% endfor %}"
+        "{% if slots | selectattr('price_is_forecast') | list | count %}\n"
+        "\\* predicted, not yet announced by Octopus\n"
+        "{% endif %}"
+        "{% endif %}"
     )
 
 

@@ -28,6 +28,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     ADAPTER_SOLAX_MODBUS,
     ADAPTERS,
+    CONF_AGILE_PREDICT,
+    CONF_AGILE_PREDICT_EXPORT,
     CONF_ALLOW_BATTERY_EXPORT,
     CONF_ALLOW_EXPORT,
     CONF_ALLOW_GRID_CHARGE,
@@ -107,6 +109,8 @@ from .const import (
     CONF_TERMINAL_VALUE_MODE,
     CONF_TERMINAL_VALUE_RATE,
     CONF_WEATHER_ENTITY,
+    DEFAULT_AGILE_PREDICT,
+    DEFAULT_AGILE_PREDICT_EXPORT,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BATTERY_COST,
     DEFAULT_BATTERY_EXPECTED_CYCLES,
@@ -417,6 +421,26 @@ class EssFlowMixin:
         elif provider == PROVIDER_TOU:
             key = CONF_IMPORT_TOU_SCHEDULE if is_import else CONF_EXPORT_TOU_SCHEDULE
             fields[_suggest(current, key, "00:30-04:30=9.5")] = selector.TextSelector()
+
+        # Predicted prices for the unannounced tail. Offered on any Octopus
+        # source, since AgilePredict forecasts the Agile rate itself and needs
+        # only the region -- but not on fixed or time-of-use tariffs, where there
+        # is no unannounced tail to predict.
+        if provider in (PROVIDER_OCTOPUS_API, PROVIDER_OCTOPUS_ENTITY):
+            predict_key = CONF_AGILE_PREDICT if is_import else CONF_AGILE_PREDICT_EXPORT
+            predict_default = (
+                DEFAULT_AGILE_PREDICT if is_import else DEFAULT_AGILE_PREDICT_EXPORT
+            )
+            fields[_suggest(current, predict_key, predict_default)] = (
+                selector.BooleanSelector()
+            )
+            # The region is collected with the Octopus product above, but a user
+            # on the Octopus integration's rate entities never sees that step, and
+            # the forecast cannot be fetched without it.
+            if provider == PROVIDER_OCTOPUS_ENTITY:
+                fields[_suggest(current, CONF_OCTOPUS_REGION, "C")] = _options(
+                    list(REGIONS), "region"
+                )
 
         rate_key = CONF_IMPORT_FIXED_RATE if is_import else CONF_EXPORT_FIXED_RATE
         rate_default = (

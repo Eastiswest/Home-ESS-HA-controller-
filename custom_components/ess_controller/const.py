@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.7.0"
+VERSION: Final = "0.8.0"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -104,6 +104,14 @@ CONF_OCTOPUS_EXPORT_TARIFF: Final = "octopus_export_tariff"
 CONF_OCTOPUS_REGION: Final = "octopus_region"
 CONF_OCTOPUS_API_KEY: Final = "octopus_api_key"
 CONF_OCTOPUS_ACCOUNT: Final = "octopus_account"
+
+# AgilePredict: predicted Agile prices for the slots Octopus has not announced.
+# Off by default -- it is a call to a third-party service, and nobody should
+# acquire one of those without saying yes to it.
+CONF_AGILE_PREDICT: Final = "agile_predict"
+CONF_AGILE_PREDICT_EXPORT: Final = "agile_predict_export"
+DEFAULT_AGILE_PREDICT: Final = False
+DEFAULT_AGILE_PREDICT_EXPORT: Final = False
 
 # Grid incentive schemes (Saving Sessions, free electricity / Power Up)
 CONF_SESSIONS_ENABLED: Final = "sessions_enabled"
