@@ -231,7 +231,7 @@
       "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
       "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
       "invalid_region": "Unknown Octopus region.",
-      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. You can list the real codes at https://api.octopus.energy/v1/products/ in a browser.",
+      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. The live list is on the Octopus products API endpoint, linked from the README.",
       "octopus_unauthorised": "Octopus rejected the API key. Check it, or clear it and the account number and use a product code plus region instead.",
       "octopus_http_error": "Octopus returned an error. Try again shortly; if it persists, check the product and tariff codes.",
       "octopus_bad_response": "Octopus returned something unreadable. Try again shortly."
@@ -466,7 +466,7 @@
       "octopus_tariff_required": "Provide either a full tariff code, or a product code plus region, or an account number and API key.",
       "octopus_account_failed": "Could not read that Octopus account. Check the account number and API key.",
       "invalid_region": "Unknown Octopus region.",
-      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. You can list the real codes at https://api.octopus.energy/v1/products/ in a browser.",
+      "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. The live list is on the Octopus products API endpoint, linked from the README.",
       "octopus_unauthorised": "Octopus rejected the API key. Check it, or clear it and the account number and use a product code plus region instead.",
       "octopus_http_error": "Octopus returned an error. Try again shortly; if it persists, check the product and tariff codes.",
       "octopus_bad_response": "Octopus returned something unreadable. Try again shortly."
@@ -502,24 +502,6 @@
         "horizon_mean": "Average price over the horizon (recommended)",
         "fixed": "A fixed value",
         "zero": "Worthless"
-      }
-    },
-    "region": {
-      "options": {
-        "A": "A — Eastern England",
-        "B": "B — East Midlands",
-        "C": "C — London",
-        "D": "D — Merseyside & North Wales",
-        "E": "E — West Midlands",
-        "F": "F — North East England",
-        "G": "G — North West England",
-        "H": "H — Southern England",
-        "J": "J — South East England",
-        "K": "K — South Wales",
-        "L": "L — South West England",
-        "M": "M — Yorkshire",
-        "N": "N — Southern Scotland",
-        "P": "P — Northern Scotland"
       }
     }
   },
@@ -845,7 +827,7 @@
         },
         "write_file": {
           "name": "Write a CSV file",
-          "description": "Also write the rows to config/ess_controller/performance_<entry>.csv and return the path."
+          "description": "Also write the rows to a CSV under config/ess_controller/, named after the config entry, and return the path."
         }
       }
     },

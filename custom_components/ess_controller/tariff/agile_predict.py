@@ -257,9 +257,7 @@ async def async_fetch_forecast(
                 f"invalid JSON from {url}: {err}", KIND_BAD_RESPONSE
             ) from err
 
-    return parse_forecast(
-        payload, scale_mode=scale_mode, after=after, until=until
-    )
+    return parse_forecast(payload, scale_mode=scale_mode, after=after, until=until)
 
 
 def compare_with_actual(
@@ -274,9 +272,7 @@ def compare_with_actual(
     """
     by_start = {slot.start: slot.price for slot in actual if not slot.is_forecast}
     pairs = [
-        (slot.price, by_start[slot.start])
-        for slot in forecast
-        if slot.start in by_start
+        (slot.price, by_start[slot.start]) for slot in forecast if slot.start in by_start
     ]
     if not pairs:
         return None

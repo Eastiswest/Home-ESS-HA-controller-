@@ -239,7 +239,9 @@ def _entities_card(
     under a heading reads as the same words twice. Dense numeric lists are the one
     place rows beat tiles -- fourteen tiles of settings is a lot of scrolling.
     """
-    rows = [{"entity": resolved[key], "name": label(key)} for key in keys if key in resolved]
+    rows = [
+        {"entity": resolved[key], "name": label(key)} for key in keys if key in resolved
+    ]
     if not rows:
         return None
     card: dict[str, Any] = {"type": "entities", "entities": rows, "state_color": True}
@@ -274,7 +276,9 @@ def _tile(key: str, resolved: dict[str, str], **extra: Any) -> dict[str, Any] | 
     return card
 
 
-def _tiles(keys: list[str], resolved: dict[str, str], **extra: Any) -> list[dict[str, Any]]:
+def _tiles(
+    keys: list[str], resolved: dict[str, str], **extra: Any
+) -> list[dict[str, Any]]:
     return _compact([_tile(key, resolved, **extra) for key in keys])
 
 
@@ -360,9 +364,7 @@ def _badge(key: str, resolved: dict[str, str], **extra: Any) -> dict[str, Any] |
 # ------------------------------------------------------------------- sections
 
 
-def _section(
-    heading: str, icon: str, cards: list[Any | None]
-) -> dict[str, Any] | None:
+def _section(heading: str, icon: str, cards: list[Any | None]) -> dict[str, Any] | None:
     """A grid section with a heading, or nothing if it would be empty.
 
     The heading is a card, so it cannot be what keeps a section alive: a section
@@ -582,11 +584,7 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
             _section(
                 "Next three hours",
                 "mdi:clock-outline",
-                [
-                    _markdown(_plan_table(plan, OVERVIEW_TABLE_SLOTS))
-                    if plan
-                    else None
-                ],
+                [_markdown(_plan_table(plan, OVERVIEW_TABLE_SLOTS)) if plan else None],
             ),
             _section(
                 "Control",
@@ -903,9 +901,7 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
                     )
                     if anything
                     else None,
-                    *_actions(
-                        ["replan", "clear_override", "reset_learning"], resolved
-                    ),
+                    *_actions(["replan", "clear_override", "reset_learning"], resolved),
                 ],
             ),
         ],

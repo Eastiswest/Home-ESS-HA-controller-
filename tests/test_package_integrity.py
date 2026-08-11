@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -284,6 +285,21 @@ class TestManifest:
         assert hacs["name"]
 
 
+def _all_strings(node, found=None) -> list[str]:
+    """Every leaf string in a translations document."""
+    if found is None:
+        found = []
+    if isinstance(node, str):
+        found.append(node)
+    elif isinstance(node, dict):
+        for value in node.values():
+            _all_strings(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _all_strings(value, found)
+    return found
+
+
 class TestTranslations:
     def test_strings_and_en_match(self):
         strings = json.loads((PACKAGE / "strings.json").read_text())
@@ -307,6 +323,35 @@ class TestTranslations:
             declared = set(entity_strings.get(platform, {}))
             missing = keys - declared
             assert not missing, f"{platform} missing translations for {sorted(missing)}"
+
+    def test_no_translation_string_contains_a_url(self):
+        """hassfest rejects them, and hassfest is what gates the release.
+
+        Three of these shipped: two copies of an Octopus error message with a link
+        to the products endpoint, which failed the hassfest job on every push. The
+        link belongs in the README, where it is allowed to be one.
+        """
+        for text in _all_strings(json.loads((PACKAGE / "strings.json").read_text())):
+            assert "http://" not in text, text
+            assert "https://" not in text, text
+
+    def test_no_translation_string_contains_markup(self):
+        """An angle bracket reads as HTML: `performance_<entry>.csv` failed on it."""
+        for text in _all_strings(json.loads((PACKAGE / "strings.json").read_text())):
+            assert "<" not in text and ">" not in text, text
+
+    def test_selector_option_keys_are_lowercase_slugs(self):
+        """hassfest requires [a-z0-9-_]+, so single uppercase letters are invalid.
+
+        The Octopus region codes are exactly that, which is why they now carry
+        their labels in the schema instead of here.
+        """
+        strings = json.loads((PACKAGE / "strings.json").read_text())
+        for name, block in strings.get("selector", {}).items():
+            for key in block.get("options", {}):
+                assert re.fullmatch(r"[a-z0-9_-]+", key), f"selector.{name}: {key!r}"
+                assert not key.startswith(("-", "_"))
+                assert not key.endswith(("-", "_"))
 
     def test_manifest_version_matches_the_constant(self):
         """Two places record the version, and a release checks both against the tag.

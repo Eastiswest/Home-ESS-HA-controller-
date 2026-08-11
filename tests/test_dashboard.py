@@ -329,9 +329,7 @@ class TestNames:
         """'On' next to a switch that is on is noise; the toggle already says so."""
         config = build_dashboard(resolved())
         tiles = {
-            card["entity"]: card
-            for card in walk_cards(config)
-            if card["type"] == "tile"
+            card["entity"]: card for card in walk_cards(config) if card["type"] == "tile"
         }
         switch = tiles[entity_id("optimiser_enabled")]
         assert switch["features"] == [{"type": "toggle"}]
@@ -414,8 +412,7 @@ class TestDegradation:
             for view in build_dashboard(resolved(key))["views"]:
                 one = {"views": [view]}
                 templated = any(
-                    entity_id(key) in card.get("content", "")
-                    for card in walk_cards(one)
+                    entity_id(key) in card.get("content", "") for card in walk_cards(one)
                 )
                 assert referenced_entities(one) or templated, (key, view["path"])
 

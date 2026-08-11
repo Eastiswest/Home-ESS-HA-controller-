@@ -147,7 +147,9 @@ class TestParseDegrades:
 
     @pytest.mark.parametrize("bad", [None, "12.0", {}, [], True])
     def test_a_non_numeric_price_is_skipped(self, bad):
-        mixed = payload([{"date_time": NOW.isoformat(), "agile_pred": bad}, entry(1, 9.0)])
+        mixed = payload(
+            [{"date_time": NOW.isoformat(), "agile_pred": bad}, entry(1, 9.0)]
+        )
         slots = ap.parse_forecast(mixed)
         assert [s.price for s in slots] == [9.0]
 
@@ -164,9 +166,7 @@ class TestParseDegrades:
 class TestTrimming:
     def test_until_drops_slots_past_the_horizon(self):
         prices = [entry(n, float(n)) for n in range(10)]
-        slots = ap.parse_forecast(
-            payload(prices), until=NOW + timedelta(hours=2)
-        )
+        slots = ap.parse_forecast(payload(prices), until=NOW + timedelta(hours=2))
         assert len(slots) == 4
         assert slots[-1].end <= NOW + timedelta(hours=2)
 

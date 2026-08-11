@@ -37,10 +37,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The same gates as CI, in the same order. They drifted once -- CI checked
+      # formatting and this did not -- so a tag could fail here for a reason that
+      # had nothing to do with whether the code worked.
       - name: Run the fast tests before publishing
         run: |
           pip install pytest ruff
           ruff check custom_components tests
+          ruff format --check custom_components tests
           python -m pytest tests/ -q
 
       - name: Publish the release

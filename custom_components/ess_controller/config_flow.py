@@ -175,6 +175,7 @@ from .tariff.octopus import (
     KIND_HTTP,
     KIND_NOT_FOUND,
     KIND_UNAUTHORISED,
+    REGION_NAMES,
     REGIONS,
     OctopusApiError,
     async_discover_tariffs,
@@ -242,6 +243,31 @@ def _options(values: list[str], key: str) -> selector.SelectSelector:
             translation_key=key,
         )
     )
+
+
+def _labelled(pairs: list[tuple[str, str]]) -> selector.SelectSelector:
+    """A dropdown whose labels are carried in the schema, not in translations.
+
+    Home Assistant requires translation keys to match ``[a-z0-9-_]+``, and the
+    Octopus region codes are single uppercase letters -- so a ``translation_key``
+    for them fails hassfest ("Invalid translation key 'A'"). Lowercasing the
+    option *values* instead would silently invalidate every existing entry, since
+    the stored value is the letter itself and goes straight into a tariff code.
+    Labels in the schema sidestep both.
+    """
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[
+                selector.SelectOptionDict(value=value, label=label)
+                for value, label in pairs
+            ],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _region_options() -> selector.SelectSelector:
+    return _labelled([(code, f"{code} — {REGION_NAMES[code]}") for code in REGIONS])
 
 
 # A mistyped product code and a dead network are different problems with
@@ -393,9 +419,7 @@ class EssFlowMixin:
             product_default = "OUTGOING-AGILE-24-10-01"
         return {
             _suggest(current, product_key, product_default): selector.TextSelector(),
-            _suggest(current, CONF_OCTOPUS_REGION, "C"): _options(
-                list(REGIONS), "region"
-            ),
+            _suggest(current, CONF_OCTOPUS_REGION, "C"): _region_options(),
             _suggest(current, tariff_key, None): selector.TextSelector(),
             _suggest(current, CONF_OCTOPUS_API_KEY, None): selector.TextSelector(
                 selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
@@ -438,9 +462,7 @@ class EssFlowMixin:
             # on the Octopus integration's rate entities never sees that step, and
             # the forecast cannot be fetched without it.
             if provider == PROVIDER_OCTOPUS_ENTITY:
-                fields[_suggest(current, CONF_OCTOPUS_REGION, "C")] = _options(
-                    list(REGIONS), "region"
-                )
+                fields[_suggest(current, CONF_OCTOPUS_REGION, "C")] = _region_options()
 
         rate_key = CONF_IMPORT_FIXED_RATE if is_import else CONF_EXPORT_FIXED_RATE
         rate_default = (

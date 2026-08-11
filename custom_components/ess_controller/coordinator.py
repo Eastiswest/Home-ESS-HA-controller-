@@ -853,7 +853,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if known_end >= horizon_end:
             # Everything is announced already. Still worth scoring the forecast
             # against reality, but not worth a request to do it.
-            self.price_forecast = {"available": True, "used": 0, "reason": "all announced"}
+            self.price_forecast = {
+                "available": True,
+                "used": 0,
+                "reason": "all announced",
+            }
             return 0
 
         # Even acquiring the session can fail, and an optional price forecast must
@@ -894,18 +898,14 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Score against the announced window before trimming: that overlap is
         # what says whether the model is any good here, and a large signed bias
         # is how a units or VAT mismatch announces itself.
-        state["accuracy"] = agile_predict.compare_with_actual(
-            slots, list(import_series)
-        )
+        state["accuracy"] = agile_predict.compare_with_actual(slots, list(import_series))
 
         future = [slot for slot in slots if slot.start >= known_end]
         if future:
             import_series.merge(future)
             added = len(future)
         state["used"] = added
-        state["until"] = (
-            dt_util.as_local(future[-1].end).isoformat() if future else None
-        )
+        state["until"] = dt_util.as_local(future[-1].end).isoformat() if future else None
 
         if self.options.get(CONF_AGILE_PREDICT_EXPORT, DEFAULT_AGILE_PREDICT_EXPORT):
             state["export"] = await self._async_forecast_export(
