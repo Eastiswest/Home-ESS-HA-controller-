@@ -624,10 +624,12 @@ Four deliberate properties:
   truncate to "AI ESS Controll...". Each entity gets a short name of its own, and
   the section heading above it carries the context instead. Rename any of them
   and your name is what the dashboard shows.
-- **It becomes yours.** It is an ordinary storage dashboard: edit it, rearrange
-  it, delete it. It is created *once* and never rewritten, so your changes stick
-  and a deleted dashboard stays deleted. Want it back? The **Rebuild dashboard**
-  button.
+- **It becomes yours, and it still gets better.** It is an ordinary storage
+  dashboard: edit it, rearrange it, delete it. Every generated copy is stamped
+  with a hash of itself, so an upgrade can tell its own untouched output from a
+  dashboard you have since changed: untouched ones are refreshed to the new
+  layout, edited ones are never written to again. A deleted dashboard stays
+  deleted; the **Rebuild dashboard** button brings it back.
 - **It degrades.** Cards are built from the entities that resolved, so disabling
   entities produces a smaller dashboard rather than a broken one.
 

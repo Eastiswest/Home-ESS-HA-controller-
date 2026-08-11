@@ -133,6 +133,8 @@ from .inverter.battery import BatteryReading, BatterySource
 from .inverter.generic import GenericEntityAdapter
 from .inverter.roles import (
     ROLE_BATTERY_VOLTAGE,
+    ROLE_SOC,
+    ROLE_USE_MODE,
     SOLAX_ROLE_SPECS,
     discover_entities,
     merge_overrides,
@@ -302,6 +304,43 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             derate_capacity_by_soh=bool(options.get("derate_capacity_by_soh", False)),
         )
 
+    def _rediscover_if_blind(self) -> None:
+        """Re-scan for inverter entities while we cannot see the inverter at all.
+
+        Discovery ran once, at setup. That is wrong for the commonest install
+        order: people add this integration first and get the inverter talking
+        afterwards, so the scan finds nothing, the entity map is frozen empty, and
+        "Inverter link: Disconnected" persists for ever even though Home Assistant
+        is now full of the inverter's sensors. Reloading fixed it, which is a thing
+        nobody should have to know.
+
+        Cheap because it is conditional: once either the state-of-charge or the
+        use-mode entity is mapped we never scan again, so a working install pays
+        nothing. Overrides the user set by hand always win, as before.
+        """
+        if self._adapter is None:
+            return
+        entities = self._adapter.entities
+        if entities.get(ROLE_SOC) or entities.get(ROLE_USE_MODE):
+            return
+
+        options = self.options
+        discovered = discover_entities(
+            self.hass, SOLAX_ROLE_SPECS, options.get(CONF_INVERTER_PREFIX) or None
+        )
+        if not discovered:
+            return
+        merged = merge_overrides(discovered, options.get(CONF_ENTITY_MAP) or {})
+        if merged == entities:
+            return
+        _LOGGER.info(
+            "Found %d inverter entities that did not exist at setup; rebuilding "
+            "the adapter (roles: %s)",
+            len(discovered),
+            ", ".join(sorted(discovered)),
+        )
+        self._build_adapters()
+
     def _build_tariffs(self) -> None:
         options = self.options
         self._import_provider = build_provider(self.hass, options, "import")
@@ -403,6 +442,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         now = dt_util.utcnow()
 
+        self._rediscover_if_blind()
         self.inverter_state = await self._adapter.async_read_state()
         site = self._read_site_state(now)
         self._train_from_samples(now, site)

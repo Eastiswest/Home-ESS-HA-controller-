@@ -202,6 +202,53 @@ def placeholder_dashboard(title: str = DASHBOARD_TITLE) -> dict[str, Any]:
     }
 
 
+# Stamped into every generated dashboard so a later version can tell its own
+# untouched output apart from a dashboard the user has since edited.
+GENERATED_KEY = "ess_controller_generated"
+
+
+def fingerprint(config: Any) -> str:
+    """A stable hash of a dashboard's views, ignoring our own stamp.
+
+    Comparing the stored dashboard against a hash of what we last wrote is what
+    lets an upgrade improve the dashboard *and* keep the promise that edits are
+    never lost. Without it every improvement needed the user to delete the
+    dashboard by hand -- which they had to be told, three times.
+    """
+    import hashlib
+    import json
+
+    if not isinstance(config, dict):
+        return ""
+    subset = {key: value for key, value in config.items() if key != GENERATED_KEY}
+    encoded = json.dumps(subset, sort_keys=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def stamp(config: dict[str, Any]) -> dict[str, Any]:
+    """Record our fingerprint inside the config we are about to store."""
+    stamped = dict(config)
+    stamped.pop(GENERATED_KEY, None)
+    stamped[GENERATED_KEY] = fingerprint(stamped)
+    return stamped
+
+
+def is_untouched(stored: Any) -> bool:
+    """Whether a stored dashboard is exactly what we last generated.
+
+    True means safe to replace: nobody has edited it since. False means either the
+    user changed something or it predates stamping, and in both cases it is left
+    alone -- a wrong answer here destroys somebody's work, so the doubtful case
+    must be "leave it".
+    """
+    if not isinstance(stored, dict):
+        return False
+    claimed = stored.get(GENERATED_KEY)
+    if not isinstance(claimed, str) or not claimed:
+        return False
+    return claimed == fingerprint(stored)
+
+
 def is_placeholder(config: Any) -> bool:
     """Whether a stored configuration is the placeholder above.
 

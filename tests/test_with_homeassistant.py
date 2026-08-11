@@ -1049,3 +1049,153 @@ class TestDayOneCompetence:
             hass, "Netzabschaltung", outage_calendar_keywords="netzabschaltung"
         )
         assert coordinator.outage.level == "high"
+
+
+class TestDashboardRefresh:
+    """An upgrade refreshes an untouched dashboard, through the real Lovelace store.
+
+    Three dashboard improvements never reached the first user because the stored
+    one is created once and never rewritten, and the remedy -- delete it by hand --
+    is not something anybody knows to do.
+    """
+
+    async def _install(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        _lovelace(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return entry
+
+    async def _stored(self, hass):
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+
+        store = hass.data[LOVELACE_DATA].dashboards["ess-controller"]
+        return await store.async_load(False)
+
+    async def test_the_stored_dashboard_carries_our_stamp(self, hass):
+        from custom_components.ess_controller.dashboard import GENERATED_KEY
+
+        await self._install(hass)
+        assert GENERATED_KEY in await self._stored(hass)
+
+    async def test_reinstalling_an_untouched_dashboard_refreshes_it(self, hass):
+        """Simulates an upgrade that generates a different layout."""
+        from custom_components.ess_controller.dashboard import fingerprint
+        from custom_components.ess_controller.panel import async_install
+
+        entry = await self._install(hass)
+        before = await self._stored(hass)
+
+        # Stand in for "this version builds something different".
+        import custom_components.ess_controller.panel as panel_mod
+
+        original = panel_mod.build_for_entry
+        panel_mod.build_for_entry = lambda hass, entry: {
+            "title": "Rebuilt",
+            "views": [{"title": "New", "path": "new", "cards": []}],
+        }
+        try:
+            await async_install(hass, entry)
+        finally:
+            panel_mod.build_for_entry = original
+
+        after = await self._stored(hass)
+        assert after["title"] == "Rebuilt"
+        assert fingerprint(after) != fingerprint(before)
+
+    async def test_an_edited_dashboard_is_never_overwritten(self, hass):
+        """The promise that makes the refresh safe to have at all."""
+        from homeassistant.components.lovelace.const import LOVELACE_DATA
+
+        from custom_components.ess_controller.panel import async_install
+
+        entry = await self._install(hass)
+        store = hass.data[LOVELACE_DATA].dashboards["ess-controller"]
+
+        edited = await store.async_load(False)
+        edited["views"][0]["title"] = "My Overview"
+        await store.async_save(edited)
+
+        import custom_components.ess_controller.panel as panel_mod
+
+        original = panel_mod.build_for_entry
+        panel_mod.build_for_entry = lambda hass, entry: {
+            "title": "Rebuilt",
+            "views": [{"title": "New", "path": "new", "cards": []}],
+        }
+        try:
+            await async_install(hass, entry)
+        finally:
+            panel_mod.build_for_entry = original
+
+        kept = await store.async_load(False)
+        assert kept["views"][0]["title"] == "My Overview"
+        assert kept["title"] != "Rebuilt"
+
+    async def test_reinstalling_the_same_version_changes_nothing(self, hass):
+        """Otherwise it would rewrite the dashboard on every restart."""
+        from custom_components.ess_controller.panel import async_install
+
+        entry = await self._install(hass)
+        before = await self._stored(hass)
+        await async_install(hass, entry)
+        assert await self._stored(hass) == before
+
+
+class TestInverterRediscovery:
+    """Discovery must not be a one-shot at setup.
+
+    The commonest install order is this integration first, inverter working
+    afterwards -- so the scan finds nothing, the entity map is frozen empty, and
+    "Inverter link: Disconnected" persists for ever while Home Assistant is full
+    of the inverter's sensors. Reloading fixed it, which nobody should need to know.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_it_finds_entities_that_appear_after_setup(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert coordinator.inverter_state.available is False
+
+        # The inverter integration finishes setting up, an hour later.
+        hass.states.async_set("sensor.solax_battery_capacity", "61", {})
+        hass.states.async_set(
+            "select.solax_charger_use_mode",
+            "Self Use Mode",
+            {"options": ["Self Use Mode", "Manual Mode"]},
+        )
+        await hass.async_block_till_done()
+
+        await coordinator.async_refresh()
+        assert coordinator.inverter_state.available is True, coordinator._adapter.entities
+        assert coordinator.inverter_state.soc == 61.0
+
+    async def test_it_stops_scanning_once_connected(self, hass):
+        """A working install must not pay for the scan on every cycle."""
+        coordinator = await self._coordinator(hass)
+        hass.states.async_set("sensor.solax_battery_capacity", "61", {})
+        await hass.async_block_till_done()
+        await coordinator.async_refresh()
+        assert coordinator.inverter_state.available is True
+
+        calls = []
+        import custom_components.ess_controller.coordinator as coordinator_mod
+
+        original = coordinator_mod.discover_entities
+        coordinator_mod.discover_entities = lambda *a, **k: calls.append(1) or {}
+        try:
+            await coordinator.async_refresh()
+        finally:
+            coordinator_mod.discover_entities = original
+        assert calls == []

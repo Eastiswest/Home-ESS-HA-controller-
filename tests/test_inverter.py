@@ -791,3 +791,70 @@ class TestReadState:
         adapter = SolaxModbusAdapter(hass, {})
         state = asyncio.run(adapter.async_read_state())
         assert not state.available
+
+
+class TestDiscoveryIgnoresOurOwnEntities:
+    """Our own sensors are named like the inverter's, and must never be bound.
+
+    "AI ESS Controller" publishes sensor.ai_ess_controller_usable_battery_capacity,
+    whose object ID ends in a suffix the state-of-charge role matches. Binding it
+    would have the controller read its own 18 kWh capacity as an 18% state of
+    charge, and report the inverter as connected while it was not. A real-HA test
+    caught it; nothing else would have.
+    """
+
+    def _hass(self, *entity_ids: str):
+        class FakeState:
+            def __init__(self, entity_id):
+                self.entity_id = entity_id
+                self.state = "1"
+                self.attributes = {"options": ["Self Use Mode", "Manual Mode"]}
+
+        class FakeStates:
+            def __init__(self, ids):
+                self._states = [FakeState(i) for i in ids]
+
+            def async_all(self):
+                return self._states
+
+            def get(self, entity_id):
+                return next((s for s in self._states if s.entity_id == entity_id), None)
+
+        class FakeHass:
+            def __init__(self, ids):
+                self.states = FakeStates(ids)
+
+        return FakeHass(entity_ids)
+
+    def _discover(self, hass):
+        from custom_components.ess_controller.inverter.roles import (
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        return discover_entities(hass, SOLAX_ROLE_SPECS)
+
+    def test_our_own_capacity_sensor_is_not_taken_for_a_state_of_charge(self):
+        hass = self._hass("sensor.ai_ess_controller_usable_battery_capacity")
+        assert self._discover(hass) == {}
+
+    def test_none_of_our_entities_are_ever_bound(self):
+        hass = self._hass(
+            "sensor.ai_ess_controller_usable_battery_capacity",
+            "sensor.ai_ess_controller_battery_state_of_charge",
+            "number.ai_ess_controller_minimum_state_of_charge",
+            "select.ai_ess_controller_strategy",
+            "number.ess_controller_max_charge_power",
+        )
+        assert self._discover(hass) == {}
+
+    def test_the_inverter_is_still_discovered_alongside_them(self):
+        """The exclusion must not be so broad that it hides the real thing."""
+        hass = self._hass(
+            "sensor.ai_ess_controller_usable_battery_capacity",
+            "sensor.solax_battery_capacity",
+            "select.solax_charger_use_mode",
+        )
+        found = self._discover(hass)
+        assert found.get("soc") == "sensor.solax_battery_capacity"
+        assert found.get("use_mode") == "select.solax_charger_use_mode"

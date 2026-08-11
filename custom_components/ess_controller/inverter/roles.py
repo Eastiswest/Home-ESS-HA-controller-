@@ -178,6 +178,21 @@ def _iter_states(hass: Any) -> Iterable[Any]:
     return []
 
 
+# Our own entities, which must never be discovered as the inverter's.
+#
+# Object IDs are built from the device name, so an install called "AI ESS
+# Controller" publishes sensor.ai_ess_controller_usable_battery_capacity -- and
+# that matched the state-of-charge role's suffix. Binding it would have the
+# controller read its own 18 kWh capacity figure as an 18% state of charge, and
+# report the inverter as connected while it was not. Found by a test, not by a
+# user, but only just.
+OWN_MARKERS: tuple[str, ...] = ("ess_controller", "ai_ess_controller")
+
+
+def _is_our_own(object_id: str) -> bool:
+    return any(marker in object_id for marker in OWN_MARKERS)
+
+
 def discover_entities(
     hass: Any,
     specs: Iterable[RoleSpec],
@@ -188,6 +203,10 @@ def discover_entities(
     When ``prefix`` is given, entities whose object ID starts with it win. That
     disambiguates a house with two inverters, where both expose an identically
     suffixed ``charger_use_mode``.
+
+    This integration's own entities are excluded: several of them are named like
+    the inverter's by design, and binding one would make the controller read its
+    own output as the inverter's input.
     """
     available = _iter_states(hass)
     wanted_prefix = _clean(prefix) if prefix else None
@@ -198,6 +217,8 @@ def discover_entities(
         if not entity_id or "." not in entity_id:
             continue
         domain, _, object_id = entity_id.partition(".")
+        if _is_our_own(object_id):
+            continue
         by_domain.setdefault(domain, []).append((entity_id, object_id))
 
     found: dict[str, str] = {}

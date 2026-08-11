@@ -48,8 +48,11 @@ from .dashboard import (
     DASHBOARD_URL_PATH,
     build_dashboard,
     dashboards_mapping,
+    fingerprint,
     is_placeholder,
+    is_untouched,
     placeholder_dashboard,
+    stamp,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -215,10 +218,26 @@ async def _async_install_storage(
             # ConfigNotFound on a first run, which is the case we are here to
             # fix. Anything else is equally a reason to seed.
             stored = None
-    # The placeholder is explicitly replaceable; a real stored config is not,
-    # because by then it may carry the user's own edits.
+    # Three replaceable cases and one that never is.
+    #
+    # Nothing stored, or the placeholder: seed it, obviously. A dashboard that is
+    # byte-for-byte what we last generated: also safe, and this is the case that
+    # matters -- without it every improvement to the dashboard needed the user to
+    # delete theirs by hand, which they had to be told three separate times.
+    # Anything else carries edits and is left alone; the doubtful case has to be
+    # "leave it", because a wrong answer destroys somebody's work.
+    stamped = stamp(config)
     if not stored or is_placeholder(stored):
-        await store.async_save(config)
+        await store.async_save(stamped)
+    elif is_untouched(stored):
+        if fingerprint(stored) != fingerprint(stamped):
+            _LOGGER.info(
+                "Refreshing the ESS Controller dashboard: the stored one is "
+                "unmodified and this version generates a different layout"
+            )
+            await store.async_save(stamped)
+    else:
+        _LOGGER.debug("Leaving the ESS Controller dashboard alone: it has been edited")
 
     dashboards[DASHBOARD_URL_PATH] = store
     _register_panel(hass, item, "storage")

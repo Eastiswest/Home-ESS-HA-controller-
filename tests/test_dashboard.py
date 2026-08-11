@@ -950,3 +950,77 @@ class TestNextChangeIsExplained:
         content = _plan_reason(entity_id("plan_cost"))
         assert "Why this plan" in content
         assert "Next change" not in content
+
+
+class TestRefreshWithoutLosingEdits:
+    """An upgrade must be able to improve the dashboard AND keep your edits.
+
+    Created-once-never-rewritten protected edits and made every improvement
+    invisible: three separate dashboard changes never reached the first user,
+    because the fix was "delete it by hand" and nobody knows that. Fingerprinting
+    the generated config separates the two cases.
+    """
+
+    def _generated(self, *keys: str) -> dict:
+        from custom_components.ess_controller.dashboard import stamp
+
+        return stamp(build_dashboard(resolved(*keys)))
+
+    def test_our_own_output_is_recognised(self):
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        assert is_untouched(self._generated()) is True
+
+    def test_an_edited_dashboard_is_not(self):
+        """The case that must never be replaced."""
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        stored = self._generated()
+        stored["views"][0]["title"] = "My Overview"
+        assert is_untouched(stored) is False
+
+    def test_adding_a_view_counts_as_an_edit(self):
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        stored = self._generated()
+        stored["views"].append({"title": "Mine", "cards": []})
+        assert is_untouched(stored) is False
+
+    def test_a_dashboard_from_before_stamping_is_left_alone(self):
+        """No stamp means unknown provenance, and unknown must mean "do not touch"."""
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        assert is_untouched(build_dashboard(resolved())) is False
+
+    def test_junk_is_never_replaceable(self):
+        from custom_components.ess_controller.dashboard import is_untouched
+
+        for value in (None, {}, [], "", {"ess_controller_generated": ""}):
+            assert is_untouched(value) is False
+
+    def test_a_different_layout_has_a_different_fingerprint(self):
+        """Otherwise an upgrade could not tell there was anything to refresh."""
+        from custom_components.ess_controller.dashboard import fingerprint
+
+        assert fingerprint(self._generated()) != fingerprint(
+            self._generated("min_soc", "max_soc")
+        )
+
+    def test_the_same_layout_fingerprints_the_same_twice(self):
+        from custom_components.ess_controller.dashboard import fingerprint
+
+        assert fingerprint(self._generated()) == fingerprint(self._generated())
+
+    def test_the_stamp_does_not_change_the_dashboard(self):
+        from custom_components.ess_controller.dashboard import GENERATED_KEY, stamp
+
+        plain = build_dashboard(resolved())
+        stamped = stamp(plain)
+        assert {k: v for k, v in stamped.items() if k != GENERATED_KEY} == plain
+
+    def test_stamping_is_idempotent(self):
+        """Re-saving must not change the fingerprint, or it would refresh forever."""
+        from custom_components.ess_controller.dashboard import stamp
+
+        once = stamp(build_dashboard(resolved()))
+        assert stamp(once) == once
