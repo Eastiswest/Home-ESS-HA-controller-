@@ -1171,10 +1171,12 @@ class TestCalendarEventFiltering:
         [
             "Planned power interruption",
             "PLANNED SUPPLY INTERRUPTION",
-            "Electricity supply works",
+            "Electricity works",
             "Power cut - Elm Street",
             "Scheduled shutdown",
             "outage",
+            "No power 09:00-15:00",
+            "Planned interruption to your supply",
         ],
     )
     def test_supply_events_are_recognised(self, summary):
@@ -1193,6 +1195,44 @@ class TestCalendarEventFiltering:
     )
     def test_everyday_events_are_ignored(self, summary):
         assert self._filter(summary) is False
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            # Every one of these matched the first version of the filter, which
+            # used bare words as substrings. Each cost a day of holding 80% back.
+            "Powerlifting class",
+            "Power nap",
+            "Planned leave",
+            "Planned holiday",
+            "Planned: dentist",
+            "Empower workshop",
+            "Horsepower meet",
+            "School supplies",
+            "Electricity bill due",
+        ],
+    )
+    def test_words_that_merely_contain_a_keyword_are_ignored(self, summary):
+        assert self._filter(summary) is False, summary
+
+    def test_the_matched_phrase_is_reported(self):
+        """So the sensor can say why it fired instead of leaving a mystery."""
+        from custom_components.ess_controller.outage import (
+            DEFAULT_KEYWORDS,
+            matched_keyword,
+        )
+
+        assert (
+            matched_keyword("Planned power interruption", DEFAULT_KEYWORDS)
+            == "power interruption"
+        )
+        assert matched_keyword("Power nap", DEFAULT_KEYWORDS) is None
+
+    def test_planned_alone_is_not_a_keyword(self):
+        """It matches almost anything a person schedules."""
+        from custom_components.ess_controller.outage import DEFAULT_KEYWORDS
+
+        assert "planned" not in DEFAULT_KEYWORDS
 
     def test_a_custom_keyword_list_replaces_the_default(self):
         assert self._filter("Netzabschaltung", raw="netzabschaltung") is True

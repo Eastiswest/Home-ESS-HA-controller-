@@ -23,6 +23,7 @@ passes plain values in.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -82,13 +83,31 @@ class OutageAssessment:
         }
 
 
+# Phrases, not single words.
+#
+# The first attempt used bare words -- power, supply, planned, electricity -- and
+# matched them as substrings. On a household calendar that is close to useless:
+# "Power nap", "Planned leave", "Powerlifting class", "Empower workshop" and
+# "Electricity bill due" were all read as high-risk power cuts, and each one held
+# 80% of the pack back for the day. "planned" in particular matches almost
+# anything a person schedules.
+#
+# Phrases are specific enough to be safe while still catching how distribution
+# operators actually word these: "Planned power interruption", "Power cut -- Elm
+# Street", "Planned supply interruption".
 DEFAULT_KEYWORDS: tuple[str, ...] = (
-    "power",
     "outage",
-    "interruption",
-    "supply",
-    "electricity",
-    "planned",
+    "blackout",
+    "power cut",
+    "powercut",
+    "power off",
+    "no power",
+    "power interruption",
+    "supply interruption",
+    "electricity interruption",
+    "planned interruption",
+    "supply works",
+    "electricity works",
     "shutdown",
 )
 
@@ -101,21 +120,34 @@ def parse_keywords(raw: str | None) -> tuple[str, ...]:
     return words or DEFAULT_KEYWORDS
 
 
+def matched_keyword(summary: str, keywords: Sequence[str]) -> str | None:
+    """The keyword an event title matched, or None.
+
+    Matched on word boundaries rather than as a substring, so "power" does not
+    fire on "Powerlifting" and "supply" does not fire on "supplies". Returning
+    *which* keyword matched rather than a bare boolean is what lets the sensor say
+    why it fired, which is the difference between a mystery and a one-line fix.
+    """
+    text = (summary or "").lower()
+    for word in keywords:
+        if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text):
+            return word
+    return None
+
+
 def is_outage_event(summary: str, keywords: Sequence[str], all_events: bool) -> bool:
     """Whether a calendar event is plausibly about the electricity supply.
 
     The calendar field invites pointing at a calendar, and until this existed
     *every* event on it became a high-risk planned power cut -- a bin collection
-    held 80% of the pack back for a day. Matching the summary against keywords
-    means a general-purpose calendar is merely useless rather than harmful.
+    held 80% of the pack back for a day.
 
     ``all_events`` is the escape hatch for a DNO calendar whose entries are too
     terse to match anything, where the whole calendar really is outages.
     """
     if all_events:
         return True
-    text = (summary or "").lower()
-    return any(word in text for word in keywords)
+    return matched_keyword(summary, keywords) is not None
 
 
 def assess(

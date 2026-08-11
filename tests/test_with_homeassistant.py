@@ -1020,6 +1020,20 @@ class TestDayOneCompetence:
         coordinator = await self._with_calendar(hass, "Bin collection")
         assert coordinator.outage.level == "none", coordinator.outage.reason
 
+    async def test_a_title_that_merely_contains_a_keyword_is_ignored(self, hass):
+        """The second reported symptom: still high after the first filter, because
+        it matched bare words as substrings."""
+        coordinator = await self._with_calendar(hass, "Powerlifting class")
+        assert coordinator.outage.level == "none", coordinator.outage.reason
+
+    async def test_the_reason_names_the_event_and_the_phrase(self, hass):
+        """ "Why is this high?" should be answerable from the sensor alone."""
+        coordinator = await self._with_calendar(hass, "Planned power interruption")
+        assert coordinator.outage.level == "high"
+        assert "Planned power interruption" in coordinator.outage.reason
+        assert "power interruption" in coordinator.outage.reason
+        assert "calendar.watched" in coordinator.outage.reason
+
     async def test_the_same_event_does_register_when_told_to_trust_the_calendar(
         self, hass
     ):

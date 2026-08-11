@@ -180,7 +180,7 @@
         "data_description": {
           "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
           "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind.",
-          "outage_calendar_keywords": "Comma-separated. Only events whose title contains one of these words are treated as a planned interruption, so pointing the field at a general calendar does not turn every appointment into a power cut.",
+          "outage_calendar_keywords": "Comma-separated phrases. Only events whose title contains one of them, matched on whole words, count as a planned interruption. Phrases rather than bare words on purpose: 'power' alone fires on 'Power nap' and 'Powerlifting', which would hold most of the battery back for the day.",
           "outage_calendar_all_events": "Turn on only if the calendar is dedicated to supply interruptions and its event titles are too terse to match a keyword."
         }
       },
@@ -436,7 +436,7 @@
         "data_description": {
           "outage_risk_entity": "Any binary sensor: a weather warning integration, a DNO scraper, or a manual toggle.",
           "outage_wind_threshold": "In whatever unit your weather entity reports gusts in, typically km/h. Leave at 0 to ignore wind.",
-          "outage_calendar_keywords": "Comma-separated. Only events whose title contains one of these words are treated as a planned interruption, so pointing the field at a general calendar does not turn every appointment into a power cut.",
+          "outage_calendar_keywords": "Comma-separated phrases. Only events whose title contains one of them, matched on whole words, count as a planned interruption. Phrases rather than bare words on purpose: 'power' alone fires on 'Power nap' and 'Powerlifting', which would hold most of the battery back for the day.",
           "outage_calendar_all_events": "Turn on only if the calendar is dedicated to supply interruptions and its event titles are too terse to match a keyword."
         }
       },

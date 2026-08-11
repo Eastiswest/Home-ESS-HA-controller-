@@ -1180,22 +1180,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Not every calendar event is a power cut. Without this filter a bin
         # collection became a high-risk planned interruption and held 80% of the
         # pack back all day.
-        if not outage_mod.is_outage_event(
-            summary,
-            outage_mod.parse_keywords(
-                self.options.get(
-                    CONF_OUTAGE_CALENDAR_KEYWORDS, DEFAULT_OUTAGE_CALENDAR_KEYWORDS
-                )
-            ),
-            bool(
-                self.options.get(
-                    CONF_OUTAGE_CALENDAR_ALL_EVENTS, DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS
-                )
-            ),
-        ):
+        keywords = outage_mod.parse_keywords(
+            self.options.get(
+                CONF_OUTAGE_CALENDAR_KEYWORDS, DEFAULT_OUTAGE_CALENDAR_KEYWORDS
+            )
+        )
+        every = bool(
+            self.options.get(
+                CONF_OUTAGE_CALENDAR_ALL_EVENTS, DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS
+            )
+        )
+        matched = outage_mod.matched_keyword(summary, keywords)
+        if not every and matched is None:
             _LOGGER.debug("Ignoring calendar event %r: not about the supply", summary)
             return []
-        return [(start, end, summary)]
+        # Naming the event and the phrase it matched turns "why is this high?"
+        # into a one-line answer, which is the question this feature kept raising.
+        why = (
+            f'{summary} ({entity_id}, matched "{matched}")'
+            if matched
+            else f"{summary} ({entity_id}, every event treated as an outage)"
+        )
+        return [(start, end, why)]
 
     def shiftable_loads(self) -> list:
         return parse_shiftable_loads(self.options.get(CONF_SHIFTABLE_LOADS))

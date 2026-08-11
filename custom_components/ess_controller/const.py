@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.10.1"
+VERSION: Final = "0.10.2"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [
@@ -135,8 +135,22 @@ CONF_OUTAGE_LOOKAHEAD_HOURS: Final = "outage_lookahead_hours"
 # hold 80% of the pack back all day.
 CONF_OUTAGE_CALENDAR_KEYWORDS: Final = "outage_calendar_keywords"
 CONF_OUTAGE_CALENDAR_ALL_EVENTS: Final = "outage_calendar_all_events"
-DEFAULT_OUTAGE_CALENDAR_KEYWORDS: Final = (
-    "power,outage,interruption,supply,electricity,planned,shutdown"
+DEFAULT_OUTAGE_CALENDAR_KEYWORDS: Final = ",".join(
+    (
+        "outage",
+        "blackout",
+        "power cut",
+        "powercut",
+        "power off",
+        "no power",
+        "power interruption",
+        "supply interruption",
+        "electricity interruption",
+        "planned interruption",
+        "supply works",
+        "electricity works",
+        "shutdown",
+    )
 )
 DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS: Final = False
 
