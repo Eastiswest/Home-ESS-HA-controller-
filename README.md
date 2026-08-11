@@ -69,12 +69,19 @@ actually drive them, and each bin holds an exponentially weighted mean:
   12 °C June one.
 
 If you have a solar forecast integration (Solcast, Forecast.Solar), its *shape*
-is trusted and a **correction factor** is learned per season/hour/sky bucket.
-That factor absorbs everything a generic forecast cannot know about your specific
+is trusted and a **correction factor** is learned per season/hour/sky bucket. That
+factor absorbs everything a generic forecast cannot know about your specific
 installation — shading from a tree or chimney, panel soiling, a mis-declared
 azimuth, inverter clipping. Learning a ratio converges far faster than learning
 absolute output from scratch. With no forecast source at all, it learns absolute
 generation from your own history instead.
+
+The factor starts at exactly **1.0** and stays there until a bucket has enough
+observations to be trusted. A forecast that already accounts for your tilt and
+azimuth, with nothing shading the array, is therefore used at face value from the
+very first plan — never second-guessed on the strength of one cloudy half-hour. A
+ratio is a quotient of two small numbers, so a single slot where a cloud crossed a
+forecast-clear sky would otherwise scale that bucket down by three or four times.
 
 Buckets degrade gracefully — a specific bucket with too few samples falls back to
 a broader one, then to a sensible default — so the plans are reasonable on day

@@ -167,22 +167,34 @@ class BucketSet:
         bucket.update(value, self._min_alpha)
         return bucket
 
-    def lookup(self, keys: list[str], default: float = 0.0) -> tuple[float, str]:
+    def lookup(
+        self, keys: list[str], default: float = 0.0, trusted_only: bool = False
+    ) -> tuple[float, str]:
         """Return the first trusted bucket's mean, walking from specific to broad.
 
         Falls back to an untrusted bucket before giving up on ``default``, since
         one real observation still beats a guess. The second element of the
         tuple names the key that supplied the answer, which the sensors surface
         so a user can see how confident the model is.
+
+        ``trusted_only`` suppresses that single-sample fallback. It exists for the
+        solar *ratio*, where one observation is not "better than a guess": a
+        ratio is a quotient of two small numbers, so a single half-hour where a
+        cloud crossed a forecast-clear sky yields a correction factor near the
+        0.25 floor, which then scales down every future slot in that bucket. When
+        the forecast is already good -- correct tilt, azimuth and no shading --
+        that fallback can only make it worse, and leaving the forecast alone until
+        there is real evidence is the safer default.
         """
         for key in keys:
             bucket = self._buckets.get(key)
             if bucket is not None and bucket.trusted:
                 return bucket.mean, key
-        for key in keys:
-            bucket = self._buckets.get(key)
-            if bucket is not None and bucket.samples > 0:
-                return bucket.mean, f"{key}~"
+        if not trusted_only:
+            for key in keys:
+                bucket = self._buckets.get(key)
+                if bucket is not None and bucket.samples > 0:
+                    return bucket.mean, f"{key}~"
         return default, "default"
 
     def total_samples(self) -> int:
@@ -368,7 +380,7 @@ class LearningModel:
         """
         keys = self.solar_keys(month, hour, minute, cloud, uv_index)
         if forecast_kwh is not None:
-            ratio, source = self.solar_ratio.lookup(keys, default=1.0)
+            ratio, source = self.solar_ratio.lookup(keys, default=1.0, trusted_only=True)
             # Keep the correction sane even if a bucket is polluted.
             ratio = min(max(ratio, 0.25), 2.0)
             return max(forecast_kwh * ratio, 0.0), f"forecast*{ratio:.2f}@{source}"

@@ -1016,3 +1016,79 @@ class TestSeasonalLoadLearning:
         )
         assert january.kwh == pytest.approx(1.9, abs=0.2)
         assert january.source != "profile"
+
+
+class TestAccurateForecastIsLeftAlone:
+    """A good forecast must not be corrected on the strength of one half-hour.
+
+    The correction factor is a quotient of two small numbers, so a single slot
+    where a cloud crossed a forecast-clear sky produces a ratio near the 0.25
+    floor. Applied to every later slot in that bucket, it turns an accurate
+    forecast into a bad one -- which is the opposite of what learning is for, and
+    worst precisely for the installs whose forecast already knows the roof's tilt
+    and azimuth and has no shading to discover.
+    """
+
+    def _model(self):
+        from custom_components.ess_controller.learning.model import LearningModel
+
+        return LearningModel()
+
+    def _observe(self, model, *, kwh, forecast_kwh, times=1):
+        from custom_components.ess_controller.learning.model import SolarObservation
+
+        for _ in range(times):
+            model.observe_solar(
+                SolarObservation(
+                    month=8,
+                    hour=12,
+                    minute=0,
+                    kwh=kwh,
+                    forecast_kwh=forecast_kwh,
+                )
+            )
+
+    def _predict(self, model, forecast_kwh=1.0):
+        return model.predict_solar(
+            month=8, hour=12, minute=0, cloud=None, forecast_kwh=forecast_kwh
+        )
+
+    def test_one_bad_slot_does_not_move_the_forecast(self):
+        model = self._model()
+        # Forecast said 1.0 kWh; a passing cloud meant 0.3 was generated.
+        self._observe(model, kwh=0.3, forecast_kwh=1.0)
+        kwh, source = self._predict(model)
+        assert kwh == pytest.approx(1.0), "a single sample corrected the forecast"
+        assert "@default" in source
+
+    def test_two_bad_slots_still_do_not(self):
+        model = self._model()
+        self._observe(model, kwh=0.3, forecast_kwh=1.0, times=2)
+        assert self._predict(model)[0] == pytest.approx(1.0)
+
+    def test_a_consistent_bias_is_corrected_once_it_is_established(self):
+        """The feature still has to work: real shading must still be learned."""
+        model = self._model()
+        self._observe(model, kwh=0.5, forecast_kwh=1.0, times=6)
+        kwh, source = self._predict(model)
+        assert kwh < 0.75, kwh
+        assert "@default" not in source
+
+    def test_an_accurate_forecast_stays_accurate_as_evidence_accumulates(self):
+        """Your case: the ratio converges on 1.0 and does nothing, as it should."""
+        model = self._model()
+        self._observe(model, kwh=1.0, forecast_kwh=1.0, times=10)
+        assert self._predict(model)[0] == pytest.approx(1.0, rel=0.05)
+
+    def test_absolute_solar_history_still_uses_a_single_sample(self):
+        """The relaxation is only for ratios. An absolute observation of your own
+        generation is directly informative, and one beats a clear-sky guess."""
+        from custom_components.ess_controller.learning.model import SolarObservation
+
+        model = self._model()
+        model.observe_solar(SolarObservation(month=8, hour=12, minute=0, kwh=0.44))
+        kwh, source = model.predict_solar(
+            month=8, hour=12, minute=0, cloud=None, forecast_kwh=None, default_kwh=-1.0
+        )
+        assert kwh == pytest.approx(0.44)
+        assert source != "default"
