@@ -1884,3 +1884,53 @@ class TestDisabledControlsAreNamed:
             hass, "switch.solax1_inverter_selfuse_charge_from_grid", disabled=True
         )
         assert coordinator.diagnostics()["disabled_inverter_controls"]
+
+
+class TestHorizonReachIsReported:
+    """A horizon shorter than the prices in hand is a silent loss of money.
+
+    A real install carried ``horizon_hours: 24`` from its original setup while 48
+    hours of prices were available -- 96 half-hours, the tail of them predicted. The
+    consequence was invisible and expensive: it could not see that tomorrow evening
+    was dearer than today's cheap window, so it had no reason to buy into the cheap
+    window. Nothing anywhere said the plan was working with half of what it knew.
+
+    The arithmetic is tested against the pure helper in the fast suite; what is worth
+    checking here is that the answer actually reaches somewhere a person will see it.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_it_is_on_the_plan_sensor(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        state = hass.states.get("sensor.ai_ess_controller_planned_horizon_cost")
+        assert state is not None
+        assert "horizon_reach" in state.attributes
+
+    async def test_it_is_in_the_diagnostics(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert coordinator.diagnostics()["horizon_reach"]
+
+    async def test_reading_it_does_not_rebuild_the_diagnostics(self, hass):
+        """It is a sensor attribute, so it is read on every state update."""
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        calls: list[int] = []
+        original = coordinator.diagnostics
+
+        def _spy():
+            calls.append(1)
+            return original()
+
+        coordinator.diagnostics = _spy
+        assert isinstance(coordinator.horizon_reach, str)
+        assert calls == []

@@ -424,6 +424,34 @@ class ControlCommand:
         return self.allow_grid_charge is not other.allow_grid_charge
 
 
+def describe_horizon_reach(
+    planned_end: datetime | None, priced_end: datetime | None, now: datetime
+) -> str:
+    """Whether a plan looks as far ahead as its prices allow.
+
+    A horizon shorter than the prices in hand is a silent loss of money, and the
+    kind nobody notices. A real install carried a 24-hour horizon from its original
+    setup while 96 half-hours of prices sat in the cache: it could not see that
+    tomorrow evening was dearer than today's cheap window, and so had no reason to
+    buy into the cheap window.
+
+    Under an hour of difference counts as full: half-hour boundaries and a rolling
+    clock make exact equality rare and the distinction meaningless.
+    """
+    if planned_end is None or priced_end is None:
+        return ""
+    available = (priced_end - now).total_seconds() / 3600.0
+    planned = (planned_end - now).total_seconds() / 3600.0
+    if available <= 0 or planned <= 0:
+        return ""
+    if available - planned < 1.0:
+        return f"planning the full {planned:.0f}h of prices available"
+    return (
+        f"planning {planned:.0f}h of the {available:.0f}h of prices available; "
+        f"raising the horizon would let the plan see further"
+    )
+
+
 @dataclass(slots=True)
 class PriceSlot:
     """A tariff price for a half-hour window, as published by the supplier."""

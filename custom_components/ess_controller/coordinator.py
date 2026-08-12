@@ -157,6 +157,7 @@ from .models import (
     PlanSlot,
     SiteState,
     SlotAction,
+    describe_horizon_reach,
 )
 from .optimiser.dp import OptimiserSettings, optimise, percentile
 from .performance import PerformanceSummary, SelfUseShadow, SlotRecord, summarise
@@ -1170,6 +1171,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
 
+        # A horizon shorter than the prices available is a silent loss of money, and
+        # exactly the kind nobody notices. A real install was planning 24 hours with
+        # 48 hours of prices in hand, so it could not see that tomorrow evening was
+        # dearer than today's cheap window -- and therefore had no reason to buy into
+        # the cheap window. Worth stating plainly wherever anyone might look.
+        priced = [s for s in import_series.slots if s.end > now]
+        self._horizon_note = describe_horizon_reach(
+            slots[-1].end if slots else None,
+            priced[-1].end if priced else None,
+            now,
+        )
+
         self._diagnostics = {
             "solar_sources": [p.source for p in solar_predictions[:8]],
             "load_sources": [p.source for p in load_predictions[:8]],
@@ -1272,6 +1285,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             ),
         )
+
+    @property
+    def horizon_reach(self) -> str:
+        """Whether the plan is looking as far ahead as its prices allow."""
+        return getattr(self, "_horizon_note", "")
 
     def _planned_outages(self) -> list[tuple[datetime, datetime, str]]:
         """Planned interruptions from a calendar entity's current event.
@@ -2025,6 +2043,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Everything needed to debug a plan, for the diagnostics download."""
         return {
             "disabled_inverter_controls": self.disabled_inverter_controls(),
+            "horizon_reach": self.horizon_reach,
             "settings": self.settings.as_dict(),
             "battery_spec": {
                 "capacity_kwh": self.battery_spec().capacity_kwh,

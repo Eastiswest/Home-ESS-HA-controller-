@@ -117,6 +117,11 @@ def _plan_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
         "saving_vs_self_use": round(plan.saving_vs_self_use, 2),
         "saving_vs_idle": round(plan.saving_vs_baseline, 2),
         "horizon_slots": len(plan.slots),
+        # Whether the plan is looking as far ahead as its prices allow. A horizon
+        # shorter than the prices in hand is a silent loss: a real install planned
+        # 24 hours with 48 available, so it could not see that tomorrow evening was
+        # dearer than today's cheap window and had no reason to buy into it.
+        "horizon_reach": coordinator.horizon_reach,
         "created": dt_util.as_local(plan.created).isoformat(),
     }
 

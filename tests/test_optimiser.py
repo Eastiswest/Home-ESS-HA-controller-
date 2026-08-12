@@ -895,3 +895,44 @@ class TestARealSummerHorizon:
         elsewhere, which on a day with this much sun costs nothing at all."""
         untrained = self.with_evening_allowance(0.0)
         assert untrained.total_cost <= untrained.self_use_cost + 1e-6
+
+
+class TestHorizonReach:
+    """Does the plan look as far ahead as its prices allow?
+
+    A real install carried ``horizon_hours: 24`` from its original setup while 96
+    half-hours of prices sat in the cache. It therefore could not see that tomorrow
+    evening was dearer than today's cheap window, and so had no reason to buy into
+    the cheap window -- a silent loss, and the kind nobody notices.
+    """
+
+    @staticmethod
+    def describe(planned_hours: float, priced_hours: float) -> str:
+        from datetime import datetime, timedelta
+
+        from custom_components.ess_controller.models import describe_horizon_reach
+
+        now = datetime(2026, 8, 12, 9, 0)
+        return describe_horizon_reach(
+            now + timedelta(hours=planned_hours) if planned_hours else None,
+            now + timedelta(hours=priced_hours) if priced_hours else None,
+            now,
+        )
+
+    def test_a_short_horizon_is_called_out(self):
+        note = self.describe(planned_hours=24, priced_hours=48)
+        assert "24h" in note and "48h" in note
+        assert "see further" in note
+
+    def test_matching_the_prices_says_so(self):
+        assert "full" in self.describe(planned_hours=36, priced_hours=36)
+
+    def test_being_within_an_hour_counts_as_full(self):
+        """Half-hour boundaries and a rolling clock make exact equality rare."""
+        assert "full" in self.describe(planned_hours=35.5, priced_hours=36)
+
+    def test_no_prices_says_nothing(self):
+        assert self.describe(planned_hours=24, priced_hours=0) == ""
+
+    def test_no_plan_says_nothing(self):
+        assert self.describe(planned_hours=0, priced_hours=24) == ""
