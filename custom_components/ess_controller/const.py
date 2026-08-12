@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "ess_controller"
 NAME: Final = "AI ESS Controller"
-VERSION: Final = "0.17.2"
+VERSION: Final = "0.17.3"
 MANUFACTURER: Final = "AI ESS Controller"
 
 PLATFORMS: Final = [

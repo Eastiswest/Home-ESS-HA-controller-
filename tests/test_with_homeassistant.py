@@ -1934,3 +1934,35 @@ class TestHorizonReachIsReported:
         coordinator.diagnostics = _spy
         assert isinstance(coordinator.horizon_reach, str)
         assert calls == []
+
+
+class TestHorizonIsReportedInHours:
+    """ "horizon_slots: 48" was read as a 48-hour horizon. It is 48 half-hours.
+
+    The setting that controls it is in hours, so the same number meant two different
+    things in two places, and the reading that mattered -- am I looking a day ahead
+    or two? -- was the one nobody could get.
+    """
+
+    async def _plan_attributes(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        await hass.data[DOMAIN][entry.entry_id].async_refresh()
+        state = hass.states.get("sensor.ai_ess_controller_planned_horizon_cost")
+        assert state is not None
+        return state.attributes
+
+    async def test_hours_are_given_alongside_slots(self, hass):
+        attributes = await self._plan_attributes(hass)
+        assert "horizon_hours" in attributes
+        assert "horizon_slots" in attributes
+
+    async def test_the_hours_are_half_the_slot_count(self, hass):
+        attributes = await self._plan_attributes(hass)
+        slots = attributes["horizon_slots"]
+        if slots:
+            assert attributes["horizon_hours"] == pytest.approx(slots / 2, abs=0.6)

@@ -116,7 +116,15 @@ def _plan_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
         "self_use_cost": round(plan.self_use_cost, 2),
         "saving_vs_self_use": round(plan.saving_vs_self_use, 2),
         "saving_vs_idle": round(plan.saving_vs_baseline, 2),
+        # In *hours* as well as slots. "horizon_slots: 48" was read as a 48-hour
+        # horizon when it is 48 half-hours -- and the setting that controls it is in
+        # hours, so the same number meant two different things in two places.
         "horizon_slots": len(plan.slots),
+        "horizon_hours": (
+            round((plan.slots[-1].end - plan.slots[0].start).total_seconds() / 3600, 1)
+            if plan.slots
+            else 0.0
+        ),
         # Whether the plan is looking as far ahead as its prices allow. A horizon
         # shorter than the prices in hand is a silent loss: a real install planned
         # 24 hours with 48 available, so it could not see that tomorrow evening was
