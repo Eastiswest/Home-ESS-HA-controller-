@@ -936,3 +936,49 @@ class TestHorizonReach:
 
     def test_no_plan_says_nothing(self):
         assert self.describe(planned_hours=0, priced_hours=24) == ""
+
+
+class TestACrampedWindowSaysSo:
+    """SoC limits can make the battery a spectator, and the plan still looks valid.
+
+    A real install ran with Minimum charge at 90% against a maximum of 95%: 1.1 kWh
+    of a 22 kWh pack. The evening ran off the grid at 45p with the SoC line pinned
+    flat, and the plan reported "Saves 1p vs self-use" with a straight face. The
+    setting was the cause; the plan reason was the only place anyone was looking.
+    """
+
+    @staticmethod
+    def plan_with(min_soc: float, max_soc: float):
+        battery = make_battery(min_soc=min_soc, max_soc=max_soc)
+        slots = build_slots([20.0] * 8 + [50.0] * 8, load=0.3)
+        return optimise(slots, (min_soc + max_soc) / 2, battery, make_grid())
+
+    def test_a_ninety_percent_floor_is_called_out(self):
+        reason = self.plan_with(90.0, 95.0).reason
+        assert "usable" in reason
+        assert "minimum and maximum charge" in reason
+
+    def test_it_names_the_numbers(self):
+        reason = self.plan_with(90.0, 95.0).reason
+        assert "1.1 kWh" in reason
+        assert "90%" in reason and "95%" in reason
+
+    def test_it_is_said_first(self):
+        """Nothing else in the sentence matters if the battery cannot move."""
+        assert self.plan_with(90.0, 95.0).reason.startswith("Only ")
+
+    def test_a_normal_window_says_nothing_about_it(self):
+        assert "usable" not in self.plan_with(20.0, 95.0).reason
+
+    def test_the_threshold_is_a_share_not_an_absolute(self):
+        """A 5 kWh pack with a sensible window is not cramped; a 100 kWh pack with
+        5 kWh of window is."""
+        from custom_components.ess_controller.optimiser.dp import CRAMPED_WINDOW_SHARE
+
+        assert 0.0 < CRAMPED_WINDOW_SHARE < 0.5
+
+    def test_the_plan_is_still_produced(self):
+        """A warning, not a refusal: it is the user's battery and their setting."""
+        plan = self.plan_with(90.0, 95.0)
+        assert plan.slots
+        assert not plan.infeasible

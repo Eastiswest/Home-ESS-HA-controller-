@@ -45,6 +45,14 @@ INF = math.inf
 # level discretisation would produce nonsense. Treat it as a misconfiguration.
 MIN_USABLE_KWH = 0.05
 
+# Below this share of the pack, the SoC limits have made the battery a spectator and
+# the plan is worth almost nothing -- but it is still a *valid* plan, so nothing used
+# to say so. A real install ran with Minimum charge at 90% against a maximum of 95%,
+# leaving 1.1 kWh of a 22 kWh pack: the evening ran off the grid at 45p with the SoC
+# line pinned flat, and the plan reported "Saves 1p vs self-use" with a straight face.
+# The setting was the cause and the plan was the only place anyone was looking.
+CRAMPED_WINDOW_SHARE = 0.15
+
 
 @dataclass(slots=True)
 class OptimiserSettings:
@@ -695,6 +703,15 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
     charge_slots = [s for s in plan.slots if s.action is SlotAction.CHARGE]
     discharge_slots = [s for s in plan.slots if s.action is SlotAction.DISCHARGE]
     parts: list[str] = []
+
+    # Said first, because nothing else in the sentence matters if this is true.
+    if battery.usable_kwh < battery.capacity_kwh * CRAMPED_WINDOW_SHARE:
+        parts.append(
+            f"Only {battery.usable_kwh:.1f} kWh of the {battery.capacity_kwh:.0f} kWh "
+            f"pack is usable between {battery.min_soc:.0f}% and "
+            f"{battery.max_soc:.0f}%, so there is very little to schedule -- check "
+            f"the minimum and maximum charge settings"
+        )
 
     if charge_slots:
         energy = sum(s.charge_ac_kwh for s in charge_slots)
