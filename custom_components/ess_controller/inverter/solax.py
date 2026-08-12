@@ -53,6 +53,8 @@ from .roles import (
     ROLE_SOC,
     ROLE_TARGET_SOC,
     ROLE_USE_MODE,
+    SOLAX_ROLE_SPECS,
+    unmatched_candidates,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -433,6 +435,14 @@ class SolaxModbusAdapter(InverterAdapter):
         data["entities"] = self._entities
         data["nominal_voltage"] = self._nominal_voltage
         data["manage_export_limit"] = self._manage_export_limit
+        # Every control a role failed to find is a control the plan cannot use, and
+        # the inverter's own app will happily show it sitting there enabled. Listing
+        # the near-misses turns "why is charge-from-grid still on?" into a name that
+        # can be mapped, rather than another guess at an entity ID.
+        data["unbound_candidates"] = unmatched_candidates(self.hass, self._entities)
+        data["unfilled_roles"] = sorted(
+            spec.role for spec in SOLAX_ROLE_SPECS if not self.entity(spec.role)
+        )
         return data
 
 

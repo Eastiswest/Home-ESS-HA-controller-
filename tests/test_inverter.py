@@ -1126,3 +1126,66 @@ class TestPeakShavingIsNotGridCharging:
         adapter = SolaxModbusAdapter(hass, entities)
         result = apply(adapter, command(SlotAction.SELF_USE))
         assert any("grid-charge control" in note for note in result.skipped)
+
+
+class TestUnboundControlsAreNamed:
+    """A control plainly present on the inverter's own app, and no role found it.
+
+    "Charge from grid" is the case that mattered: it sat enabled on the inverter
+    with "charge battery to 99%", the plan believed it had turned it off, and
+    nothing anywhere said which entity it should have been writing to. Guessing IDs
+    is what bound it to a peak-shaving switch in the first place, so the adapter now
+    reports what it could see and did not use.
+    """
+
+    def test_it_names_a_control_no_role_claimed(self):
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_selfuse_charge_from_grid_enable", "on")
+        adapter = solax_adapter(hass)
+        described = adapter.describe()
+        assert (
+            "switch.solax_selfuse_charge_from_grid_enable"
+            in described["unbound_candidates"]
+        )
+
+    def test_bound_entities_are_not_listed_as_unused(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass)
+        described = adapter.describe()
+        for entity_id in described["entities"].values():
+            assert entity_id not in described["unbound_candidates"]
+
+    def test_it_says_which_roles_went_unfilled(self):
+        from custom_components.ess_controller.inverter.roles import (
+            ROLE_MIN_SOC,
+            SOLAX_ROLE_SPECS,
+            discover_entities,
+        )
+
+        hass = build_solax_hass()
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        entities.pop(ROLE_MIN_SOC, None)
+        described = SolaxModbusAdapter(hass, entities).describe()
+        assert ROLE_MIN_SOC in described["unfilled_roles"]
+
+    def test_our_own_entities_are_never_offered(self):
+        hass = build_solax_hass()
+        hass.states.set("number.ai_ess_controller_min_soc", 20)
+        adapter = solax_adapter(hass)
+        assert not [
+            e for e in adapter.describe()["unbound_candidates"] if "ess_controller" in e
+        ]
+
+    def test_unrelated_entities_are_not_offered(self):
+        hass = build_solax_hass()
+        hass.states.set("switch.kitchen_lights", "on")
+        adapter = solax_adapter(hass)
+        assert "switch.kitchen_lights" not in adapter.describe()["unbound_candidates"]
+
+    def test_sensors_are_not_offered_as_controls(self):
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_battery_charge_something", 1)
+        adapter = solax_adapter(hass)
+        assert not [
+            e for e in adapter.describe()["unbound_candidates"] if e.startswith("sensor.")
+        ]

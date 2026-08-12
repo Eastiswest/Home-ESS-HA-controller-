@@ -273,6 +273,58 @@ def _match_role(
     return None
 
 
+# Words that mark an entity as plausibly one of the inverter's controls, used only
+# to narrow the "here is what I could see" list in diagnostics.
+CANDIDATE_WORDS: tuple[str, ...] = (
+    "soc",
+    "capacity",
+    "charge",
+    "discharge",
+    "grid",
+    "selfuse",
+    "self_use",
+    "backup",
+    "period",
+    "mode",
+    "export",
+    "limit",
+    "battery",
+)
+
+
+def unmatched_candidates(
+    hass: Any,
+    bound: dict[str, str],
+    prefix: str | None = None,
+    limit: int = 60,
+) -> list[str]:
+    """Inverter entities that look relevant but are not bound to any role.
+
+    Guessing entity IDs is how "charge from grid" ended up bound to a peak-shaving
+    switch, so this exists to stop the guessing: when a control is plainly there on
+    the inverter's own screen and no role found it, the answer is in this list.
+    Diagnostics only -- nothing reads it to make a decision.
+    """
+    taken = set(bound.values())
+    wanted_prefix = _clean(prefix) if prefix else None
+    found: list[str] = []
+    for state in _iter_states(hass):
+        entity_id = getattr(state, "entity_id", None)
+        if not entity_id or "." not in entity_id:
+            continue
+        domain, _, object_id = entity_id.partition(".")
+        if domain not in ("switch", "select", "number"):
+            continue
+        if entity_id in taken or _is_our_own(object_id):
+            continue
+        if wanted_prefix and not object_id.startswith(wanted_prefix):
+            continue
+        if not any(word in object_id for word in CANDIDATE_WORDS):
+            continue
+        found.append(entity_id)
+    return sorted(found)[:limit]
+
+
 def _clean(text: str) -> str:
     return str(text).strip().lower().replace(" ", "_").replace("-", "_")
 
