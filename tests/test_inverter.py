@@ -1296,11 +1296,15 @@ class TestARefusedWriteIsNotRetriedForEver:
     def test_other_writes_still_go_out(self):
         """One refused register must not stop the controller doing its job."""
         hass = self.refusing_hass()
-        hass.states.set("select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES)
+        hass.states.set(
+            "select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES
+        )
         adapter = solax_adapter(hass, manage_min_soc=True)
         apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
         hass.services.calls.clear()
-        hass.states.set("select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES)
+        hass.states.set(
+            "select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES
+        )
         apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
         entities = [c[2]["entity_id"] for c in hass.services.calls]
         assert "select.solax_charger_use_mode" in entities
