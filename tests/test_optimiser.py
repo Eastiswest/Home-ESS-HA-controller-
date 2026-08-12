@@ -956,7 +956,15 @@ class TestACrampedWindowSaysSo:
     def test_a_ninety_percent_floor_is_called_out(self):
         reason = self.plan_with(90.0, 95.0).reason
         assert "usable" in reason
-        assert "minimum and maximum charge" in reason
+        assert "very little to schedule" in reason
+
+    def test_it_does_not_blame_a_setting_it_cannot_see(self):
+        """The floor handed to the optimiser is not necessarily the user's
+        minimum-charge setting: an outage hold can raise it, and on a real install
+        one did -- to 90% while the setting sat correctly at 20. Blaming the setting
+        sent the reader away from the storm that was holding the pack shut."""
+        reason = self.plan_with(90.0, 95.0).reason
+        assert "setting" not in reason.lower()
 
     def test_it_names_the_numbers(self):
         reason = self.plan_with(90.0, 95.0).reason

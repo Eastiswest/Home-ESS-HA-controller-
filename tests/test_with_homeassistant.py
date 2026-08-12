@@ -1966,3 +1966,86 @@ class TestHorizonIsReportedInHours:
         slots = attributes["horizon_slots"]
         if slots:
             assert attributes["horizon_hours"] == pytest.approx(slots / 2, abs=0.6)
+
+
+class TestAnOutageHoldExplainsItself:
+    """The plan is where people look, and it was the one place that did not know.
+
+    A real install had its floor lifted from 20% to 90% by an outage hold on a
+    forecast 42 mph wind, leaving 1.1 kWh of a 22 kWh pack. The evening ran off the
+    grid at 45p, the state of charge sat flat all night, and the plan's reason read
+    "grid-charge 0.0 kWh ... Saves 1p vs self-use". The explanation existed on a
+    different entity, which is no use to anyone reading this one.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _hold(coordinator, reserve: float, reason: str):
+        """Pin the assessment, because a refresh recomputes it from the weather."""
+        coordinator.settings.outage_protection = True
+        coordinator.outage.level = "high"
+        coordinator.outage.reserve_soc = reserve
+        coordinator.outage.reason = reason
+        coordinator._assess_outage = lambda _now: None
+
+    async def test_it_is_marked_so_it_survives_a_skim(self, hass):
+        from custom_components.ess_controller.dashboard import OUTAGE_HOLD_MARK
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._hold(coordinator, 90.0, "forecast wind peaking at 42")
+        await coordinator.async_refresh()
+        assert coordinator.plan.reason.startswith(OUTAGE_HOLD_MARK)
+
+    async def test_the_mark_is_absent_without_a_hold(self, hass):
+        from custom_components.ess_controller.dashboard import OUTAGE_HOLD_MARK
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.outage_protection = False
+        await coordinator.async_refresh()
+        assert OUTAGE_HOLD_MARK not in coordinator.plan.reason
+
+    async def test_the_reason_names_the_hold(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._hold(coordinator, 90.0, "forecast wind peaking at 42")
+        await coordinator.async_refresh()
+        assert coordinator.plan is not None
+        assert "power cut" in coordinator.plan.reason
+
+    async def test_it_repeats_why_the_risk_was_raised(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._hold(coordinator, 90.0, "forecast wind peaking at 42")
+        await coordinator.async_refresh()
+        assert "wind peaking at 42" in coordinator.plan.reason
+
+    async def test_it_says_how_little_is_left(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._hold(coordinator, 90.0, "forecast wind peaking at 42")
+        await coordinator.async_refresh()
+        assert "available to plan with" in coordinator.plan.reason
+
+    async def test_no_hold_leaves_the_reason_alone(self, hass):
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.outage_protection = False
+        await coordinator.async_refresh()
+        assert coordinator.plan is not None
+        assert "power cut" not in coordinator.plan.reason
+
+    async def test_a_boost_below_the_setting_is_not_announced(self, hass):
+        """Outage protection can only raise the floor; if it does not, say nothing."""
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._hold(coordinator, coordinator.settings.min_soc, "breezy")
+        await coordinator.async_refresh()
+        assert "power cut" not in coordinator.plan.reason

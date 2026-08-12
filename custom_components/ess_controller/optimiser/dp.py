@@ -705,12 +705,18 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
     parts: list[str] = []
 
     # Said first, because nothing else in the sentence matters if this is true.
+    #
+    # Deliberately does not guess *why* the window is narrow. The floor handed to the
+    # optimiser is not necessarily the user's minimum-charge setting -- an outage hold
+    # can raise it, and on a real install one did, to 90% against a maximum of 95%.
+    # Blaming the setting sent the reader to a number that was correctly at 20 and
+    # away from the storm that was actually holding the pack shut. Whoever raised the
+    # floor says so themselves.
     if battery.usable_kwh < battery.capacity_kwh * CRAMPED_WINDOW_SHARE:
         parts.append(
             f"Only {battery.usable_kwh:.1f} kWh of the {battery.capacity_kwh:.0f} kWh "
             f"pack is usable between {battery.min_soc:.0f}% and "
-            f"{battery.max_soc:.0f}%, so there is very little to schedule -- check "
-            f"the minimum and maximum charge settings"
+            f"{battery.max_soc:.0f}%, so there is very little to schedule"
         )
 
     if charge_slots:

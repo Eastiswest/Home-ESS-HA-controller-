@@ -121,6 +121,7 @@ from .const import (
     STRATEGY_SELF_USE,
     TERMINAL_MODE_HORIZON_MEDIAN,
 )
+from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import describe as describe_confidence
 from .forecast.confidence import evening_uplift
 from .forecast.energy import EnergySeries
@@ -537,6 +538,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.optimiser_settings(),
                 now,
             )
+            self._note_raised_floor(self.plan)
             await self._async_shift_loads(now, slots, site.soc)
 
         await self._async_drive_appliances(now)
@@ -1717,6 +1719,31 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             reason=self.plan.reason,
             slot_end=slot.end,
             **base,
+        )
+
+    def _note_raised_floor(self, plan: Plan) -> None:
+        """Say in the plan's own words when something is holding the pack shut.
+
+        The plan is where people look, and it was the one place that did not know. A
+        real install had its floor lifted from 20% to 90% by an outage hold on a
+        forecast 42 mph wind, leaving 1.1 kWh of a 22 kWh pack: the evening ran off
+        the grid at 45p, the state of charge sat flat, and the reason read
+        "grid-charge 0.0 kWh ... Saves 1p vs self-use". The explanation existed, on a
+        different entity, which is no use to anyone reading this one.
+        """
+        boosted = self.effective_min_soc
+        configured = self.settings.min_soc
+        if boosted <= configured + 0.5:
+            return
+        why = self.outage.reason or "outage protection"
+        # Marked, not merely mentioned. This clause explains an entire day of
+        # apparently baffling behaviour -- a flat state of charge and an evening
+        # bought at 45p -- and it has to survive being skim-read at the top of a card
+        # that is otherwise full of prices.
+        plan.reason = (
+            f"{OUTAGE_HOLD_MARK} Holding {boosted:.0f}% back for a possible power cut "
+            f"({why}), so only {self.battery_spec().usable_kwh:.1f} kWh is available "
+            f"to plan with. {plan.reason}"
         )
 
     def _effective_export_limit(self) -> float:

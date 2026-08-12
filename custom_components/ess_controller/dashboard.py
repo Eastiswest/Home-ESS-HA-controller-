@@ -59,6 +59,12 @@ OVERVIEW_TABLE_SLOTS = 6
 
 PLACEHOLDER_VIEW_PATH = "waiting"
 
+# Prefixed to the plan's reason whenever an outage hold is narrowing the window it
+# can plan in. A storm hold explains an entire day of otherwise baffling behaviour --
+# a state of charge pinned flat, an evening bought at the top of the tariff -- so it
+# has to survive being skim-read at the top of a card full of prices.
+OUTAGE_HOLD_MARK = "⚠️"
+
 # Planning slots are half-hours, matching how the tariff is published, so a rate
 # in kW is this many hours' worth of energy.
 SLOT_HOURS = 0.5
