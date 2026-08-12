@@ -1259,3 +1259,117 @@ class TestForecastConfidence:
 
         assert "still learning" in describe(0.0)
         assert "trusted" in describe(1.0)
+
+
+class TestDailyTotalForecasts:
+    """Forecast.Solar publishes daily totals, and those are what people configure.
+
+    "Estimated energy production - today/tomorrow" carry no hourly breakdown. They
+    parsed to nothing, so the estimate fell back to bare geometry without a word: on a
+    real install that put a whole afternoon at 2 kWh while the array was busy filling
+    the battery, and the user had configured the integration exactly as its own UI
+    invited them to.
+    """
+
+    def test_the_day_is_read_from_the_sensor_name(self):
+        from custom_components.ess_controller.forecast.solar import daily_total_offset
+
+        assert daily_total_offset("energy_production_today") == 0
+        assert daily_total_offset("energy_production_tomorrow") == 1
+
+    def test_the_day_after_tomorrow_is_not_read_as_tomorrow(self):
+        """Longest fragment first, or "day_after_tomorrow" matches "tomorrow"."""
+        from custom_components.ess_controller.forecast.solar import daily_total_offset
+
+        assert daily_total_offset("energy_production_day_after_tomorrow") == 2
+
+    def test_a_sensor_that_names_no_day_is_declined(self):
+        from custom_components.ess_controller.forecast.solar import daily_total_offset
+
+        assert daily_total_offset("solar_energy_estimate") is None
+
+    @staticmethod
+    def predict(daily_totals=None, days: int = 3):
+        from datetime import UTC, datetime, timedelta
+
+        from custom_components.ess_controller.forecast.solar import SolarForecaster
+        from custom_components.ess_controller.learning.model import LearningModel
+
+        forecaster = SolarForecaster(
+            LearningModel(), peak_power_kw=2.0, latitude=54.0, longitude=-0.2
+        )
+        start = datetime(2026, 6, 21, 0, 0, tzinfo=UTC)
+        slots = [
+            (start + timedelta(minutes=30 * i), start + timedelta(minutes=30 * (i + 1)))
+            for i in range(48 * days)
+        ]
+        return (
+            forecaster.predict_series(slots, None, None, lambda dt: dt, daily_totals),
+            slots,
+        )
+
+    def test_a_whole_day_is_scaled_to_its_total(self):
+        from datetime import date
+
+        target = 9.0
+        predictions, slots = self.predict({date(2026, 6, 22): target})
+        scaled = sum(
+            p.kwh
+            for p, (s, _) in zip(predictions, slots, strict=True)
+            if s.date() == date(2026, 6, 22)
+        )
+        assert scaled == pytest.approx(target, rel=0.01)
+
+    def test_the_scaling_is_recorded_in_the_provenance(self):
+        from datetime import date
+
+        predictions, slots = self.predict({date(2026, 6, 22): 9.0})
+        sources = {
+            p.source
+            for p, (s, _) in zip(predictions, slots, strict=True)
+            if s.date() == date(2026, 6, 22) and p.kwh > 0
+        }
+        assert sources
+        assert all("daily" in source for source in sources)
+
+    def test_a_partial_day_is_left_alone(self):
+        """A daily total covers hours already gone, so scaling what remains by it
+        would cram a whole day into the last of the daylight."""
+        from datetime import date
+
+        predictions, slots = self.predict({date(2026, 6, 21): 9.0})
+        first_day = [
+            p
+            for p, (s, _) in zip(predictions, slots, strict=True)
+            if s.date() == date(2026, 6, 21)
+        ]
+        assert all("daily" not in p.source for p in first_day)
+
+    def test_no_totals_changes_nothing(self):
+        plain, _ = self.predict(None)
+        assert all("daily" not in p.source for p in plain)
+
+    def test_a_zero_total_is_honoured_not_ignored(self):
+        """An overcast day forecast at zero is information, not a missing value."""
+        from datetime import date
+
+        predictions, slots = self.predict({date(2026, 6, 22): 0.0})
+        scaled = sum(
+            p.kwh
+            for p, (s, _) in zip(predictions, slots, strict=True)
+            if s.date() == date(2026, 6, 22)
+        )
+        assert scaled == pytest.approx(0.0, abs=1e-6)
+
+    def test_a_day_with_no_daylight_is_not_divided_by_zero(self):
+        from datetime import date
+
+        from custom_components.ess_controller.forecast.solar import (
+            SolarPrediction,
+            _scale_to_daily_totals,
+        )
+
+        predictions = [SolarPrediction(kwh=0.0, source="clearsky") for _ in range(4)]
+        dates = [date(2026, 12, 21)] * 4
+        _scale_to_daily_totals(predictions, dates, {date(2026, 12, 21): 5.0})
+        assert all(p.kwh == 0.0 for p in predictions)

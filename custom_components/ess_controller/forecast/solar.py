@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from ..learning.model import LearningModel
@@ -31,6 +31,10 @@ from .energy import EnergySeries, EnergySlot
 from .weather import WeatherSeries
 
 _LOGGER = logging.getLogger(__name__)
+
+# Below this a day's estimate is effectively zero, and scaling it would amplify
+# rounding noise into a forecast.
+EPS_KWH = 0.01
 
 # Solcast-style: list of half-hourly average power in kW.
 POWER_LIST_ATTRIBUTES: tuple[str, ...] = (
@@ -188,6 +192,78 @@ def parse_solar_forecast_attributes(attributes: Mapping[str, Any]) -> list[Energ
     return []
 
 
+# Object-ID fragments naming the day a daily-total forecast sensor refers to.
+#
+# Forecast.Solar publishes "Estimated energy production - today/tomorrow" as plain
+# daily totals with no hourly breakdown, and those are the sensors a person naturally
+# reaches for. They carry no timestamps, so the day has to come from the name.
+DAILY_TOTAL_DAY_OFFSETS: tuple[tuple[str, int], ...] = (
+    ("today", 0),
+    ("tomorrow", 1),
+    ("day_after_tomorrow", 2),
+    ("d3", 2),
+    ("d4", 3),
+)
+
+
+def daily_total_offset(object_id: str) -> int | None:
+    """Which day a daily-total sensor is about, or None if it does not say.
+
+    Longest fragment first, so "day_after_tomorrow" is not read as "tomorrow".
+    """
+    text = str(object_id).lower()
+    for fragment, offset in sorted(
+        DAILY_TOTAL_DAY_OFFSETS, key=lambda pair: -len(pair[0])
+    ):
+        if fragment in text:
+            return offset
+    return None
+
+
+def _scale_to_daily_totals(
+    predictions: list[SolarPrediction],
+    local_dates: list[date],
+    daily_totals: dict[date, float] | None,
+) -> None:
+    """Rescale a day's geometric estimate so it sums to a forecast day total.
+
+    Applied in place, and only to days lying *wholly* within the horizon. A daily
+    total describes a whole day including the hours already gone, so scaling a partial
+    day by it would inflate what remains -- on a horizon starting at 16:30, today's
+    total would be crammed into the last of the daylight. The first and last dates are
+    therefore left alone, which on a 48-hour horizon still leaves tomorrow: the day
+    that decides whether to buy into today's cheap window.
+
+    Only estimates the model derived itself are touched. Where an hourly forecast was
+    available it is already better than a total.
+    """
+    if not daily_totals or not predictions:
+        return
+    whole_days = set(local_dates[1:-1]) - {local_dates[0], local_dates[-1]}
+    for day in whole_days:
+        target = daily_totals.get(day)
+        if target is None or target < 0:
+            continue
+        indices = [
+            i
+            for i, (d, p) in enumerate(zip(local_dates, predictions, strict=True))
+            if d == day and p.external_kwh is None
+        ]
+        estimated = sum(predictions[i].kwh for i in indices)
+        if not indices or estimated <= EPS_KWH:
+            continue
+        factor = target / estimated
+        for i in indices:
+            current = predictions[i]
+            predictions[i] = SolarPrediction(
+                kwh=current.kwh * factor,
+                source=f"{current.source}+daily",
+                external_kwh=current.external_kwh,
+                cloud=current.cloud,
+                uv_index=current.uv_index,
+            )
+
+
 def build_forecast_series(
     attribute_sets: Iterable[Mapping[str, Any]],
 ) -> EnergySeries:
@@ -309,13 +385,22 @@ class SolarForecaster:
         external: EnergySeries | None,
         weather: WeatherSeries | None,
         to_local,
+        daily_totals: dict[date, float] | None = None,
     ) -> list[SolarPrediction]:
         """Predict every slot of a horizon.
 
         ``to_local`` converts a planning timestamp (UTC) into local time.
+
+        ``daily_totals`` maps a local date to a forecast day's total generation, for
+        the sensors that publish only that. Forecast.Solar's "Estimated energy
+        production - today/tomorrow" are exactly this, and they are the sensors a
+        person naturally reaches for: before this they parsed to nothing and the
+        estimate fell back silently to bare geometry, which on a real install put a
+        whole afternoon at 2 kWh while the array was filling the battery.
         """
         predictions: list[SolarPrediction] = []
         has_external = bool(external)
+        local_dates: list[date] = [to_local(start).date() for start, _ in slots]
         for start, end in slots:
             duration = (end - start).total_seconds() / 3600.0
             external_kwh = external.energy_between(start, end) if has_external else None
@@ -341,6 +426,7 @@ class SolarForecaster:
                     to_local(start), duration, external_kwh, cloud, uv_index
                 )
             )
+        _scale_to_daily_totals(predictions, local_dates, daily_totals)
         return predictions
 
     def describe(self) -> dict[str, Any]:

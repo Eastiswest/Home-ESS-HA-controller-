@@ -2145,3 +2145,77 @@ class TestDisablingWritesHandsTheInverterBack:
         coordinator._adapter.async_apply = _boom
         await coordinator.async_update_settings(dry_run=True)
         assert coordinator.settings.dry_run is True
+
+
+class TestUnusableForecastSensorsAreNamed:
+    """Configuring a forecast sensor that yields nothing must not be silent.
+
+    A real install pointed the solar-forecast field at Forecast.Solar's "Estimated
+    energy production - today/tomorrow" -- daily totals with no hourly breakdown, and
+    exactly what the field's own entity picker offered. They parsed to nothing, the
+    estimate fell back to bare geometry, and the plan carried on looking confident:
+    a whole afternoon forecast at 2 kWh while the array was filling the battery.
+    """
+
+    async def _coordinator(self, hass, entities):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.const import CONF_SOLAR_FORECAST_ENTITIES
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, CONF_SOLAR_FORECAST_ENTITIES: entities},
+        )
+        await hass.async_block_till_done()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_refresh()
+        return coordinator
+
+    async def test_a_daily_total_sensor_is_used_not_discarded(self, hass):
+        hass.states.async_set("sensor.energy_production_tomorrow", "9.4", {})
+        coordinator = await self._coordinator(hass, ["sensor.energy_production_tomorrow"])
+        assert 9.4 in coordinator._solar_daily_totals.values()
+
+    async def test_it_says_it_is_only_scaling_an_estimate(self, hass):
+        hass.states.async_set("sensor.energy_production_tomorrow", "9.4", {})
+        coordinator = await self._coordinator(hass, ["sensor.energy_production_tomorrow"])
+        note = coordinator.diagnostics()["solar_forecast_note"]
+        assert "daily totals" in note
+        assert "hourly forecast would be better" in note
+
+    async def test_a_sensor_that_names_no_day_is_reported(self, hass):
+        hass.states.async_set("sensor.solar_guess", "9.4", {})
+        coordinator = await self._coordinator(hass, ["sensor.solar_guess"])
+        assert "no usable forecast" in coordinator.diagnostics()["solar_forecast_note"]
+
+    async def test_a_missing_sensor_is_reported(self, hass):
+        coordinator = await self._coordinator(hass, ["sensor.not_here"])
+        note = coordinator.diagnostics()["solar_forecast_note"]
+        assert "sensor.not_here" in note and "not found" in note
+
+    async def test_an_unknown_state_is_reported(self, hass):
+        hass.states.async_set("sensor.energy_production_tomorrow", "unknown", {})
+        coordinator = await self._coordinator(hass, ["sensor.energy_production_tomorrow"])
+        assert "no usable forecast" in coordinator.diagnostics()["solar_forecast_note"]
+
+    async def test_an_hourly_forecast_needs_no_note(self, hass):
+        hass.states.async_set(
+            "sensor.solcast_forecast_today",
+            "9.4",
+            {
+                "detailedHourly": [
+                    {"period_start": "2026-08-13T10:00:00+00:00", "pv_estimate": 1.2},
+                    {"period_start": "2026-08-13T11:00:00+00:00", "pv_estimate": 1.4},
+                ]
+            },
+        )
+        coordinator = await self._coordinator(hass, ["sensor.solcast_forecast_today"])
+        assert coordinator.diagnostics()["solar_forecast_note"] == ""
+
+    async def test_configuring_nothing_says_nothing(self, hass):
+        coordinator = await self._coordinator(hass, [])
+        assert coordinator.diagnostics()["solar_forecast_note"] == ""

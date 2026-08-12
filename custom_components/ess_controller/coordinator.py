@@ -126,7 +126,12 @@ from .forecast.confidence import describe as describe_confidence
 from .forecast.confidence import evening_uplift
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster
-from .forecast.solar import SolarForecaster, build_forecast_series
+from .forecast.solar import (
+    SolarForecaster,
+    build_forecast_series,
+    daily_total_offset,
+    parse_solar_forecast_attributes,
+)
 from .forecast.weather import WeatherSeries
 from .inverter.base import (
     ApplyResult,
@@ -232,6 +237,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._export_provider = None
         self._weather: WeatherSeries | None = None
         self._solar_forecast: EnergySeries | None = None
+        self._solar_daily_totals: dict[Any, float] = {}
+        self._solar_forecast_note: str = ""
         self._forecast_fetched: datetime | None = None
         self._import_prices = PriceSeries()
         self._export_prices = PriceSeries()
@@ -925,16 +932,57 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return WeatherSeries.from_forecast(entries)
 
     def _fetch_solar_forecast(self) -> EnergySeries | None:
+        """The hourly forecast, plus daily totals for the sensors that publish only
+        those, plus a note when a configured sensor gave us nothing.
+
+        Forecast.Solar's "Estimated energy production - today/tomorrow" are plain
+        daily totals with no hourly breakdown. They are the sensors a person naturally
+        picks, they parsed to nothing, and the estimate fell back to bare geometry
+        without a word -- which on a real install put a whole afternoon at 2 kWh while
+        the array was busy filling the battery. Both halves of that are fixed here: the
+        totals are kept and used, and anything unusable is named.
+        """
         raw = self.options.get(CONF_SOLAR_FORECAST_ENTITIES)
         entity_ids = _as_list(raw)
+        self._solar_daily_totals = {}
+        self._solar_forecast_note = ""
         if not entity_ids:
             return None
+
+        today = dt_util.as_local(dt_util.utcnow()).date()
         attribute_sets = []
+        hourly: list[str] = []
+        totals: list[str] = []
+        unusable: list[str] = []
         for entity_id in entity_ids:
             state = self.hass.states.get(entity_id)
             if state is None:
+                unusable.append(f"{entity_id} (not found)")
                 continue
-            attribute_sets.append(state.attributes)
+            if parse_solar_forecast_attributes(state.attributes):
+                attribute_sets.append(state.attributes)
+                hourly.append(entity_id)
+                continue
+            # No hourly detail. A plain daily total is still worth having.
+            offset = daily_total_offset(entity_id.partition(".")[2])
+            value = _as_float(state.state)
+            if offset is not None and value is not None and value >= 0:
+                self._solar_daily_totals[today + timedelta(days=offset)] = value
+                totals.append(entity_id)
+            else:
+                unusable.append(entity_id)
+
+        if unusable:
+            self._solar_forecast_note = (
+                f"no usable forecast from {', '.join(unusable)}; "
+                f"estimating from the sun's position instead"
+            )
+        elif totals and not hourly:
+            self._solar_forecast_note = (
+                f"using daily totals from {', '.join(totals)} to scale an estimate "
+                f"from the sun's position; an hourly forecast would be better"
+            )
+
         if not attribute_sets:
             return None
         series = build_forecast_series(attribute_sets)
@@ -1140,7 +1188,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         solar_predictions = solar.predict_series(
-            boundaries, self._solar_forecast, self._weather, dt_util.as_local
+            boundaries,
+            self._solar_forecast,
+            self._weather,
+            dt_util.as_local,
+            self._solar_daily_totals,
         )
         load_predictions = load.predict_series(
             boundaries, self._weather, dt_util.as_local
@@ -2089,6 +2141,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {
             "disabled_inverter_controls": self.disabled_inverter_controls(),
             "horizon_reach": self.horizon_reach,
+            "solar_forecast_note": self._solar_forecast_note,
             "settings": self.settings.as_dict(),
             "battery_spec": {
                 "capacity_kwh": self.battery_spec().capacity_kwh,
@@ -2157,6 +2210,14 @@ def _as_list(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+def _as_float(value: Any) -> float | None:
+    """A number from an entity state, or None for "unknown" and friends."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_attr_dt(value: Any) -> datetime | None:
