@@ -173,6 +173,16 @@ def _control_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
     inverter = coordinator.inverter_state
     attributes["inverter_mode"] = inverter.mode
     attributes["inverter_locked"] = inverter.locked
+    attributes["inverter_reserve"] = inverter.min_soc
+    # The floor that actually governs, when it disagrees with the plan's. A real
+    # install had the inverter stuck at 90% while the plan worked to 20%, and nothing
+    # compared the two.
+    conflict = coordinator.reserve_conflict()
+    if conflict:
+        attributes["reserve_conflict"] = conflict
+    rejected = coordinator.adapter.rejected_roles()
+    if rejected:
+        attributes["rejected_writes"] = rejected
     return attributes
 
 

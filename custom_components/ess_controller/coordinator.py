@@ -144,6 +144,7 @@ from .inverter.battery import BatteryReading, BatterySource
 from .inverter.generic import GenericEntityAdapter
 from .inverter.roles import (
     ROLE_BATTERY_VOLTAGE,
+    ROLE_MIN_SOC,
     ROLE_SOC,
     ROLE_USE_MODE,
     SOLAX_ROLE_SPECS,
@@ -1347,6 +1348,36 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
         )
 
+    def reserve_conflict(self) -> str:
+        """When the inverter's own reserve overrides the plan's floor, say so.
+
+        The inverter's reserve is the floor that actually governs: whatever the plan
+        intends, the battery will not discharge below it. A real install had it stuck
+        at 90% -- written there by an earlier hold, and then refused when the
+        controller tried to lower it again -- so the pack sat at 89% all afternoon
+        buying 45p electricity while the plan believed it was free to spend down to
+        20%. Nothing anywhere compared the two numbers, and they are the two numbers
+        that matter.
+        """
+        actual = self.inverter_state.min_soc
+        if actual is None:
+            return ""
+        floor = self.effective_min_soc
+        if actual <= floor + 1.0:
+            return ""
+        rejected = self._adapter.rejected_roles().get(ROLE_MIN_SOC)
+        tail = (
+            " The inverter refused to change it, so it has to be set on the inverter "
+            "itself."
+            if rejected
+            else ""
+        )
+        return (
+            f"The inverter will not discharge below {actual:.0f}% -- its own reserve "
+            f"setting -- while the plan is working to {floor:.0f}%, so "
+            f"{max(actual - floor, 0.0):.0f} points of the pack are unavailable.{tail}"
+        )
+
     @property
     def horizon_reach(self) -> str:
         """Whether the plan is looking as far ahead as its prices allow."""
@@ -2142,6 +2173,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "disabled_inverter_controls": self.disabled_inverter_controls(),
             "horizon_reach": self.horizon_reach,
             "solar_forecast_note": self._solar_forecast_note,
+            "reserve_conflict": self.reserve_conflict(),
+            "rejected_writes": self._adapter.rejected_roles(),
             "settings": self.settings.as_dict(),
             "battery_spec": {
                 "capacity_kwh": self.battery_spec().capacity_kwh,

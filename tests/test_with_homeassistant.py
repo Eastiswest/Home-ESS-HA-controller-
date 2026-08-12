@@ -2113,13 +2113,15 @@ class TestDisablingWritesHandsTheInverterBack:
         assert during[0] is True
 
     async def test_turning_writing_on_does_not_hand_back(self, hass):
-        from custom_components.ess_controller.models import SlotAction
-
+        """Asserted on the hand-back itself rather than on the first action written:
+        the plan's own choice is frequently self-use, which made the old form pass or
+        fail by luck."""
         coordinator = await self._coordinator(hass)
         coordinator.settings.dry_run = True
-        seen = self._watch(coordinator)
+        called: list[int] = []
+        coordinator._async_hand_back = lambda _now: called.append(1)
         await coordinator.async_update_settings(dry_run=False)
-        assert SlotAction.SELF_USE not in seen[:1]
+        assert called == []
 
     async def test_an_unrelated_change_does_not_hand_back(self, hass):
         coordinator = await self._coordinator(hass)
@@ -2219,3 +2221,65 @@ class TestUnusableForecastSensorsAreNamed:
     async def test_configuring_nothing_says_nothing(self, hass):
         coordinator = await self._coordinator(hass, [])
         assert coordinator.diagnostics()["solar_forecast_note"] == ""
+
+
+class TestTheInvertersOwnReserveIsCompared:
+    """The floor that actually governs is the inverter's, not the plan's.
+
+    A real install had its reserve stuck at 90% -- written there by an earlier hold,
+    then refused when the controller tried to lower it again -- so the pack sat at 89%
+    all afternoon buying 45p electricity while the plan believed it was free to spend
+    down to 20%. Nothing anywhere compared the two numbers, and they are the two
+    numbers that matter.
+    """
+
+    async def _coordinator(self, hass, reserve):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_refresh()
+        coordinator.inverter_state.min_soc = reserve
+        return coordinator
+
+    async def test_a_higher_reserve_is_reported(self, hass):
+        coordinator = await self._coordinator(hass, 90.0)
+        note = coordinator.reserve_conflict()
+        assert "will not discharge below 90%" in note
+        assert "points of the pack are unavailable" in note
+
+    async def test_a_matching_reserve_says_nothing(self, hass):
+        coordinator = await self._coordinator(hass, 20.0)
+        coordinator.inverter_state.min_soc = coordinator.effective_min_soc
+        assert coordinator.reserve_conflict() == ""
+
+    async def test_a_lower_reserve_says_nothing(self, hass):
+        """The inverter being more permissive than the plan is not a problem."""
+        coordinator = await self._coordinator(hass, 5.0)
+        assert coordinator.reserve_conflict() == ""
+
+    async def test_an_unreadable_reserve_says_nothing(self, hass):
+        coordinator = await self._coordinator(hass, None)
+        assert coordinator.reserve_conflict() == ""
+
+    async def test_a_refused_write_is_mentioned_in_the_note(self, hass):
+        from custom_components.ess_controller.inverter.roles import ROLE_MIN_SOC
+
+        coordinator = await self._coordinator(hass, 90.0)
+        coordinator.adapter._rejected[ROLE_MIN_SOC] = "rejected at register 0xc5"
+        note = coordinator.reserve_conflict()
+        assert "set on the inverter itself" in note
+
+    async def test_it_reaches_the_control_status_entity(self, hass):
+        coordinator = await self._coordinator(hass, 90.0)
+        coordinator.async_update_listeners()
+        state = hass.states.get("sensor.ai_ess_controller_control_status")
+        assert state is not None
+        assert "reserve_conflict" in state.attributes
+
+    async def test_it_is_in_the_diagnostics(self, hass):
+        coordinator = await self._coordinator(hass, 90.0)
+        assert coordinator.diagnostics()["reserve_conflict"]

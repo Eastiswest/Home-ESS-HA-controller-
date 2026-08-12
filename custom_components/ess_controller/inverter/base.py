@@ -370,6 +370,9 @@ class InverterAdapter(ABC):
     def __init__(self, hass: Any) -> None:
         self.hass = hass
         self._last_applied: ControlCommand | None = None
+        # Roles the inverter has refused to write, and what it said, so we ask once
+        # rather than every cycle for ever.
+        self._rejected: dict[str, str] = {}
 
     @property
     @abstractmethod
@@ -396,6 +399,44 @@ class InverterAdapter(ABC):
     def reset_last_applied(self) -> None:
         """Force the next apply to write, e.g. after a manual override."""
         self._last_applied = None
+        # A deliberate action is also the moment to stop sulking: whatever the
+        # inverter refused before, try it once more rather than carrying the refusal
+        # forward for ever.
+        self._rejected.clear()
+
+    def _note_rejection(self, write: Write, err: Exception) -> None:
+        """Remember a role the inverter refused, so we stop asking every cycle.
+
+        A real inverter rejected its own reserve register outright -- Modbus exception
+        4, device failure -- and the controller asked again every five minutes for
+        hours. Each attempt failed the whole apply, so ``write_verified`` stayed false
+        and every genuine problem was buried underneath a known one. Asking once and
+        saying so is more useful than asking three hundred times.
+        """
+        if write.role:
+            self._rejected[write.role] = str(err)
+
+    def rejected_roles(self) -> dict[str, str]:
+        """Roles the inverter has refused to write, and what it said."""
+        return dict(self._rejected)
+
+    def drop_rejected_writes(
+        self, writes: list[Write], skipped: list[str]
+    ) -> list[Write]:
+        """Filter out writes for roles the inverter has already refused."""
+        if not self._rejected:
+            return writes
+        kept: list[Write] = []
+        for write in writes:
+            reason = self._rejected.get(write.role) if write.role else None
+            if reason is None:
+                kept.append(write)
+                continue
+            skipped.append(
+                f"not retrying {write.entity_id}: the inverter refused it "
+                f"({reason.split(':')[-1].strip()[:80]})"
+            )
+        return kept
 
     async def async_apply(
         self, command: ControlCommand, dry_run: bool = True, verify: bool = True
@@ -404,6 +445,7 @@ class InverterAdapter(ABC):
         result = ApplyResult(action=command.action, dry_run=dry_run)
 
         writes, skipped = self.plan_writes(command)
+        writes = self.drop_rejected_writes(writes, skipped)
         result.skipped = skipped
         result.writes = writes
         result.changed = bool(writes)
@@ -429,6 +471,7 @@ class InverterAdapter(ABC):
                     "Failed writing %s to %s: %s", write.value, write.entity_id, err
                 )
                 result.errors.append(f"{write.entity_id}: {err}")
+                self._note_rejection(write, err)
 
         if verify and not result.errors:
             result.unverified = await self._async_verify(writes)

@@ -1242,3 +1242,73 @@ class TestTheReserveIsOnlyWrittenWhereItApplies:
         apply(adapter, command(SlotAction.IDLE, min_soc=20.0))
         by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
         assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 57.0
+
+
+class TestARefusedWriteIsNotRetriedForEver:
+    """A real inverter refused its own reserve register -- Modbus exception 4 -- and
+    the controller asked again every five minutes for hours.
+
+    Each attempt failed the whole apply, so "Inverter writes" stayed unverified and
+    every genuine problem was buried under a known one. Asking once and saying so is
+    more useful than asking three hundred times.
+    """
+
+    @staticmethod
+    def refusing_hass():
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_minimum_capacity", 90.0)
+
+        original = hass.services.async_call
+
+        async def _call(domain, service, data, blocking=False):
+            if data.get("entity_id") == "number.solax_battery_minimum_capacity":
+                raise RuntimeError("write was rejected by device 1 at register 0xc5")
+            return await original(domain, service, data, blocking=blocking)
+
+        hass.services.async_call = _call
+        return hass
+
+    def test_the_refusal_is_recorded(self):
+        from custom_components.ess_controller.inverter.roles import ROLE_MIN_SOC
+
+        hass = self.refusing_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        result = apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        assert result.errors
+        assert ROLE_MIN_SOC in adapter.rejected_roles()
+
+    def test_it_is_not_attempted_again(self):
+        hass = self.refusing_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        before = len(hass.services.calls)
+        result = apply(adapter, command(SlotAction.SELF_USE, min_soc=21.0))
+        assert len(hass.services.calls) == before
+        assert any("not retrying" in note for note in result.skipped)
+
+    def test_the_skip_says_what_the_inverter_said(self):
+        hass = self.refusing_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        result = apply(adapter, command(SlotAction.SELF_USE, min_soc=21.0))
+        assert any("0xc5" in note for note in result.skipped)
+
+    def test_other_writes_still_go_out(self):
+        """One refused register must not stop the controller doing its job."""
+        hass = self.refusing_hass()
+        hass.states.set("select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES)
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        hass.services.calls.clear()
+        hass.states.set("select.solax_charger_use_mode", "Manual Mode", options=SOLAX_MODES)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "select.solax_charger_use_mode" in entities
+
+    def test_a_deliberate_action_clears_the_sulk(self):
+        """An override or a settings change is the moment to try once more."""
+        hass = self.refusing_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        adapter.reset_last_applied()
+        assert adapter.rejected_roles() == {}
