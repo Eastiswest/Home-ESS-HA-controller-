@@ -122,7 +122,7 @@ from .const import (
     TERMINAL_MODE_HORIZON_MEDIAN,
 )
 from .forecast.confidence import describe as describe_confidence
-from .forecast.confidence import load_factor, solar_factor
+from .forecast.confidence import evening_uplift
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster
 from .forecast.solar import SolarForecaster, build_forecast_series
@@ -1136,16 +1136,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             boundaries, self._weather, dt_util.as_local
         )
 
-        # One place applies the allowance for a young forecast, so the energy
-        # balance, the terminal credit and the dashboard cannot disagree about how
-        # heavy the evening is.
-        confidence = self.forecast_confidence()
-        load_scale = load_factor(confidence)
-        solar_scale = solar_factor(confidence)
+        # A young load model under-calls the evening, and the evening is where the
+        # dear half-hours are. Provision for more of it until the house has taught
+        # the model otherwise -- only the evening, because that is where the error
+        # measured on a real install actually was.
+        uplift = evening_uplift(
+            [dt_util.as_local(start).hour for start, _ in boundaries],
+            [demand.kwh for demand in load_predictions],
+            self.forecast_confidence(),
+        )
 
         slots: list[HorizonSlot] = []
-        for (start, end), sun, demand in zip(
-            boundaries, solar_predictions, load_predictions, strict=True
+        for index, ((start, end), sun, demand) in enumerate(
+            zip(boundaries, solar_predictions, load_predictions, strict=True)
         ):
             import_price = import_series.price_at(start)
             if import_price is None:
@@ -1158,13 +1161,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     end=end,
                     import_price=import_price,
                     export_price=export_price,
-                    # Marked down and up while the model is still learning the
-                    # house. A fresh install's flat default shape under-called a
-                    # real evening by 41%, and on a floored pack that is the
-                    # difference between covering the evening and buying the back
-                    # half of it at 46-58p.
-                    pv_kwh=sun.kwh * solar_scale,
-                    load_kwh=demand.kwh * load_scale,
+                    pv_kwh=sun.kwh,
+                    load_kwh=demand.kwh + uplift[index],
                     # Declared on HorizonSlot from the start and never populated,
                     # which only mattered once there was a forecast worth telling
                     # apart from an announced price.

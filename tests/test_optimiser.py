@@ -800,68 +800,98 @@ class TestARealSummerHorizon:
         assert greedy.total_cost > greedy.self_use_cost + 100.0
         assert sum(s.grid_import_kwh for s in greedy.slots) > 5.0
 
-    def scaled(self, confidence: float):
-        """The same day as an untrained model would have forecast it.
+    def with_evening_allowance(self, confidence: float):
+        """The same day, with the evening provisioned as a model of this maturity
+        would provision it.
 
-        The fixture holds what the install actually planned against, which is the
-        trained case. Marking the load up and the solar down reproduces what a fresh
-        install sees, and that is where the evening headroom has to come from.
+        Two earlier attempts at this are worth remembering. Marking the whole day's
+        load up cost about 150p a day on this very horizon to hedge a shortfall worth
+        about 73p, because it made the plan buy for a midday shortfall that did not
+        exist. Raising the floor did nothing useful and pointed the wrong way: a floor
+        protects charge for later, when what is wanted is more charge arriving at the
+        evening.
         """
-        from custom_components.ess_controller.forecast.confidence import (
-            load_factor,
-            solar_factor,
-        )
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
 
         slots, soc, battery, grid = self.load()
-        scale_l, scale_s = load_factor(confidence), solar_factor(confidence)
+        uplift = evening_uplift(
+            [s.start.hour for s in slots], [s.load_kwh for s in slots], confidence
+        )
         adjusted = [
             HorizonSlot(
                 start=s.start,
                 end=s.end,
                 import_price=s.import_price,
                 export_price=s.export_price,
-                pv_kwh=s.pv_kwh * scale_s,
-                load_kwh=s.load_kwh * scale_l,
+                pv_kwh=s.pv_kwh,
+                load_kwh=s.load_kwh + extra,
             )
-            for s in slots
+            for s, extra in zip(slots, uplift, strict=True)
         ]
         return optimise(adjusted, soc, battery, grid, OptimiserSettings())
 
-    def test_an_untrained_forecast_provisions_for_a_heavier_day(self):
+    @staticmethod
+    def _evening(plan):
+        return [s for s in plan.slots if 16 <= s.start.hour <= 23]
+
+    def test_it_never_arrives_at_the_evening_with_less(self):
         """The complaint that prompted this: 40% going into the evening is not
-        enough when the floor is 20% and the evening takes 30% of the pack.
+        enough when the floor is 20% and the evening takes 30% of the pack. So the
+        charge must not be committed to something else earlier in the day."""
+        untrained = self._evening(self.with_evening_allowance(0.0))[0]
+        trained = self._evening(self.with_evening_allowance(1.0))[0]
+        assert untrained.soc_start >= trained.soc_start - 1e-6
 
-        Measured on what it ends the horizon holding, not on its lowest point: a
-        plan built for a heavier evening does *more* work, so its trough against
-        that heavier forecast can sit lower while the real battery sits higher.
-        """
-        trained = self.plan()
-        untrained = self.scaled(0.0)
-        assert untrained.slots[-1].soc_end > trained.slots[-1].soc_end + 5.0
+    def test_the_battery_carries_the_heavier_evening(self):
+        """Provisioning for it is only worth anything if the pack then serves it."""
+        untrained = self.with_evening_allowance(0.0)
+        trained = self.with_evening_allowance(1.0)
+        assert sum(s.discharge_ac_kwh for s in self._evening(untrained)) > sum(
+            s.discharge_ac_kwh for s in self._evening(trained)
+        )
 
-    def test_an_untrained_forecast_is_willing_to_buy_the_insurance(self):
-        untrained = self.scaled(0.0)
-        assert sum(s.grid_import_kwh for s in untrained.slots) > 1.0
+    def test_the_evening_is_still_not_bought_at_peak_prices(self):
+        untrained = self.with_evening_allowance(0.0)
+        dear = [s for s in self._evening(untrained) if s.import_price > 40.0]
+        assert not any(s.grid_import_kwh > 0.05 for s in dear)
 
-    def test_it_buys_the_insurance_cheaply(self):
-        """If it is going to buy, it should buy in the cheap half of the day rather
-        than discover the shortfall at 18:30."""
-        untrained = self.scaled(0.0)
-        bought = [s for s in untrained.slots if s.grid_import_kwh > 0.05]
-        assert bought
-        dear = [s for s in bought if s.import_price > 35.0]
-        assert not dear, [(s.start.hour, s.import_price) for s in dear]
+    def test_the_allowance_lands_in_the_evening_not_the_afternoon(self):
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        slots, _, _, _ = self.load()
+        uplift = evening_uplift(
+            [s.start.hour for s in slots], [s.load_kwh for s in slots], 0.0
+        )
+        for slot, extra in zip(slots, uplift, strict=True):
+            if extra > 0:
+                assert 16 <= slot.start.hour <= 23, slot.start.hour
+
+    def test_the_allowance_is_the_size_of_the_error_measured(self):
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        slots, _, _, _ = self.load()
+        uplift = evening_uplift(
+            [s.start.hour for s in slots], [s.load_kwh for s in slots], 0.0
+        )
+        assert sum(uplift) == pytest.approx(3.0, abs=0.01)
+
+    def test_it_is_far_cheaper_than_marking_up_the_whole_day(self):
+        """Measured, because the first attempt was not."""
+        untrained = self.with_evening_allowance(0.0)
+        assert untrained.total_cost - untrained.self_use_cost < 60.0
 
     def test_the_caution_unwinds_as_the_model_learns(self):
-        """Sensible on day one, and out of the way once the house has taught it."""
-        bought = [
-            sum(s.grid_import_kwh for s in self.scaled(c).slots) for c in (0.0, 0.5, 1.0)
+        """Measured on evening discharge, not on the trough. A plan serving a
+        heavier evening ends *lower*, which is the whole point of provisioning for
+        it -- the charge is there and it gets used."""
+        served = [
+            sum(s.discharge_ac_kwh for s in self._evening(self.with_evening_allowance(c)))
+            for c in (0.0, 0.5, 1.0)
         ]
-        assert bought[0] > bought[1] > bought[2]
-        assert bought[2] == pytest.approx(0.0, abs=0.05)
+        assert served[0] > served[1] > served[2]
 
-    def test_the_insurance_is_not_open_ended(self):
-        """It buys against a heavier day, not against every conceivable day."""
-        untrained = self.scaled(0.0)
-        _, _, battery, _ = self.load()
-        assert sum(s.grid_import_kwh for s in untrained.slots) < battery.usable_kwh
+    def test_on_a_sunny_day_the_caution_is_free(self):
+        """Nothing is bought for it here: it only stops the charge being spent
+        elsewhere, which on a day with this much sun costs nothing at all."""
+        untrained = self.with_evening_allowance(0.0)
+        assert untrained.total_cost <= untrained.self_use_cost + 1e-6

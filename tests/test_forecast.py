@@ -1153,70 +1153,106 @@ class TestCorrectionIsVisible:
 
 
 class TestForecastConfidence:
-    """A young forecast is planned against pessimistically, and the reason is that
-    being wrong is not symmetrical.
+    """A young forecast is provisioned around, and only where it is wrong.
 
-    On a real install the flat default shape put 17:00-23:30 at 3.9 kWh against
-    about 6.6 kWh actually used. A pack floored at 20% entering the evening on a
-    forecast that light runs out part-way through and buys the rest at 46-58p.
-    Carrying a few kWh it turned out not to need costs the wear on them, under 2p
-    each. So the allowance runs one way.
+    On a real install the flat default shape put 17:00-23:30 at 3.9 kWh against about
+    6.6 kWh actually used -- 2.7 kWh of oven, dishwasher and kettle arriving
+    unannounced, in the dearest half-hours of the day. Entering that evening at 43%
+    on a pack floored at 20% means running out part-way through and buying the rest
+    at 46-58p.
+
+    Two earlier shapes for the fix are recorded here because both were wrong in
+    instructive ways. Marking the whole day's load up cost about 150p a day on a real
+    horizon to hedge a shortfall worth about 73p. Raising the floor pointed the wrong
+    way entirely: a floor protects charge for later, when what is wanted is more
+    charge arriving at the evening.
     """
 
-    def test_an_untrained_model_plans_for_more_load(self):
-        from custom_components.ess_controller.forecast.confidence import load_factor
+    @staticmethod
+    def hours_and_loads(load_per_slot: float = 0.3):
+        hours = [h for h in range(24) for _ in (0, 1)]
+        return hours, [load_per_slot] * len(hours)
 
-        assert load_factor(0.0) > 1.0
+    def test_an_untrained_model_provisions_for_more_evening(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
+        )
 
-    def test_an_untrained_model_plans_for_less_solar(self):
-        from custom_components.ess_controller.forecast.confidence import solar_factor
-
-        assert solar_factor(0.0) < 1.0
-
-    def test_the_allowance_covers_the_error_that_was_measured(self):
-        """3.9 kWh forecast against 6.6 kWh actual is 41% low."""
-        from custom_components.ess_controller.forecast.confidence import load_factor
-
-        assert load_factor(0.0) * 3.88 > 5.0
+        assert evening_allowance_kwh(0.0) >= 2.7
 
     def test_a_mature_model_is_taken_at_its_word(self):
         from custom_components.ess_controller.forecast.confidence import (
-            load_factor,
-            solar_factor,
+            evening_allowance_kwh,
+            evening_uplift,
         )
 
-        assert load_factor(1.0) == 1.0
-        assert solar_factor(1.0) == 1.0
+        hours, loads = self.hours_and_loads()
+        assert evening_allowance_kwh(1.0) == 0.0
+        assert evening_uplift(hours, loads, 1.0) == [0.0] * len(loads)
 
     def test_the_allowance_shrinks_as_the_model_learns(self):
         from custom_components.ess_controller.forecast.confidence import (
-            load_factor,
-            solar_factor,
+            evening_allowance_kwh,
         )
 
         for lower, higher in ((0.0, 0.25), (0.25, 0.5), (0.5, 1.0)):
-            assert load_factor(lower) > load_factor(higher)
-            assert solar_factor(lower) < solar_factor(higher)
+            assert evening_allowance_kwh(lower) > evening_allowance_kwh(higher)
 
-    def test_it_never_plans_for_less_load_or_more_solar(self):
+    def test_it_only_touches_the_evening(self):
         from custom_components.ess_controller.forecast.confidence import (
-            load_factor,
-            solar_factor,
+            evening_uplift,
+            is_evening,
+        )
+
+        hours, loads = self.hours_and_loads()
+        for hour, extra in zip(hours, evening_uplift(hours, loads, 0.0), strict=True):
+            assert (extra > 0) == is_evening(hour)
+
+    def test_the_whole_allowance_is_distributed(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
+            evening_uplift,
+        )
+
+        hours, loads = self.hours_and_loads()
+        total = sum(evening_uplift(hours, loads, 0.0))
+        assert total == pytest.approx(evening_allowance_kwh(0.0))
+
+    def test_it_lands_where_the_demand_already_is(self):
+        """Proportional to the forecast, so it goes where people cook rather than
+        smearing evenly across hours nobody is using."""
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        hours = [16, 17, 18, 19]
+        loads = [0.1, 0.1, 1.0, 0.1]
+        uplift = evening_uplift(hours, loads, 0.0)
+        assert uplift[2] == max(uplift)
+        assert uplift[2] > uplift[0] * 5
+
+    def test_an_empty_evening_forecast_is_spread_flat_not_discarded(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
+            evening_uplift,
+        )
+
+        hours = [16, 17, 18, 19]
+        uplift = evening_uplift(hours, [0.0] * 4, 0.0)
+        assert sum(uplift) == pytest.approx(evening_allowance_kwh(0.0))
+        assert len({round(x, 6) for x in uplift}) == 1
+
+    def test_a_horizon_with_no_evening_in_it_is_left_alone(self):
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        hours = [2, 3, 4, 5]
+        assert evening_uplift(hours, [0.3] * 4, 0.0) == [0.0] * 4
+
+    def test_it_never_asks_for_a_negative_allowance(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
         )
 
         for confidence in (-1.0, 0.0, 0.3, 1.0, 2.0):
-            assert load_factor(confidence) >= 1.0
-            assert solar_factor(confidence) <= 1.0
-
-    def test_solar_is_derated_harder_than_load_is_marked_up(self):
-        """An overcast day can take more than a third off an array, and losing the
-        sun on a heavy evening is one bad day rather than two."""
-        from custom_components.ess_controller.forecast.confidence import (
-            UNTRAINED_LOAD_MARGIN,
-            UNTRAINED_SOLAR_DERATE,
-        )
-
-        assert UNTRAINED_SOLAR_DERATE >= UNTRAINED_LOAD_MARGIN * 0.8
+            assert evening_allowance_kwh(confidence) >= 0.0
 
     def test_it_says_what_it_is_doing(self):
         from custom_components.ess_controller.forecast.confidence import describe

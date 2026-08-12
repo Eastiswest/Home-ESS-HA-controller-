@@ -10,23 +10,29 @@ enters the evening on a forecast 41% too light runs out somewhere around 20:00 a
 buys the rest of the evening at the top of the tariff, 46-58p. Carrying a few kWh
 more than it turned out to need costs the wear on them, well under 2p each.
 
-So while the model is young the plan is built against a deliberately pessimistic
-forecast: load marked up, solar marked down, both by amounts that shrink to nothing
-as the house teaches the model what it actually does. Applied once, here, so the
-energy balance and everything derived from it agree about how heavy the evening is.
+So while the model is young the plan provisions for a heavier evening than the
+forecast claims, by an amount that shrinks to nothing as the house teaches the model
+what it actually does. Only the evening: the error is concentrated there, and
+marking the whole day up made the plan buy for a shortfall that did not exist before
+tea -- about 150p a day to hedge something worth 73p.
 
 Home Assistant-free, so the arithmetic is testable on its own.
 """
 
 from __future__ import annotations
 
-# Set from the measured error on a real install rather than picked for feel.
-UNTRAINED_LOAD_MARGIN = 0.40
+# How much extra evening load to plan for, in kWh, while the model is learning.
+#
+# Set from the measured miss: a real install's forecast put 17:00-23:30 at 3.9 kWh
+# against about 6.6 kWh used, so roughly 2.7 kWh of evening arrived unannounced.
+# Three kWh covers that with a little room.
+UNTRAINED_EVENING_KWH = 3.0
 
-# Derated harder than the load is marked up, for two reasons: an overcast day can
-# take far more than a third off an array, and a day that loses its solar *and*
-# turns out to have a heavy evening is one bad day rather than two independent ones.
-UNTRAINED_SOLAR_DERATE = 0.35
+# The hours it is added to, local time. Ovens, dishwashers and kettles, which is
+# where a flat default shape is most wrong and where the consequence is worst,
+# because it coincides with the dearest half-hours of an Agile day.
+EVENING_START_HOUR = 16
+EVENING_END_HOUR = 23
 
 
 def doubt(confidence: float) -> float:
@@ -34,22 +40,56 @@ def doubt(confidence: float) -> float:
     return 1.0 - min(max(confidence, 0.0), 1.0)
 
 
-def load_factor(confidence: float) -> float:
-    """Multiplier for a forecast load. At least 1: never plan for less."""
-    return 1.0 + UNTRAINED_LOAD_MARGIN * doubt(confidence)
+def evening_allowance_kwh(confidence: float) -> float:
+    """Extra evening load to provision for, at this level of confidence."""
+    return UNTRAINED_EVENING_KWH * doubt(confidence)
 
 
-def solar_factor(confidence: float) -> float:
-    """Multiplier for a forecast generation. At most 1: never count on more."""
-    return 1.0 - UNTRAINED_SOLAR_DERATE * doubt(confidence)
+def is_evening(hour: int) -> bool:
+    return EVENING_START_HOUR <= hour <= EVENING_END_HOUR
+
+
+def evening_uplift(
+    hours: list[int], loads: list[float], confidence: float
+) -> list[float]:
+    """Extra kWh to add to each slot's forecast load, same length as the inputs.
+
+    Two things this deliberately is not.
+
+    It is not a markup on the *whole day*. That was the first attempt, and measured
+    against a real horizon it cost about 150p a day to hedge a shortfall worth about
+    73p: inflating midday demand made the plan buy for a shortfall that only existed
+    after tea. The error is concentrated in a few hours, so the allowance is too.
+
+    It is not a raised floor either. A floor protects charge for later, and what is
+    wanted is more charge arriving *at* the evening -- raising the floor would make
+    the battery stop discharging sooner, which is the opposite.
+
+    Spread across the evening in proportion to the load already forecast there, so it
+    lands where the demand is rather than smearing evenly over hours nobody is
+    cooking in. If the forecast puts nothing in the evening at all, it is spread flat
+    rather than discarded.
+    """
+    allowance = evening_allowance_kwh(confidence)
+    if allowance <= 0.0:
+        return [0.0] * len(loads)
+    evening = [i for i, hour in enumerate(hours) if is_evening(hour)]
+    if not evening:
+        return [0.0] * len(loads)
+    total = sum(loads[i] for i in evening)
+    uplift = [0.0] * len(loads)
+    for i in evening:
+        share = (loads[i] / total) if total > 0 else (1.0 / len(evening))
+        uplift[i] = allowance * share
+    return uplift
 
 
 def describe(confidence: float) -> str:
     """One line for the diagnostics and the dashboard."""
-    if doubt(confidence) <= 0.01:
+    allowance = evening_allowance_kwh(confidence)
+    if allowance <= 0.01:
         return "forecasts trusted as they stand"
     return (
         f"still learning ({confidence * 100:.0f}% of the way): planning for "
-        f"{load_factor(confidence):.2f}x the forecast load and "
-        f"{solar_factor(confidence):.2f}x the forecast solar"
+        f"{allowance:.1f} kWh more evening load than forecast"
     )
