@@ -557,6 +557,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._note_slot_state(now, site)
         return self._build_data(now, site)
 
+    async def _async_hand_back(self, now: datetime) -> None:
+        """Return the inverter to self-use, once, while writing is still permitted."""
+        try:
+            await self._async_release(now)
+        except Exception:
+            _LOGGER.warning("Could not hand the inverter back to self-use")
+
     async def _async_release(self, now: datetime) -> None:
         """Return the inverter to self-use and stop controlling it.
 
@@ -1827,6 +1834,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_update_settings(self, **changes: Any) -> None:
         """Apply a runtime settings change and re-plan immediately."""
+        # Turning writing off must not leave the inverter wherever the last command
+        # put it. "Advisory only" reasonably means "stop touching it", and the
+        # previous reading of that was to stop mid-instruction: switch off during a
+        # forced charge and the inverter stayed in Manual mode buying electricity,
+        # with the controller no longer even claiming responsibility for it. One
+        # final write hands it back to self-use, which is the state a person expects
+        # an unmanaged inverter to be in.
+        was_writing = self.settings.may_write
+        if changes.get("dry_run") is True and was_writing:
+            await self._async_hand_back(dt_util.utcnow())
+
         for key, value in changes.items():
             if hasattr(self.settings, key):
                 setattr(self.settings, key, value)

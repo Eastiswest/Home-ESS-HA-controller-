@@ -2049,3 +2049,99 @@ class TestAnOutageHoldExplainsItself:
         self._hold(coordinator, coordinator.settings.min_soc, "breezy")
         await coordinator.async_refresh()
         assert "power cut" not in coordinator.plan.reason
+
+
+class TestDisablingWritesHandsTheInverterBack:
+    """Switching writing off must not leave the inverter mid-instruction.
+
+    "Advisory only" reasonably means stop touching it, and the previous reading of
+    that was to stop *mid-instruction*: switch off during a forced charge and the
+    inverter stayed in Manual mode buying electricity, with the controller no longer
+    claiming responsibility for it. One final write hands it back to self-use, which
+    is the state a person expects an unmanaged inverter to be in.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator.settings.dry_run = False
+        return coordinator
+
+    @staticmethod
+    def _watch(coordinator):
+        from custom_components.ess_controller.models import SlotAction
+
+        seen: list[SlotAction] = []
+        original = coordinator._adapter.async_apply
+
+        async def _spy(command, **kwargs):
+            seen.append(command.action)
+            return await original(command, **kwargs)
+
+        coordinator._adapter.async_apply = _spy
+        return seen
+
+    async def test_turning_writing_off_writes_self_use_once(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        seen = self._watch(coordinator)
+        await coordinator.async_update_settings(dry_run=True)
+        assert SlotAction.SELF_USE in seen
+
+    async def test_it_happens_while_writing_is_still_permitted(self, hass):
+        """Ordered deliberately: the hand-back goes out before the setting lands, or
+        it would be forbidden by the very change that makes it necessary."""
+        coordinator = await self._coordinator(hass)
+        during: list[bool] = []
+        original = coordinator._adapter.async_apply
+
+        async def _spy(command, **kwargs):
+            during.append(coordinator.settings.may_write)
+            return await original(command, **kwargs)
+
+        coordinator._adapter.async_apply = _spy
+        await coordinator.async_update_settings(dry_run=True)
+        # The first call is the hand-back. Anything after it is the ordinary refresh
+        # under the new setting, which is a dry run and writes nothing.
+        assert during
+        assert during[0] is True
+
+    async def test_turning_writing_on_does_not_hand_back(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.dry_run = True
+        seen = self._watch(coordinator)
+        await coordinator.async_update_settings(dry_run=False)
+        assert SlotAction.SELF_USE not in seen[:1]
+
+    async def test_an_unrelated_change_does_not_hand_back(self, hass):
+        coordinator = await self._coordinator(hass)
+        seen = self._watch(coordinator)
+        await coordinator.async_update_settings(max_charge_kw=2.0)
+        assert coordinator.settings.max_charge_kw == 2.0
+        assert len(seen) <= 1
+
+    async def test_switching_off_twice_is_harmless(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(dry_run=True)
+        seen = self._watch(coordinator)
+        await coordinator.async_update_settings(dry_run=True)
+        assert seen == []
+
+    async def test_a_failing_write_does_not_block_the_setting(self, hass):
+        """The setting is the user's instruction; a sulking inverter cannot veto it."""
+        coordinator = await self._coordinator(hass)
+
+        async def _boom(command, **kwargs):
+            raise RuntimeError("dongle asleep")
+
+        coordinator._adapter.async_apply = _boom
+        await coordinator.async_update_settings(dry_run=True)
+        assert coordinator.settings.dry_run is True
