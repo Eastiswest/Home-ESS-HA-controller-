@@ -419,6 +419,19 @@ async def async_install(
     return "installed"
 
 
+def _url_paths(dashboards: dict[Any, Any]) -> list[str]:
+    """The url paths Lovelace is serving, in a form that can be sorted.
+
+    Home Assistant keys its *default* dashboard ``None`` and every other one by
+    url path, so sorting the raw keys compares ``None`` with a string and raises.
+    That happens on every real install, because the default dashboard always
+    exists -- so the diagnostic written to explain a missing dashboard was itself
+    the only thing failing, and reported nothing but a TypeError. The test
+    harness built its mapping empty, which is the one shape that never occurs.
+    """
+    return sorted("(default)" if key is None else str(key) for key in dashboards)
+
+
 def describe(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """What the installer can see, for the diagnostics download.
 
@@ -432,7 +445,7 @@ def describe(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     return {
         "url_path": DASHBOARD_URL_PATH,
         "lovelace_data": type(lovelace).__name__ if lovelace is not None else None,
-        "dashboards_mapping": None if dashboards is None else sorted(dashboards),
+        "dashboards_mapping": None if dashboards is None else _url_paths(dashboards),
         "entities_resolved": len(resolved),
         "views_built": len(build_dashboard(resolved)["views"]),
         "registered": current is not None,

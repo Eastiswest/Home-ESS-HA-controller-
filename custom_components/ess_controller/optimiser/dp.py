@@ -601,9 +601,19 @@ def optimise(
 
     plan.total_cost = total_cost
     plan.terminal_value = min(level * step, credit_cap) * value_per_kwh
-    plan.baseline_cost = simulate_idle(
-        slots, quantised_start_soc, battery, grid, created
-    ).total_cost
+
+    # Both counterfactuals are credited for the charge they end holding, exactly
+    # as the plan is. Carrying only their gross totals is what made the plan card
+    # report a loss on a horizon the optimiser had already judged a win: the plan
+    # banks cheap energy and is charged for it, the baselines arrive empty, and
+    # the difference read as the plan being worse rather than fuller.
+    idle = simulate_idle(slots, quantised_start_soc, battery, grid, created)
+    plan.baseline_cost = idle.total_cost
+    plan.baseline_terminal_value = (
+        terminal_value(slots, battery, settings, idle.slots[-1].soc_end)
+        if idle.slots
+        else 0.0
+    )
     self_use = simulate_self_use(slots, quantised_start_soc, battery, grid, created)
     plan.self_use_cost = self_use.total_cost
 
@@ -623,9 +633,12 @@ def optimise(
         if self_use.slots
         else 0.0
     )
+    plan.self_use_terminal_value = self_use.terminal_value
     if self_use.net_cost < plan.net_cost - EPS:
         self_use.baseline_cost = plan.baseline_cost
+        self_use.baseline_terminal_value = plan.baseline_terminal_value
         self_use.self_use_cost = plan.self_use_cost
+        self_use.self_use_terminal_value = plan.self_use_terminal_value
         self_use.reason = (
             "Self-consumption is cheaper than anything worth scheduling here"
         )

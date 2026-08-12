@@ -119,9 +119,17 @@ def _lovelace(hass) -> None:
     """
     from homeassistant.components.lovelace import LovelaceData
     from homeassistant.components.lovelace.const import LOVELACE_DATA
+    from homeassistant.components.lovelace.dashboard import LovelaceStorage
 
     hass.data[LOVELACE_DATA] = LovelaceData(
-        resource_mode="storage", dashboards={}, resources=None, yaml_dashboards={}
+        resource_mode="storage",
+        # Home Assistant keys its default dashboard None, exactly as it does in
+        # its own setup, and every real install has one. Starting from an empty
+        # mapping is what let a sorted() over these keys ship: it only raises
+        # once the None is there, so the harness has to carry it.
+        dashboards={None: LovelaceStorage(hass, None)},
+        resources=None,
+        yaml_dashboards={},
     )
 
 
@@ -336,6 +344,11 @@ class TestDashboardInstall:
         assert state["registered_is_ours"] is True
         assert state["entities_resolved"] > 50
         assert state["views_built"] == 5
+        # Readable, and reached at all: sorting these keys raw compares the
+        # default dashboard's None with a string and takes the whole diagnostic
+        # down. A real install's file carried nothing here but the TypeError.
+        assert "(default)" in state["dashboards_mapping"]
+        assert state["url_path"] in state["dashboards_mapping"]
 
     async def test_reinstalling_is_idempotent(self, hass):
         """Registration is repeated on every setup, so it must be safe."""

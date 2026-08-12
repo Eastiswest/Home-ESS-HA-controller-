@@ -214,8 +214,12 @@ class Plan:
     total_cost: float = 0.0
     baseline_cost: float = 0.0
     """Cost of the same horizon with the battery held idle (no charge/discharge)."""
+    baseline_terminal_value: float = 0.0
+    """What the idle counterfactual ends holding, valued as this plan's is."""
     self_use_cost: float = 0.0
     """Cost of the same horizon under plain self-consumption, for comparison."""
+    self_use_terminal_value: float = 0.0
+    """What self-consumption ends holding, valued the same way again."""
     terminal_value: float = 0.0
     reason: str = ""
     infeasible: bool = False
@@ -232,12 +236,35 @@ class Plan:
         return self.total_cost - self.terminal_value
 
     @property
+    def baseline_net_cost(self) -> float:
+        return self.baseline_cost - self.baseline_terminal_value
+
+    @property
+    def self_use_net_cost(self) -> float:
+        return self.self_use_cost - self.self_use_terminal_value
+
+    @property
     def saving_vs_baseline(self) -> float:
-        return self.baseline_cost - self.total_cost
+        return self.baseline_net_cost - self.net_cost
 
     @property
     def saving_vs_self_use(self) -> float:
-        return self.self_use_cost - self.total_cost
+        """What the plan saves against plain self-consumption, net on both sides.
+
+        This is the headline figure on the plan card, and comparing the two gross
+        totals made it contradict the decision it was describing. A real install
+        read "grid-charge 12.1 kWh at avg 19.4p ... Saves -150p vs self-use": the
+        plan had banked 12.1 kWh of cheap overnight energy, was charged the whole
+        299p for it, and was credited none of the 166p still sitting in the pack,
+        while self-use ended near empty and so looked 150p cheaper.
+
+        It cannot have been. ``optimise`` only returns a plan whose *net* cost
+        beats self-use -- that guard is the reason the plan existed at all -- so
+        the card was calling a loss on a comparison the optimiser had already
+        settled the other way. Both sides are now credited for what they end
+        holding, which is the same correction ``net_cost`` exists to make.
+        """
+        return self.self_use_net_cost - self.net_cost
 
     def slot_at(self, moment: datetime) -> PlanSlot | None:
         """Return the slot containing ``moment``, if any."""
@@ -281,6 +308,10 @@ class Plan:
             "saving_vs_self_use": round(self.saving_vs_self_use, 2),
             "terminal_value": round(self.terminal_value, 2),
             "net_cost": round(self.net_cost, 2),
+            # The gross totals above are what each side spent; these are what it
+            # spent less what it kept, which is what the savings compare.
+            "baseline_net_cost": round(self.baseline_net_cost, 2),
+            "self_use_net_cost": round(self.self_use_net_cost, 2),
             "reason": self.reason,
             "infeasible": self.infeasible,
             "slots": [s.as_dict() for s in self.slots],

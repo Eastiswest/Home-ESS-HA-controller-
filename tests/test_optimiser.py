@@ -269,6 +269,56 @@ class TestCounterfactuals:
         assert plan.total_cost <= plan.baseline_cost + 1e-6
 
 
+class TestTheReportedSavingMatchesTheDecision:
+    """The plan card said "Saves -150p vs self-use" about a plan the optimiser
+    had already judged the better of the two.
+
+    Taken from a real diagnostics file: grid-charge 12.1 kWh at avg 19.4p,
+    total_cost 299.82, terminal_value 165.91, self_use_cost 149.77. The plan
+    banked cheap overnight energy and was charged the whole 299p for it while
+    being credited none of the 166p still in the pack; self-use ended near empty
+    and so looked cheaper. ``optimise`` only ever returns a plan whose net cost
+    beats self-use, so a negative saving is self-contradictory by construction.
+    """
+
+    @staticmethod
+    def _cheap_at_the_end() -> list[HorizonSlot]:
+        # Dear all day, cheap overnight at the end, so the plan fills the pack on
+        # the way out and ends far fuller than self-use does.
+        return build_slots([30.0] * 36 + [5.0] * 12, pv=0.0, load=0.3)
+
+    def test_a_plan_that_ends_full_does_not_report_a_loss(self):
+        plan = optimise(self._cheap_at_the_end(), 50.0, make_battery(), make_grid())
+        assert plan.saving_vs_self_use >= -1e-6, plan.reason
+        assert "Saves -" not in plan.reason
+
+    def test_the_saving_is_net_on_both_sides(self):
+        plan = optimise(self._cheap_at_the_end(), 50.0, make_battery(), make_grid())
+        assert plan.saving_vs_self_use == pytest.approx(
+            plan.self_use_net_cost - plan.net_cost
+        )
+        assert plan.saving_vs_baseline == pytest.approx(
+            plan.baseline_net_cost - plan.net_cost
+        )
+
+    @pytest.mark.parametrize(
+        "prices",
+        [
+            [30.0] * 36 + [5.0] * 12,
+            [5.0] * 12 + [45.0] * 36,
+            [8.0] * 12 + [35.0] * 12 + [15.0] * 12 + [45.0] * 12,
+            [22.0] * 48,
+            [-3.0] * 6 + [28.0] * 42,
+        ],
+    )
+    def test_a_returned_plan_never_loses_to_self_use(self, prices):
+        """The invariant behind the guard, stated where a reader can see it."""
+        plan = optimise(
+            build_slots(prices, pv=0.1, load=0.3), 50.0, make_battery(), make_grid()
+        )
+        assert plan.saving_vs_self_use >= -1e-6, prices
+
+
 class TestEdgeCases:
     def test_empty_horizon_is_infeasible_not_a_crash(self):
         plan = optimise([], 50.0, make_battery(), make_grid())
