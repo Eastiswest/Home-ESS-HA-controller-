@@ -45,6 +45,11 @@ INF = math.inf
 # level discretisation would produce nonsense. Treat it as a misconfiguration.
 MIN_USABLE_KWH = 0.05
 
+# The smallest purchase worth putting the inverter into Manual mode for. Below this,
+# a forced charge costs a mode change and a write cycle to acquire a couple of
+# pence-worth of electricity, and does it at whatever the price happens to be.
+MIN_GRID_CHARGE_KWH = 0.15
+
 # Below this share of the pack, the SoC limits have made the battery a spectator and
 # the plan is worth almost nothing -- but it is still a *valid* plan, so nothing used
 # to say so. A real install ran with Minimum charge at 90% against a maximum of 95%,
@@ -121,6 +126,19 @@ def _price_delta(
     deficit = load - pv if load > pv else 0.0
 
     if charge_ac > EPS and not grid.allow_grid_charge and charge_ac > surplus + EPS:
+        return None
+
+    # A charge that needs a *sliver* from the grid is not worth having.
+    #
+    # Any grid contribution at all, however small, makes the slot a forced charge:
+    # the inverter goes into Manual mode for the full half-hour to acquire it. A real
+    # plan bought 0.05 kWh at 36.6p -- under two pence -- and paid for it with a mode
+    # change, at a price near the top of the day, while the array was still producing.
+    # Rejecting those transitions leaves the optimiser to pick either a purely solar
+    # charge or a purchase big enough to justify the trouble; ``delta = 0`` is always
+    # available, so nothing can deadlock.
+    from_grid = charge_ac - surplus
+    if charge_ac > EPS and EPS < from_grid < MIN_GRID_CHARGE_KWH:
         return None
 
     if (

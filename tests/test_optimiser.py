@@ -990,3 +990,47 @@ class TestACrampedWindowSaysSo:
         plan = self.plan_with(90.0, 95.0)
         assert plan.slots
         assert not plan.infeasible
+
+
+class TestASliverFromTheGridIsNotWorthAModeChange:
+    """Any grid contribution makes a slot a forced charge, however small.
+
+    A real plan bought 0.05 kWh at 36.6p -- under two pence -- and paid for it by
+    putting the inverter into Manual mode for the whole half-hour, near the top of the
+    day, while the array was still producing. The money is trivial; the mode change is
+    not, and neither is the risk of a forced charge taking more than was planned.
+    """
+
+    @staticmethod
+    def plan(surplus_per_slot: float):
+        slots = build_slots([36.6] * 12, pv=surplus_per_slot + 0.3, load=0.3)
+        return optimise(slots, 90.0, make_battery(), make_grid(allow_export=False))
+
+    def test_it_does_not_buy_a_sliver(self):
+        from custom_components.ess_controller.optimiser.dp import MIN_GRID_CHARGE_KWH
+
+        for slot in self.plan(0.5).slots:
+            surplus = max(slot.pv_kwh - slot.load_kwh, 0.0)
+            bought = slot.charge_power_kw * slot.duration_hours - surplus
+            assert not (1e-6 < bought < MIN_GRID_CHARGE_KWH), bought
+
+    def test_a_purely_solar_charge_is_still_allowed(self):
+        plan = self.plan(0.5)
+        assert sum(s.charge_ac_kwh for s in plan.slots) > 0.0
+
+    def test_the_threshold_is_small_enough_not_to_matter_in_money(self):
+        """A few pence at the dearest price on an Agile day."""
+        from custom_components.ess_controller.optimiser.dp import MIN_GRID_CHARGE_KWH
+
+        assert MIN_GRID_CHARGE_KWH * 0.60 < 0.15
+
+    def test_a_real_grid_charge_still_happens(self):
+        """The rule must not stop a genuine cheap-window purchase."""
+        slots = build_slots([8.0] * 12 + [45.0] * 12, load=0.4)
+        plan = optimise(slots, 40.0, make_battery(), make_grid(allow_export=False))
+        assert sum(s.grid_import_kwh for s in plan.slots) > 1.0
+
+    def test_nothing_deadlocks_when_every_charge_is_a_sliver(self):
+        plan = self.plan(0.001)
+        assert plan.slots
+        assert not plan.infeasible
