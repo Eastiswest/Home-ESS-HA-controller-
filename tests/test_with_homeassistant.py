@@ -1808,3 +1808,79 @@ class TestCheapSlotIsRanked:
         state = hass.states.get("binary_sensor.ai_ess_controller_cheap_import_slot")
         assert state is not None
         assert "cheap_at_or_below" in state.attributes
+
+
+class TestDisabledControlsAreNamed:
+    """A control the inverter has, that Home Assistant is not publishing.
+
+    The SolaX Modbus integration ships many of its numbers and switches disabled by
+    default, so a Modbus device does not add two hundred entities to a house.
+    Discovery reads states, and a disabled entity has none -- so "charge from grid"
+    and the minimum-SoC reserve were invisible here while sitting plainly in SolaX's
+    own app, one at Enable and one at 20%. The plan could not touch either, and
+    nothing said why.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _register(hass, entity_id: str, *, disabled: bool):
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        domain, _, object_id = entity_id.partition(".")
+        entry = registry.async_get_or_create(
+            domain, "solax_modbus", f"unique_{object_id}", suggested_object_id=object_id
+        )
+        if disabled:
+            registry.async_update_entity(
+                entry.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+            )
+        return entry.entity_id
+
+    async def test_a_disabled_grid_charge_switch_is_named(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity_id = self._register(
+            hass, "switch.solax1_inverter_selfuse_charge_from_grid", disabled=True
+        )
+        assert entity_id in coordinator.disabled_inverter_controls()
+
+    async def test_a_disabled_reserve_control_is_named(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity_id = self._register(
+            hass, "number.solax1_inverter_battery_minimum_capacity", disabled=True
+        )
+        assert entity_id in coordinator.disabled_inverter_controls()
+
+    async def test_an_enabled_entity_is_not_reported(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity_id = self._register(
+            hass, "switch.solax1_inverter_something_charge", disabled=False
+        )
+        assert entity_id not in coordinator.disabled_inverter_controls()
+
+    async def test_unrelated_disabled_entities_are_not_reported(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity_id = self._register(hass, "switch.hallway_lamp", disabled=True)
+        assert entity_id not in coordinator.disabled_inverter_controls()
+
+    async def test_our_own_entities_are_never_reported(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity_id = self._register(
+            hass, "number.ai_ess_controller_min_soc_setting", disabled=True
+        )
+        assert entity_id not in coordinator.disabled_inverter_controls()
+
+    async def test_it_is_in_the_diagnostics_download(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._register(
+            hass, "switch.solax1_inverter_selfuse_charge_from_grid", disabled=True
+        )
+        assert coordinator.diagnostics()["disabled_inverter_controls"]

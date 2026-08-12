@@ -1985,9 +1985,48 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return percentile(prices, fraction)
 
+    def disabled_inverter_controls(self) -> list[str]:
+        """Inverter controls that exist but are switched off in Home Assistant.
+
+        The SolaX Modbus integration ships a great many of its ``number`` and
+        ``switch`` entities disabled by default, to keep a Modbus device from adding
+        two hundred entities to a house. A disabled entity has no state, and
+        discovery reads states -- so a control the inverter plainly has, and whose
+        value is visible in SolaX's own app, is simply invisible here.
+
+        That is what happened to "charge from grid" and the minimum-SoC reserve: the
+        plan believed it had no way to set them, when in truth they were one tick
+        box away. Worth naming precisely, because the fix is on the user's side and
+        takes seconds once you know which entities to enable.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        from .inverter.roles import CANDIDATE_WORDS, _is_our_own
+
+        registry = er.async_get(self.hass)
+        prefix = (self.options.get(CONF_INVERTER_PREFIX) or "").strip().lower()
+        found: list[str] = []
+        for entry in registry.entities.values():
+            if entry.disabled_by is None or entry.domain not in (
+                "number",
+                "switch",
+                "select",
+            ):
+                continue
+            object_id = entry.entity_id.partition(".")[2]
+            if _is_our_own(object_id):
+                continue
+            if prefix and not object_id.startswith(prefix):
+                continue
+            if not any(word in object_id for word in CANDIDATE_WORDS):
+                continue
+            found.append(entry.entity_id)
+        return sorted(found)[:60]
+
     def diagnostics(self) -> dict[str, Any]:
         """Everything needed to debug a plan, for the diagnostics download."""
         return {
+            "disabled_inverter_controls": self.disabled_inverter_controls(),
             "settings": self.settings.as_dict(),
             "battery_spec": {
                 "capacity_kwh": self.battery_spec().capacity_kwh,
