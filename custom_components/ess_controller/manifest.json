@@ -1,6 +1,9 @@
 {
   "domain": "ess_controller",
   "name": "AI ESS Controller",
+  "after_dependencies": [
+    "lovelace"
+  ],
   "codeowners": [
     "@Eastiswest"
   ],
@@ -10,5 +13,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/Eastiswest/Home-ESS-HA-controller-/issues",
   "requirements": [],
-  "version": "0.19.1"
+  "version": "0.20.0"
 }

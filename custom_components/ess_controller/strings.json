@@ -507,12 +507,12 @@
     },
     "terminal_mode": {
       "options": {
-        "horizon_mean": "Average price over the horizon (recommended)",
+        "replacement_cost": "What it costs to refill",
+        "horizon_median": "Typical price over the horizon (recommended)",
+        "horizon_mean": "Average price over the horizon",
         "fixed": "A fixed value",
         "zero": "Worthless"
-      },
-      "horizon_median": "Typical price over the horizon (recommended)",
-      "replacement_cost": "What it costs to refill"
+      }
     }
   },
   "entity": {

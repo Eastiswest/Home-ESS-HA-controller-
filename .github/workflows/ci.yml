@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install tooling
-        run: pip install pytest ruff
+        run: pip install pytest ruff jinja2
       - name: Lint
         run: ruff check custom_components tests
       - name: Check formatting

@@ -42,7 +42,7 @@ jobs:
       # had nothing to do with whether the code worked.
       - name: Run the fast tests before publishing
         run: |
-          pip install pytest ruff
+          pip install pytest ruff jinja2
           ruff check custom_components tests
           ruff format --check custom_components tests
           python -m pytest tests/ -q

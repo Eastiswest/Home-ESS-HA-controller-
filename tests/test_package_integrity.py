@@ -353,6 +353,39 @@ class TestTranslations:
                 assert not key.startswith(("-", "_"))
                 assert not key.endswith(("-", "_"))
 
+    def test_selector_blocks_hold_nothing_but_options(self):
+        """hassfest's schema allows only ``options`` inside a selector block.
+
+        A label written one level too high parses cleanly, survives every other
+        check here, and then renders in the config flow as its own raw object id.
+        That is how ``horizon_median`` -- the *default* terminal-value mode --
+        came to be offered to users as the word "horizon_median".
+        """
+        for name in ("strings.json", "translations/en.json"):
+            data = json.loads((PACKAGE / name).read_text())
+            for selector, block in data.get("selector", {}).items():
+                assert set(block) == {"options"}, (
+                    f"{name}: selector.{selector} has {sorted(set(block) - {'options'})} "
+                    f"outside options, which will not render"
+                )
+
+    def test_every_terminal_value_mode_is_labelled(self):
+        """The one selector whose options are separate constants, not a list.
+
+        ``test_selector_options_cover_constants`` walks list constants, so this
+        selector was covered by nothing -- which is the other half of why two of
+        its five options shipped unlabelled.
+        """
+        strings = json.loads((PACKAGE / "strings.json").read_text())
+        options = set(strings["selector"]["terminal_mode"]["options"])
+        modes = {
+            value
+            for name, value in _const_strings(TREES["const"]).items()
+            if name.startswith("TERMINAL_MODE_")
+        }
+        assert modes, "no TERMINAL_MODE_* constants found"
+        assert modes == options, f"unlabelled: {sorted(modes - options)}"
+
     def test_manifest_version_matches_the_constant(self):
         """Two places record the version, and a release checks both against the tag.
 
