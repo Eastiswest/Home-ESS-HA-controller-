@@ -1270,3 +1270,69 @@ class TestTheStateLegend:
 
     def test_the_hold_state_name_says_where_the_power_comes_from(self):
         assert "grid" in ACTION_WORDS["idle"].lower()
+
+
+class TestPlannedFiguresSayPlanned:
+    """A plan's number read as a live reading is the recurring bug on this page.
+
+    The entity names already said "Planned charge power"; the dashboard shortened
+    them to "Charge power" on the grounds that the section heading supplied the
+    context. It does not. "Charge power 0.00 kW" beside a battery visibly taking
+    619 W from the array reads as a broken sensor, and the card disagreed with its
+    own more-info dialog. Same mistake as labelling the projected SoC "SoC".
+    """
+
+    PLANNED_KEYS = (
+        "planned_charge_power",
+        "planned_discharge_power",
+        "target_soc",
+        "charging_planned",
+        "discharging_planned",
+        "exporting_planned",
+        "planned_grid_import",
+        "planned_grid_export",
+    )
+
+    def test_every_planned_figure_is_labelled_as_planned(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        for key in self.PLANNED_KEYS:
+            assert "planned" in LABELS[key].lower(), key
+
+    def test_the_labels_match_the_entity_names(self):
+        """A card row and its dialog must not describe the same number differently."""
+        import json
+        from pathlib import Path
+
+        from custom_components.ess_controller.dashboard import LABELS
+
+        strings = json.loads(
+            (Path("custom_components/ess_controller/strings.json")).read_text()
+        )["entity"]
+        for key in self.PLANNED_KEYS:
+            for domain in ("sensor", "binary_sensor"):
+                entry = strings.get(domain, {}).get(key)
+                if entry is None:
+                    continue
+                assert "planned" in entry["name"].lower(), f"{domain}.{key}"
+                assert "planned" in LABELS[key].lower(), key
+
+    def test_the_badge_keeps_a_short_name(self):
+        """Four words do not fit in a badge; the row above it carries the detail."""
+        config = build_dashboard(resolved())
+        view = next(v for v in config["views"] if v["path"] == "plan")
+        names = [b.get("name") for b in view.get("badges", [])]
+        assert "Target" in names
+
+    def test_the_card_still_uses_the_full_name(self):
+        from custom_components.ess_controller.dashboard import LABELS
+
+        config = build_dashboard(resolved())
+        rows = [
+            row.get("name")
+            for card in walk_cards(config)
+            if card["type"] == "entities"
+            for row in card.get("entities", [])
+        ]
+        assert LABELS["planned_charge_power"] in rows
+        assert LABELS["target_soc"] in rows

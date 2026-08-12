@@ -81,12 +81,17 @@ LABELS: dict[str, str] = {
     # sensors look like they contradicted each other.
     "next_action": "Next change",
     "control_status": "Control",
-    "target_soc": "Target",
-    "planned_charge_power": "Charge power",
-    "planned_discharge_power": "Discharge power",
-    "charging_planned": "Charging",
-    "discharging_planned": "Discharging",
-    "exporting_planned": "Exporting",
+    # All of these are the *plan's* figures for this half-hour, and every one of
+    # them says so. The section heading was meant to carry that ("This half-hour"),
+    # and it does not: "Charge power 0.00 kW" read beside a battery visibly taking
+    # 619 W from the array looks like a broken sensor rather than a statement about
+    # what was scheduled. Same mistake as labelling the plan's projected SoC "SoC".
+    "target_soc": "Planned target SoC",
+    "planned_charge_power": "Planned charge power",
+    "planned_discharge_power": "Planned discharge power",
+    "charging_planned": "Charging planned",
+    "discharging_planned": "Discharging planned",
+    "exporting_planned": "Exporting planned",
     # Money
     "import_price": "Import price",
     "export_price": "Export price",
@@ -96,8 +101,8 @@ LABELS: dict[str, str] = {
     "weekly_saving": "Saving this week",
     "tariff_recommendation": "Best tariff for you",
     # Energy
-    "planned_grid_import": "Grid import",
-    "planned_grid_export": "Grid export",
+    "planned_grid_import": "Planned grid import",
+    "planned_grid_export": "Planned grid export",
     "solar_forecast_today": "Solar left today",
     "solar_forecast_tomorrow": "Solar tomorrow",
     "load_forecast_today": "Load left today",
@@ -1151,7 +1156,7 @@ def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]
         badges=[
             _badge("import_price", resolved),
             _badge("plan_action", resolved),
-            _badge("target_soc", resolved),
+            _badge("target_soc", resolved, name="Target"),
         ],
     )
 

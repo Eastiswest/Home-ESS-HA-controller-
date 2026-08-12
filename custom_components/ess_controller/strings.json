@@ -553,7 +553,7 @@
         "name": "Export price now"
       },
       "target_soc": {
-        "name": "Target state of charge"
+        "name": "Planned target SoC"
       },
       "solar_forecast_today": {
         "name": "Solar forecast remaining today"

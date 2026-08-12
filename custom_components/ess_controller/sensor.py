@@ -256,7 +256,7 @@ SENSORS: tuple[EssSensorDescription, ...] = (
     EssSensorDescription(
         key="target_soc",
         translation_key="target_soc",
-        name="Target state of charge",
+        name="Planned target SoC",
         icon="mdi:battery-charging-70",
         native_unit_of_measurement="%",
         state_class=SensorStateClass.MEASUREMENT,
