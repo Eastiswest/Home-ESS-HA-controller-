@@ -111,7 +111,37 @@ SOLAX_ROLE_SPECS: tuple[RoleSpec, ...] = (
     RoleSpec(
         ROLE_MIN_SOC,
         ("number",),
-        ("battery_minimum_capacity", "selfuse_backup_soc", "battery_min_capacity"),
+        # Order matters here, and getting it wrong is expensive.
+        #
+        # A SolaX exposes several floors and only one of them governs self-use
+        # discharge. ``selfuse_backup_soc`` is the capacity held back for EPS
+        # backup, and on a real X1 Hybrid G4 it is not the discharge floor at all:
+        # the pack was reported as unable to discharge below 90% while it was
+        # visibly discharging through 63%, and every attempt to write it came back
+        # as Modbus exception 4 at register 0xc5. So the controller could not set
+        # the reserve, and told the user it was pinned shut when it was not.
+        # ``selfuse_discharge_min_soc`` is the register that actually holds the
+        # self-use floor; the same install accepts and verifies a write to it.
+        #
+        # The suffix has to carry ``selfuse``: matching is by suffix, and the same
+        # inverter also publishes backup_discharge_min_soc, feedin_discharge_min_soc
+        # and eps_min_soc, none of which govern self-use either. The backup reserve
+        # stays as a last resort for firmware that exposes nothing better -- where a
+        # poor floor still beats no floor, since without one a hold cannot be
+        # expressed as self-use and falls back to Manual mode.
+        #
+        # ``battery_minimum_capacity`` keeps its place at the front. It is the older
+        # name for this floor and installs already bound to it are working; whether
+        # it is the same register as selfuse_discharge_min_soc on firmware carrying
+        # both is not something to guess at from one inverter. The bug was that
+        # selfuse_discharge_min_soc was missing from this list altogether, so an
+        # install without the older name fell through to the backup reserve.
+        (
+            "battery_minimum_capacity",
+            "selfuse_discharge_min_soc",
+            "battery_min_capacity",
+            "selfuse_backup_soc",
+        ),
         description="Reserve SoC the inverter will not discharge below",
     ),
     RoleSpec(
@@ -336,6 +366,16 @@ def merge_overrides(
 
     An explicit empty string disables a role, which is how a user tells the
     controller "do not touch my export limit".
+
+    One override is refused: our own entities. Discovery has always excluded them,
+    because a role pointed at one makes the controller read or write its own
+    output -- but the guard lived only in discovery, and an override walked past
+    it. On a real install the grid-charge role was mapped to this integration's
+    own "Allow grid charging" switch, and the two halves drove each other: a hold
+    slot switches that permission off, an optimiser without grid charging can
+    only plan more holds, and grid charging never comes back on. It went from
+    eighteen charge slots to none, and sat flat at 63% for two days. The user did
+    not turn it off and nothing said it had happened.
     """
     result = dict(discovered)
     for role, entity_id in (overrides or {}).items():
@@ -346,6 +386,16 @@ def merge_overrides(
         text = str(entity_id).strip()
         if not text:
             result.pop(role, None)
+        elif _is_our_own(text.partition(".")[2] or text):
+            # Left on whatever discovery found, which is the safe reading of an
+            # override that cannot be honoured.
+            _LOGGER.warning(
+                "Ignoring the %s override: %s is one of this integration's own "
+                "entities, so pointing an inverter role at it would have the "
+                "controller drive itself",
+                role,
+                text,
+            )
         else:
             result[role] = text
     return result

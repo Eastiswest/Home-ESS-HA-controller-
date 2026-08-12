@@ -234,11 +234,38 @@ def _entity(
     domains: list[str] | str,
     device_classes: list[str] | None = None,
     multiple: bool = False,
+    exclude: list[str] | None = None,
 ) -> selector.EntitySelector:
     config: dict[str, Any] = {"domain": domains, "multiple": multiple}
     if device_classes:
         config["device_class"] = device_classes
+    if exclude:
+        config["exclude_entities"] = list(exclude)
     return selector.EntitySelector(selector.EntitySelectorConfig(**config))
+
+
+def _our_own_entity_ids(hass: Any) -> list[str]:
+    """Every entity this integration publishes, to keep out of the role pickers.
+
+    Discovery already refuses to bind these. The picker did not, and offered them
+    in the same list as the inverter's -- including a switch named "Allow grid
+    charging", which reads exactly like the inverter control someone searching for
+    "grid" is looking for. Mapping it wires the controller's own permission to its
+    own hold logic, and the pair latch each other off.
+    """
+    from homeassistant.helpers import entity_registry as er
+
+    from .inverter.roles import _is_our_own
+
+    try:
+        registry = er.async_get(hass)
+    except Exception:  # pragma: no cover - a picker must not fail to render
+        return []
+    return sorted(
+        entry.entity_id
+        for entry in registry.entities.values()
+        if _is_our_own(entry.entity_id.partition(".")[2])
+    )
 
 
 def _options(values: list[str], key: str) -> selector.SelectSelector:
@@ -656,11 +683,12 @@ class EssFlowMixin:
         discovered = discover_entities(
             self.hass, SOLAX_ROLE_SPECS, current.get(CONF_INVERTER_PREFIX)
         )
+        ours = _our_own_entity_ids(self.hass)
         fields: dict[Any, Any] = {}
         for role, domains in MAPPABLE_ROLES:
             suggestion = existing.get(role, discovered.get(role))
             fields[vol.Optional(role, description={"suggested_value": suggestion})] = (
-                _entity(list(domains))
+                _entity(list(domains), exclude=ours)
             )
         return vol.Schema(fields)
 

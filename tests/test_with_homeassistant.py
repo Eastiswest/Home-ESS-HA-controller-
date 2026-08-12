@@ -251,6 +251,45 @@ class TestOptionsFlow:
         )
         assert fields
 
+    async def test_the_role_pickers_hide_our_own_entities(self, hass):
+        """Discovery has always refused to bind these; the picker offered them.
+
+        One of ours is a switch called "Allow grid charging", which is the
+        obvious-looking hit for anyone searching the picker for "grid". A real
+        install mapped it to the grid-charge role and the two latched: a hold
+        switches that permission off, an optimiser without grid charging can only
+        plan more holds, and it never comes back on.
+        """
+        import voluptuous_serialize
+        from homeassistant.helpers import config_validation as cv
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "entity_map"}
+        )
+        fields = voluptuous_serialize.convert(
+            result["data_schema"], custom_serializer=cv.custom_serializer
+        )
+
+        assert fields
+        for field in fields:
+            excluded = field["selector"]["entity"].get("exclude_entities") or []
+            assert excluded, f"{field['name']} excludes nothing"
+            # Only ever ours -- an exclusion broad enough to hide the inverter
+            # would be worse than the bug it fixes.
+            assert all("ess_controller" in entity_id for entity_id in excluded)
+        grid = next(f for f in fields if f["name"] == "grid_charge")
+        assert any(
+            "allow_grid_charging" in entity_id
+            for entity_id in grid["selector"]["entity"]["exclude_entities"]
+        )
+
 
 class TestEntrySetup:
     async def test_entry_loads_and_publishes_entities(self, hass):

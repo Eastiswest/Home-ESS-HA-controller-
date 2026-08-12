@@ -905,6 +905,105 @@ class TestDiscoveryIgnoresOurOwnEntities:
         assert found.get("soc") == "sensor.solax_battery_capacity"
         assert found.get("use_mode") == "select.solax_charger_use_mode"
 
+    def test_an_override_cannot_bind_one_either(self):
+        """The guard lived in discovery only, and an override walked past it.
+
+        A real install mapped the grid-charge role to this integration's own
+        "Allow grid charging" switch -- the obvious-looking hit when you search
+        the picker for "grid". The two then latched: a hold slot switches that
+        permission off, an optimiser with no grid charging can only plan more
+        holds, and it never comes back. Eighteen charge slots went to none and the
+        pack sat flat at 63% for two days.
+        """
+        merged = merge_overrides(
+            {ROLE_USE_MODE: "select.solax_charger_use_mode"},
+            {"grid_charge": "switch.ai_ess_controller_allow_grid_charging"},
+        )
+        assert "grid_charge" not in merged
+        # ...and the roles that were fine are untouched.
+        assert merged[ROLE_USE_MODE] == "select.solax_charger_use_mode"
+
+    def test_a_refused_override_leaves_discovery_in_place(self):
+        merged = merge_overrides(
+            {ROLE_MIN_SOC: "number.solax_selfuse_discharge_min_soc"},
+            {ROLE_MIN_SOC: "number.ess_controller_minimum_state_of_charge"},
+        )
+        assert merged[ROLE_MIN_SOC] == "number.solax_selfuse_discharge_min_soc"
+
+    def test_a_real_inverter_override_still_works(self):
+        merged = merge_overrides(
+            {}, {ROLE_MIN_SOC: "number.solax1_inverter_selfuse_discharge_min_soc"}
+        )
+        assert merged[ROLE_MIN_SOC] == "number.solax1_inverter_selfuse_discharge_min_soc"
+
+
+class TestTheSelfUseFloorIsTheOneThatGoverns:
+    """A SolaX publishes several floors and only one governs self-use discharge.
+
+    Taken from a real X1 Hybrid G4. The reserve role bound
+    ``selfuse_backup_soc`` -- the capacity held for EPS backup -- which reported
+    90% while the pack was visibly discharging through 63%, and refused every
+    write with Modbus exception 4 at register 0xc5. So the controller could not
+    set the floor and told the user the battery was pinned shut when it was not.
+    The same install accepts and verifies a write to selfuse_discharge_min_soc.
+    """
+
+    def _hass(self):
+        """The real inverter's floors: every one it publishes, and no older name.
+
+        This X1 Hybrid G4 has no ``battery_minimum_capacity`` at all, which is why
+        the role fell through to the backup reserve.
+        """
+        hass = StubHass()
+        hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
+        for suffix in (
+            "backup_discharge_min_soc",
+            "eps_min_soc",
+            "feedin_discharge_min_soc",
+            "selfuse_backup_soc",
+            "selfuse_discharge_min_soc",
+        ):
+            hass.states.set(
+                f"number.solax_{suffix}", 20.0, unit_of_measurement="%", min=10, max=99
+            )
+        return hass
+
+    def test_the_self_use_floor_wins(self):
+        found = discover_entities(self._hass(), SOLAX_ROLE_SPECS, prefix="solax")
+        assert found[ROLE_MIN_SOC] == "number.solax_selfuse_discharge_min_soc"
+
+    def test_the_other_floors_are_never_taken_for_it(self):
+        """Suffix matching is loose, and three of these end in _min_soc."""
+        found = discover_entities(self._hass(), SOLAX_ROLE_SPECS, prefix="solax")
+        assert found[ROLE_MIN_SOC] not in (
+            "number.solax_backup_discharge_min_soc",
+            "number.solax_eps_min_soc",
+            "number.solax_feedin_discharge_min_soc",
+        )
+
+    def test_an_install_on_the_older_name_is_left_alone(self):
+        """Whether the two are the same register on firmware carrying both is not
+        knowable from one inverter, so installs already bound to the older name
+        keep it."""
+        hass = build_solax_hass()  # publishes battery_minimum_capacity
+        hass.states.set(
+            "number.solax_selfuse_discharge_min_soc", 20.0, unit_of_measurement="%"
+        )
+        found = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        assert found[ROLE_MIN_SOC] == "number.solax_battery_minimum_capacity"
+
+    def test_the_backup_reserve_is_still_a_last_resort(self):
+        """Firmware exposing nothing better keeps a floor rather than losing one:
+        without one a hold cannot be expressed as self-use at all, and falls back
+        to Manual mode -- which is the cruder instrument, not no instrument."""
+        hass = StubHass()
+        hass.states.set("select.solax_charger_use_mode", "Self Use", options=SOLAX_MODES)
+        hass.states.set(
+            "number.solax_selfuse_backup_soc", 20.0, unit_of_measurement="%", min=10
+        )
+        found = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        assert found[ROLE_MIN_SOC] == "number.solax_selfuse_backup_soc"
+
 
 class TestRateLimitsAreHandedBack:
     """A forced charge writes the *planned* rate to the charge-current limit.
