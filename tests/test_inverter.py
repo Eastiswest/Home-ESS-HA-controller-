@@ -464,14 +464,16 @@ class TestSolaxOtherActions:
         ]
         assert [c[1] for c in calls] == ["turn_off"]
 
-    def test_hold_without_a_soc_reading_falls_back_to_the_reserve(self):
+    def test_hold_without_a_soc_reading_writes_no_reserve_at_all(self):
+        """With no SoC to pin to, the hold is Manual mode -- and in Manual mode the
+        reserve is not consulted, so writing it is pointless. A real inverter
+        rejected the register outright while in a forced mode."""
         hass = build_solax_hass()
         hass.states.set("sensor.solax_battery_capacity", "unknown")
         adapter = solax_adapter(hass)
-        result = apply(adapter, command(SlotAction.IDLE, min_soc=15.0))
-        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
-        assert "number.solax_battery_minimum_capacity" not in by_entity
-        assert any("no SoC reading" in note for note in result.skipped)
+        apply(adapter, command(SlotAction.IDLE, min_soc=15.0))
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "number.solax_battery_minimum_capacity" not in entities
 
     def test_idle_does_not_set_current_limits(self):
         hass = build_solax_hass()
@@ -1189,3 +1191,54 @@ class TestUnboundControlsAreNamed:
         assert not [
             e for e in adapter.describe()["unbound_candidates"] if e.startswith("sensor.")
         ]
+
+
+class TestTheReserveIsOnlyWrittenWhereItApplies:
+    """A real inverter rejected the reserve register while in Force Charge.
+
+    ``selfuse_backup_soc`` belongs to the inverter's self-use logic, and in Manual
+    mode there is no self-use logic to govern: a forced charge does not consult it.
+    Writing it anyway was not harmless -- Modbus exception 4 at register 0xc5 failed
+    the whole apply, marked the writes unverified, and put an error on the dashboard
+    for a setting that never needed touching.
+    """
+
+    def test_a_forced_charge_leaves_the_reserve_alone(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.CHARGE, min_soc=20.0))
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "number.solax_battery_minimum_capacity" not in entities
+
+    def test_a_forced_discharge_leaves_the_reserve_alone(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.DISCHARGE, min_soc=20.0))
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "number.solax_battery_minimum_capacity" not in entities
+
+    def test_a_strict_hold_leaves_it_alone_too(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(
+            adapter,
+            command(SlotAction.IDLE, min_soc=20.0, hold_absorbs_solar=False),
+        )
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "number.solax_battery_minimum_capacity" not in entities
+
+    def test_self_use_still_gets_the_planning_floor(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_minimum_capacity", 5.0)
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 20.0
+
+    def test_a_soft_hold_still_gets_its_pin(self):
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_battery_capacity", 57.3)
+        adapter = solax_adapter(hass, manage_min_soc=True)
+        apply(adapter, command(SlotAction.IDLE, min_soc=20.0))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 57.0

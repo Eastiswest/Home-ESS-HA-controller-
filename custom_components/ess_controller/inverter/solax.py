@@ -213,9 +213,10 @@ class SolaxModbusAdapter(InverterAdapter):
             and bool(self.entity(ROLE_MIN_SOC))
             and state_float(self.hass, self.entity(ROLE_SOC)) is not None
         )
-        if action in (SlotAction.CHARGE, SlotAction.DISCHARGE) or (
+        manual = action in (SlotAction.CHARGE, SlotAction.DISCHARGE) or (
             action is SlotAction.IDLE and not soft_hold
-        ):
+        )
+        if manual:
             manual_target = {
                 SlotAction.CHARGE: self.OPT_FORCE_CHARGE,
                 SlotAction.DISCHARGE: self.OPT_FORCE_DISCHARGE,
@@ -257,7 +258,7 @@ class SolaxModbusAdapter(InverterAdapter):
             writes.extend(self._restore_rate_writes(command, voltage, skipped))
 
         writes.extend(self._grid_charge_writes(command, action, skipped))
-        writes.extend(self._min_soc_writes(command, action, skipped))
+        writes.extend(self._min_soc_writes(command, action, manual, skipped))
         writes.extend(self._export_limit_writes(command, skipped))
 
         return _dedupe(writes), skipped
@@ -395,9 +396,22 @@ class SolaxModbusAdapter(InverterAdapter):
         return max(command.min_soc, float(int(soc)))
 
     def _min_soc_writes(
-        self, command: ControlCommand, action: SlotAction, skipped: list[str]
+        self,
+        command: ControlCommand,
+        action: SlotAction,
+        manual: bool,
+        skipped: list[str],
     ) -> list[Write]:
         if not self._manage_min_soc:
+            return []
+        if manual:
+            # The reserve belongs to the inverter's self-use logic, and in Manual
+            # mode there is no self-use logic to govern -- a forced charge or
+            # discharge does not consult it. Writing it anyway achieved nothing and
+            # was not harmless: a real inverter rejected the register outright
+            # (Modbus exception 4 at 0xc5) while in Force Charge, which failed the
+            # apply, marked the writes unverified, and put an error on the dashboard
+            # for a setting that did not need touching.
             return []
         entity_id = self.entity(ROLE_MIN_SOC)
         if not entity_id:
