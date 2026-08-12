@@ -1494,13 +1494,18 @@ class TestApexDetection:
         assert has_apexcharts(hass) is False
 
 
-class TestAHoldDoesNotOutliveTheIntegration:
-    """A hold raises the inverter's own reserve, and that setting is persistent.
+class TestControlDoesNotOutliveTheIntegration:
+    """Every mode the controller writes is one the inverter will sit in for ever.
 
-    Unload the entry mid-hold and the inverter is left refusing to discharge
-    below the SoC it was holding -- so the house runs off the grid indefinitely
-    with nothing on any screen to explain it. Disabling the optimiser already
-    hands the inverter back; removing or reloading has to as well.
+    A hold raises the inverter's own reserve to the charge it is protecting; a
+    forced charge or discharge puts it in Manual mode; even a self-use slot writes
+    the plan's floor, which an outage boost can lift far above the reserve the
+    user set. Unload the entry in any of those states and it stays there, with
+    nothing left running to take it out -- a pack pinned shut at 94% running the
+    house off the grid, or an inverter still buying at the top of the tariff.
+
+    An earlier version of this fired only for a solar-absorbing hold, which left
+    the other three cases to persist silently.
     """
 
     async def _coordinator(self, hass):
@@ -1512,35 +1517,92 @@ class TestAHoldDoesNotOutliveTheIntegration:
         await hass.async_block_till_done()
         return entry, hass.data[DOMAIN][entry.entry_id]
 
-    async def test_unloading_mid_hold_restores_the_reserve(self, hass):
-        from custom_components.ess_controller.models import ControlCommand, SlotAction
+    @staticmethod
+    def _watch(coordinator):
+        """Capture the commands the adapter is asked to apply."""
+        sent = []
+        original = coordinator._adapter.async_apply
 
+        async def _spy(command, **kwargs):
+            sent.append(command)
+            return await original(command, **kwargs)
+
+        coordinator._adapter.async_apply = _spy
+        return sent
+
+    async def _released_after(self, hass, command):
+        """Set ``command`` as the last one applied, then unload-release."""
         _entry, coordinator = await self._coordinator(hass)
         coordinator.settings.enabled = True
         coordinator.settings.dry_run = False
-        coordinator.last_command = ControlCommand(
-            action=SlotAction.IDLE, min_soc=94.0, hold_absorbs_solar=True
-        )
-        assert await coordinator.async_restore_reserve() is True
+        coordinator.last_command = command
+        sent = self._watch(coordinator)
+        result = await coordinator.async_release_on_unload()
+        return coordinator, result, sent
 
-    async def test_nothing_is_written_when_no_hold_was_in_force(self, hass):
+    async def test_a_hold_gives_the_reserve_back(self, hass):
         from custom_components.ess_controller.models import ControlCommand, SlotAction
 
-        _entry, coordinator = await self._coordinator(hass)
-        coordinator.settings.dry_run = False
-        coordinator.last_command = ControlCommand(action=SlotAction.SELF_USE)
-        assert await coordinator.async_restore_reserve() is False
+        coordinator, result, sent = await self._released_after(
+            hass,
+            ControlCommand(action=SlotAction.IDLE, min_soc=94.0, hold_absorbs_solar=True),
+        )
+        assert result is True
+        assert sent[-1].action is SlotAction.SELF_USE
+        assert sent[-1].min_soc == pytest.approx(coordinator.settings.reserve_soc)
 
-    async def test_a_strict_hold_needs_no_reserve_restored(self, hass):
-        """Manual mode is undone by the mode write, not by the reserve."""
+    async def test_a_forced_charge_is_not_left_running(self, hass):
+        """The expensive one: unload mid-charge and the inverter keeps buying.
+
+        Manual mode is only undone by a later mode write, and on unload there is
+        no later write -- so this is the one case that has to send one.
+        """
         from custom_components.ess_controller.models import ControlCommand, SlotAction
 
-        _entry, coordinator = await self._coordinator(hass)
-        coordinator.settings.dry_run = False
-        coordinator.last_command = ControlCommand(
-            action=SlotAction.IDLE, hold_absorbs_solar=False
+        _coordinator, result, sent = await self._released_after(
+            hass,
+            ControlCommand(action=SlotAction.CHARGE, power_kw=3.0, min_soc=20.0),
         )
-        assert await coordinator.async_restore_reserve() is False
+        assert result is True
+        assert sent[-1].action is SlotAction.SELF_USE
+
+    async def test_a_strict_hold_is_taken_out_of_manual_mode(self, hass):
+        """A hold that cannot absorb solar is Manual mode plus Stop, same problem."""
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        _coordinator, result, sent = await self._released_after(
+            hass,
+            ControlCommand(action=SlotAction.IDLE, hold_absorbs_solar=False),
+        )
+        assert result is True
+        assert sent[-1].action is SlotAction.SELF_USE
+
+    async def test_a_self_use_slot_still_lowers_the_planning_floor(self, hass):
+        """Self-use writes the plan's floor, not the user's emergency reserve, and
+        an outage boost puts that floor far higher still."""
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        coordinator, result, sent = await self._released_after(
+            hass,
+            ControlCommand(action=SlotAction.SELF_USE, min_soc=80.0),
+        )
+        assert result is True
+        assert sent[-1].min_soc == pytest.approx(coordinator.settings.reserve_soc)
+        assert sent[-1].min_soc < 80.0
+
+    async def test_the_rate_ceilings_come_back_too(self, hass):
+        """A throttled slot writes its own rate to the current limit. Left there,
+        it caps solar charging and every later charge as well."""
+        from custom_components.ess_controller.models import ControlCommand, SlotAction
+
+        coordinator, _result, sent = await self._released_after(
+            hass,
+            ControlCommand(action=SlotAction.CHARGE, power_kw=1.0),
+        )
+        assert sent[-1].max_charge_kw == pytest.approx(coordinator.settings.max_charge_kw)
+        assert sent[-1].max_discharge_kw == pytest.approx(
+            coordinator.settings.max_discharge_kw
+        )
 
     async def test_an_advisory_install_never_writes(self, hass):
         from custom_components.ess_controller.models import ControlCommand, SlotAction
@@ -1551,7 +1613,18 @@ class TestAHoldDoesNotOutliveTheIntegration:
         coordinator.last_command = ControlCommand(
             action=SlotAction.IDLE, hold_absorbs_solar=True
         )
-        assert await coordinator.async_restore_reserve() is False
+        sent = self._watch(coordinator)
+        assert await coordinator.async_release_on_unload() is False
+        assert sent == []
+
+    async def test_nothing_commanded_means_nothing_sent(self, hass):
+        """Never having written to the inverter, there is nothing to undo."""
+        _entry, coordinator = await self._coordinator(hass)
+        coordinator.settings.dry_run = False
+        coordinator.last_command = None
+        sent = self._watch(coordinator)
+        assert await coordinator.async_release_on_unload() is False
+        assert sent == []
 
     async def test_unload_calls_it(self, hass):
         from custom_components.ess_controller.models import ControlCommand, SlotAction
@@ -1562,13 +1635,13 @@ class TestAHoldDoesNotOutliveTheIntegration:
             action=SlotAction.IDLE, hold_absorbs_solar=True
         )
         called: list[bool] = []
-        original = coordinator.async_restore_reserve
+        original = coordinator.async_release_on_unload
 
         async def _spy():
             called.append(True)
             return await original()
 
-        coordinator.async_restore_reserve = _spy
+        coordinator.async_release_on_unload = _spy
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert called == [True]

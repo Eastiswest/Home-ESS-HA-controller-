@@ -963,6 +963,31 @@ class TestTariffScoring:
         assert peaky.total < flat.total
         assert peaky.battery_benefit > flat.battery_benefit
 
+    def test_a_late_trough_is_not_penalised_for_ending_full(self):
+        """Scored on realised cost alone, this comparison got the answer backwards.
+
+        A tariff whose cheap window falls late fills the pack on the way out, so
+        it books the whole purchase and none of the value: 270p against a flat
+        tariff's 239p, and the comparison recommends the flat one. Net of the
+        charge it ends holding it is 42p against 233p, which is the true answer
+        and the one the optimiser itself uses to judge a plan.
+        """
+        late_trough = self._score([30.0] * 36 + [5.0] * 12)
+        flat = self._score([22.0] * 48)
+        assert late_trough.total < flat.total
+        assert late_trough.daily_equivalent < flat.daily_equivalent
+
+    def test_both_sides_are_valued_the_same_way(self):
+        """The saving is a subtraction, so an uncredited baseline would invent one."""
+        score = self._score([5.0] * 24 + [45.0] * 24)
+        # Self-use ends wherever the house left it, the plan wherever the plan
+        # left it, and both are credited for it -- so the difference between them
+        # is the scheduling, not the state of charge each happens to finish at.
+        assert score.battery_benefit == pytest.approx(
+            score.self_use_cost - score.optimised_cost
+        )
+        assert score.optimised_cost <= score.self_use_cost + 1e-6
+
     def test_standing_charge_scaled_to_the_window(self):
         without = self._score([25.0] * 48)
         with_charge = self._score([25.0] * 48, standing=50.0)

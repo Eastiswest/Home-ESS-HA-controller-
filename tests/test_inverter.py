@@ -990,6 +990,71 @@ class TestRateLimitsAreHandedBack:
         assert len(hass.services.calls) == first
 
 
+class TestTheHandBackUndoesEverything:
+    """What the coordinator sends on unload, seen from the hardware's side.
+
+    The coordinator's job is to send a self-use command at the user's own reserve
+    with the configured rate ceilings; this is the other half -- that such a
+    command really does take a mid-charge inverter out of Manual mode, put the
+    reserve back and lift the throttle, and that it costs nothing at all on an
+    install already sitting where it puts things.
+    """
+
+    @staticmethod
+    def _hand_back():
+        return command(
+            SlotAction.SELF_USE,
+            power_kw=0.0,
+            min_soc=10.0,
+            max_charge_kw=3.6,
+            max_discharge_kw=3.6,
+        )
+
+    def test_a_forced_charge_is_undone(self):
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_lock_state", "Unlocked", options=["Locked", "Unlocked"]
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.CHARGE, power_kw=1.0, min_soc=94.0))
+        assert hass.states.get("select.solax_charger_use_mode").state == "Manual Mode"
+
+        apply(adapter, self._hand_back())
+        assert hass.states.get("select.solax_charger_use_mode").state == "Self Use"
+        # 10% of a 360 V pack is the reserve, and the throttle is off: 3.6 kW at
+        # 360 V is 10 A, well above the 1 kW slot's limit.
+        assert hass.states.get("number.solax_battery_minimum_capacity").state == 10.0
+        assert hass.states.get("number.solax_battery_charge_max_current").state > 5.0
+
+    def test_a_raised_reserve_comes_back_down(self):
+        hass = build_solax_hass()
+        adapter = solax_adapter(hass)
+        # A hold expresses itself by raising the inverter's own reserve to the
+        # charge it is protecting -- here, the stub's 55% state of charge.
+        apply(adapter, command(SlotAction.IDLE, min_soc=20.0, hold_absorbs_solar=True))
+        assert hass.states.get("number.solax_battery_minimum_capacity").state == 55.0
+
+        apply(adapter, self._hand_back())
+        assert hass.states.get("number.solax_battery_minimum_capacity").state == 10.0
+
+    def test_a_settled_install_is_not_written_to(self):
+        """The reason the coordinator no longer guesses from the last command: an
+        inverter already in self-use at its reserve costs nothing to hand back, so
+        the guard belongs here, against the hardware, not there."""
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_lock_state", "Unlocked", options=["Locked", "Unlocked"]
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, self._hand_back())
+        before = len(hass.services.calls)
+        assert before > 0
+
+        result = apply(adapter, self._hand_back())
+        assert len(hass.services.calls) == before
+        assert not result.changed
+
+
 class TestExportLimitFollowsThePermission:
     """ "Export: off" reaches the inverter as a zero limit, not as a zero price."""
 

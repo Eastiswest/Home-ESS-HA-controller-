@@ -411,6 +411,35 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
     return max(sum(s.load_kwh - s.pv_kwh for s in window), 0.0)
 
 
+def _terminal_terms(
+    slots: list[HorizonSlot], battery: BatterySpec, settings: OptimiserSettings
+) -> tuple[float, float]:
+    """``(value per kWh, credit cap)`` for this horizon's terminal valuation."""
+    rate = _terminal_rate(slots, settings) * settings.terminal_weight
+    # Only the energy that survives the inverter on the way out has value.
+    return rate * battery.discharge_efficiency, _terminal_energy_cap(slots)
+
+
+def terminal_value(
+    slots: list[HorizonSlot],
+    battery: BatterySpec,
+    settings: OptimiserSettings,
+    soc: float,
+) -> float:
+    """What the charge left at ``soc`` is worth once the horizon ends.
+
+    Public because it is the other half of :attr:`Plan.net_cost`. Comparing two
+    plans on realised cost alone ranks them by how empty they arrive, so both
+    sides have to be credited for what they are still holding -- and credited the
+    same way, or the comparison measures the valuation rather than the plans.
+    ``optimise`` does that below for its own self-use check; anything else
+    comparing plans needs the identical sum, and needs it from here rather than
+    from a second copy that can drift out of step with this one.
+    """
+    value_per_kwh, cap = _terminal_terms(slots, battery, settings)
+    return min(battery.soc_to_energy(soc), cap) * value_per_kwh
+
+
 def optimise(
     slots: list[HorizonSlot],
     start_soc: float,
@@ -471,10 +500,7 @@ def optimise(
     quantised_start_soc = battery.energy_to_soc(start_level * step)
 
     # --- terminal valuation ------------------------------------------------
-    rate = _terminal_rate(slots, settings) * settings.terminal_weight
-    # Only the energy that survives the inverter on the way out has value.
-    value_per_kwh = rate * battery.discharge_efficiency
-    credit_cap = _terminal_energy_cap(slots)
+    value_per_kwh, credit_cap = _terminal_terms(slots, battery, settings)
     future = [-min(j * step, credit_cap) * value_per_kwh for j in range(levels + 1)]
 
     # --- backward sweep ----------------------------------------------------
@@ -593,7 +619,7 @@ def optimise(
     # battery into levels also means the DP cannot always express the continuous
     # self-use trajectory exactly, and this catches that too.
     self_use.terminal_value = (
-        min(battery.soc_to_energy(self_use.slots[-1].soc_end), credit_cap) * value_per_kwh
+        terminal_value(slots, battery, settings, self_use.slots[-1].soc_end)
         if self_use.slots
         else 0.0
     )

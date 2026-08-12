@@ -31,7 +31,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .models import BatterySpec, GridSpec, HorizonSlot
-from .optimiser.dp import OptimiserSettings, optimise, simulate_self_use
+from .optimiser.dp import (
+    OptimiserSettings,
+    optimise,
+    simulate_self_use,
+    terminal_value,
+)
 from .tariff.base import PriceSeries
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,9 +72,13 @@ class TariffScore:
 
     candidate: TariffCandidate
     optimised_cost: float
-    """Cost with the battery optimised, in minor units."""
+    """Cost with the battery optimised, in minor units, *net* of the charge left
+    in the pack at the end of the window -- the same basis the optimiser uses to
+    judge its own plan. See :func:`score_tariff` for why the gross figure cannot
+    be compared across tariffs."""
     self_use_cost: float
-    """Cost under plain self-consumption, for comparison."""
+    """The same for plain self-consumption, valued identically so the two
+    subtract cleanly."""
     standing_charge: float
     hours: float
     slots: int
@@ -183,6 +192,17 @@ def score_tariff(
 
     ``template`` supplies the forecast load and solar for each slot -- the same
     profile is used for every candidate so the comparison isolates the tariff.
+
+    Both sides are scored on :attr:`Plan.net_cost`: what the window cost, less
+    the value of the charge it ends holding. The gross figure cannot be compared
+    across tariffs, because different tariffs deliberately end at different
+    states of charge. A tariff whose cheap window falls late in the horizon fills
+    the pack on the way out, so it books the whole purchase and none of the
+    value -- and a comparison run on realised cost alone then recommends against
+    the deep-trough tariffs a battery owner is looking for, which is the one
+    answer this feature must not give. The same reasoning is why
+    ``Plan.net_cost`` exists at all, and why ``optimise`` judges its own plan
+    against self-use that way.
     """
     slots: list[HorizonSlot] = []
     for slot in template:
@@ -217,13 +237,21 @@ def score_tariff(
 
     plan = optimise(slots, start_soc, battery, grid, settings)
     self_use = simulate_self_use(slots, start_soc, battery, grid)
+    # The simulators do not value what they end holding, because inside the
+    # optimiser they are only ever used for a gross total. Credited here, from
+    # the optimiser's own function, so the baseline is comparable with the plan.
+    self_use.terminal_value = (
+        terminal_value(slots, battery, settings, self_use.slots[-1].soc_end)
+        if self_use.slots
+        else 0.0
+    )
 
     hours = sum(s.duration_hours for s in slots)
     prices = [s.import_price for s in slots]
     return TariffScore(
         candidate=candidate,
-        optimised_cost=plan.total_cost,
-        self_use_cost=self_use.total_cost,
+        optimised_cost=plan.net_cost,
+        self_use_cost=self_use.net_cost,
         standing_charge=standing_charge_per_day * hours / 24.0,
         hours=hours,
         slots=len(slots),

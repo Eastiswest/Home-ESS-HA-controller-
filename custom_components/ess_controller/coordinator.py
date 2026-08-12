@@ -565,6 +565,26 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._note_slot_state(now, site)
         return self._build_data(now, site)
 
+    def _hand_back_command(self, reason: str) -> ControlCommand:
+        """The instruction that returns the inverter to running itself.
+
+        Self-use, at the user's own emergency reserve rather than the plan's floor,
+        with the configured rate ceilings restored. Every field earns its place: a
+        hold leaves the reserve raised to the charge it was protecting, an outage
+        boost leaves it raised further still, and a forced charge leaves the
+        charge-current limit at whatever that slot was throttled to. Each of those
+        silently outlives the controller unless it is written back.
+        """
+        return ControlCommand(
+            action=SlotAction.SELF_USE,
+            min_soc=self.settings.reserve_soc,
+            max_soc=self.settings.max_soc,
+            allow_grid_charge=self.settings.allow_grid_charge,
+            max_charge_kw=self.settings.max_charge_kw,
+            max_discharge_kw=self.settings.max_discharge_kw,
+            reason=reason,
+        )
+
     async def _async_hand_back(self, now: datetime) -> None:
         """Return the inverter to self-use, once, while writing is still permitted."""
         try:
@@ -582,13 +602,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         forced charge.
         """
         self.plan = None
-        command = ControlCommand(
-            action=SlotAction.SELF_USE,
-            min_soc=self.settings.reserve_soc,
-            max_soc=self.settings.max_soc,
-            allow_grid_charge=self.settings.allow_grid_charge,
-            reason="controller disabled",
-        )
+        command = self._hand_back_command("controller disabled")
         self.last_command = command
         self.last_apply = await self._adapter.async_apply(
             command,
@@ -1941,41 +1955,44 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.clear_commitment()
         await self.async_request_refresh()
 
-    async def async_restore_reserve(self) -> bool:
-        """Put the inverter's reserve back where the user set it, on the way out.
+    async def async_release_on_unload(self) -> bool:
+        """Hand the inverter back to its own logic on the way out.
 
-        A hold is expressed by raising the inverter's own reserve to the state of
-        charge it is holding, which is what lets the array keep charging. That
-        setting outlives this integration: unload the entry mid-hold and the
-        inverter is left refusing to discharge below 94%, running the house off
-        the grid for ever with nothing on screen to explain it. Disabling the
-        optimiser already hands the inverter back; removing or reloading the entry
-        has to as well.
+        Whatever was last written outlives this integration, and every mode the
+        controller uses is a mode the inverter will happily sit in for ever:
 
-        Narrow on purpose: it writes only when a hold actually raised the floor, so
-        an ordinary reload does not add a write for the sake of it. Returns whether
-        anything was written.
+        * A hold raises the inverter's own reserve to the charge it is protecting,
+          so unloading mid-hold leaves a pack refusing to discharge below 94% and
+          a house running off the grid with nothing on screen to explain it.
+        * A forced charge or discharge leaves it in Manual mode -- and a forced
+          charge left there simply carries on buying.
+        * Even an ordinary self-use slot writes the *plan's* floor, which an
+          outage boost can put far above the reserve the user actually set.
+
+        Disabling the optimiser already hands the inverter back; removing or
+        reloading the entry has to as well, from any of those states.
+
+        This used to fire only for a solar-absorbing hold, on the reasoning that an
+        ordinary reload should not add a write for the sake of it. The reasoning
+        was right; the guard was the wrong way to get it, and it left the three
+        cases above unhandled. The adapter already compares every target against
+        the entity's current state and plans no write where they match, so an
+        install genuinely sitting in self-use at its own reserve still costs
+        nothing. Asking the hardware beats inferring from the last command.
+
+        Returns whether the hand-back was sent.
         """
-        command = self.last_command
-        if command is None or command.action is not SlotAction.IDLE:
-            return False
-        if not command.hold_absorbs_solar or not self.settings.may_write:
+        if self.last_command is None or not self.settings.may_write:
             return False
         try:
             await self._adapter.async_apply(
-                ControlCommand(
-                    action=SlotAction.SELF_USE,
-                    min_soc=self.settings.reserve_soc,
-                    max_soc=self.settings.max_soc,
-                    allow_grid_charge=self.settings.allow_grid_charge,
-                    reason="releasing the hold on the way out",
-                ),
+                self._hand_back_command("releasing control on the way out"),
                 dry_run=False,
                 verify=False,
             )
         except Exception:
             # Home Assistant may already be tearing the service registry down.
-            _LOGGER.warning("Could not restore the inverter reserve on unload")
+            _LOGGER.warning("Could not hand the inverter back on unload")
             return False
         return True
 
