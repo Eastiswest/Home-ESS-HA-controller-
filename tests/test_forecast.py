@@ -1375,6 +1375,124 @@ class TestDailyTotalForecasts:
         assert all(p.kwh == 0.0 for p in predictions)
 
 
+class TestALearnedDayStopsBeingCrushedByADailyTotal:
+    """The rescale ran last and unconditionally, so learning could never show.
+
+    A real install's solar sensors published daily totals only. Its measured
+    generation ran 40% above the forecast in every daylight half-hour, and the
+    correction the model exists to make was overwritten immediately after being
+    made: the whole day in the horizon -- the one that decides whether to buy
+    into tonight's cheap window -- was pinned to a number the house had already
+    disproved. The plan therefore bought 14 kWh from the grid at an average of
+    28p to cover a shortfall that was never going to arrive.
+    """
+
+    from datetime import UTC, date, datetime, timedelta
+
+    DAY = date(2026, 6, 22)
+
+    def _forecaster(self, trained_kwh: float | None = None):
+        from custom_components.ess_controller.forecast.solar import SolarForecaster
+        from custom_components.ess_controller.learning.model import (
+            MIN_SAMPLES_TRUSTED,
+            LearningModel,
+            SolarObservation,
+        )
+
+        model = LearningModel()
+        if trained_kwh is not None:
+            # Enough observations for the buckets to be trusted rather than the
+            # single-sample fallback, which is still a guess.
+            for _ in range(MIN_SAMPLES_TRUSTED + 1):
+                for slot in range(48):
+                    hour, minute = divmod(slot * 30, 60)
+                    model.observe_solar(
+                        SolarObservation(
+                            month=6,
+                            hour=hour,
+                            minute=minute,
+                            kwh=trained_kwh if 6 <= hour < 20 else 0.0,
+                            cloud_cover=None,
+                            uv_index=None,
+                        )
+                    )
+        return SolarForecaster(model, peak_power_kw=2.0, latitude=54.0, longitude=-0.2)
+
+    def _predict(self, forecaster, total: float | None):
+        start = self.datetime(2026, 6, 21, 0, 0, tzinfo=self.UTC)
+        slots = [
+            (
+                start + self.timedelta(minutes=30 * i),
+                start + self.timedelta(minutes=30 * (i + 1)),
+            )
+            for i in range(48 * 3)
+        ]
+        totals = None if total is None else {self.DAY: total}
+        predictions = forecaster.predict_series(slots, None, None, lambda dt: dt, totals)
+        day = [
+            p
+            for p, (s, _) in zip(predictions, slots, strict=True)
+            if s.date() == self.DAY
+        ]
+        return day
+
+    def test_an_untrained_model_still_defers_to_the_total(self):
+        """Day one, a clear-sky guess is worse than a real forecast. Unchanged."""
+        day = self._predict(self._forecaster(), total=3.0)
+        assert sum(p.kwh for p in day) == pytest.approx(3.0, rel=0.01)
+        assert any("daily" in p.source for p in day)
+
+    def test_a_single_observation_is_not_enough_to_override_it(self):
+        """One half-hour is evidence of nothing, and ``lookup`` marks it ``~``."""
+        from custom_components.ess_controller.forecast.solar import _is_trusted_bucket
+
+        assert not _is_trusted_bucket("m6:s20:u4~")
+        assert not _is_trusted_bucket("clearsky+cloud")
+        assert not _is_trusted_bucket("default")
+        assert _is_trusted_bucket("m6:s20:u4")
+
+    def test_a_trained_model_keeps_its_own_answer(self):
+        forecaster = self._forecaster(trained_kwh=0.5)
+        day = self._predict(forecaster, total=3.0)
+        learned_total = sum(p.kwh for p in day)
+        # 28 daylight half-hours at 0.5 kWh, clamped by a 2 kW array to 1 kWh a
+        # slot, so the learned day stands well clear of the 3 kWh being imposed.
+        assert learned_total > 10.0
+        assert all("daily" not in p.source for p in day)
+        assert any(p.learned for p in day)
+
+    def test_the_answer_is_the_same_with_or_without_the_total(self):
+        """Once trained, the external total stops changing the prediction."""
+        forecaster = self._forecaster(trained_kwh=0.5)
+        with_total = [p.kwh for p in self._predict(forecaster, total=3.0)]
+        without = [p.kwh for p in self._predict(forecaster, total=None)]
+        assert with_total == pytest.approx(without)
+
+    def test_a_thinly_learned_day_still_defers(self):
+        """A majority, not one lucky bucket, takes a day off the forecast."""
+        from custom_components.ess_controller.forecast.solar import (
+            LEARNED_DAY_SHARE,
+            SolarPrediction,
+            _scale_to_daily_totals,
+        )
+
+        # One trusted slot carrying a fifth of the day, the rest guessed. The
+        # day has to sit *inside* the horizon to be a candidate at all, so it is
+        # bracketed by a slot of the day either side.
+        before = self.date(2026, 6, 21)
+        after = self.date(2026, 6, 23)
+        predictions = [
+            SolarPrediction(kwh=1.0, source="clearsky"),
+            SolarPrediction(kwh=1.0, source="m6:s20", learned=True),
+            *(SolarPrediction(kwh=1.0, source="clearsky") for _ in range(4)),
+            SolarPrediction(kwh=1.0, source="clearsky"),
+        ]
+        dates = [before, *([self.DAY] * 5), after]
+        assert 5.0 * LEARNED_DAY_SHARE > 1.0
+        _scale_to_daily_totals(predictions, dates, {self.DAY: 2.5})
+        assert sum(p.kwh for p in predictions[1:6]) == pytest.approx(2.5)
+
+
 class TestTheTemperatureDialsAreVisible:
     """Two settings tripled a real forecast and nothing said so.
 

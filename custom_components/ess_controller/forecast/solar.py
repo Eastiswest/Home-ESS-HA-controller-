@@ -220,6 +220,25 @@ def daily_total_offset(object_id: str) -> int | None:
     return None
 
 
+# Once this much of a day's predicted generation comes from trusted learned
+# buckets, the day is no longer rescaled to an external daily total. A majority
+# rather than a single bucket, so one lucky half-hour cannot take the whole day
+# off the forecast that is otherwise carrying it.
+LEARNED_DAY_SHARE = 0.5
+
+
+def _is_trusted_bucket(source: str) -> bool:
+    """Whether a prediction came from a learned bucket with real evidence behind it.
+
+    Everything else -- a clear-sky estimate, a bare default, or the single-sample
+    fallback that ``lookup`` marks with a trailing ``~`` -- is a guess, and a
+    guess must not be allowed to outrank an external forecast.
+    """
+    if not source or source.endswith("~"):
+        return False
+    return source not in ("default", "none") and not source.startswith("clearsky")
+
+
 def _scale_to_daily_totals(
     predictions: list[SolarPrediction],
     local_dates: list[date],
@@ -236,6 +255,16 @@ def _scale_to_daily_totals(
 
     Only estimates the model derived itself are touched. Where an hourly forecast was
     available it is already better than a total.
+
+    ...and so, eventually, is the learned model. This ran last and unconditionally,
+    which meant a house that had spent a fortnight teaching the model what its
+    August afternoons produce still had every whole day in the horizon crushed back
+    to whatever the daily-total sensor said. On a real install that sensor was 40%
+    low, every daylight half-hour, and no amount of learning could ever show through
+    -- the correction the model exists to make was overwritten immediately after
+    being made. Once most of a day's generation is predicted from trusted buckets,
+    the house has taught the model more about that half-hour at that cloud level
+    than a whole-day number can say, and the day is left alone.
     """
     if not daily_totals or not predictions:
         return
@@ -251,6 +280,9 @@ def _scale_to_daily_totals(
         ]
         estimated = sum(predictions[i].kwh for i in indices)
         if not indices or estimated <= EPS_KWH:
+            continue
+        learned = sum(predictions[i].kwh for i in indices if predictions[i].learned)
+        if learned >= estimated * LEARNED_DAY_SHARE:
             continue
         factor = target / estimated
         for i in indices:
@@ -284,6 +316,14 @@ class SolarPrediction:
     external_kwh: float | None = None
     cloud: float | None = None
     uv_index: float | None = None
+    learned: bool = False
+    """True when a *trusted* learned bucket supplied this, not a fallback.
+
+    A single-sample bucket, a clear-sky estimate and a bare default are all
+    guesses of one kind or another. This marks the case where the house has
+    actually taught the model what this half-hour does at this cloud level, which
+    is the only case where the learned answer should outrank an external one.
+    """
 
 
 class SolarForecaster:
@@ -347,6 +387,7 @@ class SolarForecaster:
             external_kwh=external_kwh,
             cloud=cloud,
             uv_index=uv_index,
+            learned=_is_trusted_bucket(source),
         )
 
     def _day_one(
