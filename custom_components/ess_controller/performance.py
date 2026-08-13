@@ -41,6 +41,28 @@ MAX_RECORDS = 5000
 
 EPS = 1e-9
 
+# What a kWh still in the battery is worth when the window closes.
+#
+# The cheap end of the prices actually seen, not their average: what leftover
+# charge is worth is what it costs to put back, and valuing it at a typical price
+# would let a report flatter itself simply by ending full. A low percentile
+# rather than the bare minimum, so one free half-hour cannot value a whole pack
+# at nothing.
+STORED_ENERGY_FRACTION = 0.10
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    """Linear-interpolated percentile, so a short window still gives an answer."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = min(max(fraction, 0.0), 1.0) * (len(ordered) - 1)
+    low = int(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
 
 @dataclass(slots=True)
 class SlotRecord:
@@ -239,6 +261,24 @@ class PerformanceSummary:
     no_battery_cost: float = 0.0
     self_use_cost: float | None = None
 
+    stored_energy_kwh: float = 0.0
+    """Energy the real battery ended holding beyond what the shadow ended with.
+
+    Measured at the meter -- what the difference would actually deliver to the
+    house -- and signed, so a plan that ends emptier than the counterfactual is
+    penalised by exactly the same rule that credits one ending fuller.
+
+    Without this the comparison is not like-for-like and cannot be read at all.
+    The shadow spends its charge covering the house every evening and arrives at
+    its floor; a plan that is holding for tomorrow arrives full. Charging the
+    plan for every kWh it bought while crediting the shadow for having burnt its
+    own is not a measurement of anything -- it is a measurement of how much
+    charge each one happened to be sitting on when the window closed.
+    """
+
+    stored_energy_rate: float = 0.0
+    """Price per kWh that energy is valued at -- see ``STORED_ENERGY_FRACTION``."""
+
     pv_forecast_slots: int = 0
     pv_mae: float | None = None
     pv_bias: float | None = None
@@ -289,14 +329,24 @@ class PerformanceSummary:
         return self.battery_discharge_kwh * self.cycle_cost
 
     @property
+    def stored_energy_value(self) -> float:
+        """What the leftover charge is worth, in the same units as the costs."""
+        return self.stored_energy_kwh * self.stored_energy_rate
+
+    @property
     def net_saving_vs_self_use(self) -> float | None:
-        """Saving after charging the extra cycling to the wear allowance.
+        """Saving after wear, and after the charge each side ended holding.
 
         The optimiser cycles the pack harder than self-use does, and a saving
-        that vanishes once that is paid for is not a saving.
+        that vanishes once that is paid for is not a saving. Equally, a plan is
+        not losing money because it ends the week with a fuller battery than the
+        counterfactual -- that energy is bought and still there, and the headline
+        has to say so or a patient plan reads as an expensive one.
         """
         gross = self.saving_vs_self_use
-        return None if gross is None else gross - self.wear_cost
+        if gross is None:
+            return None
+        return gross - self.wear_cost + self.stored_energy_value
 
     @property
     def self_consumption(self) -> float | None:
@@ -344,6 +394,9 @@ class PerformanceSummary:
                 "saving_vs_no_battery": r(self.saving_vs_no_battery),
                 "saving_vs_self_use": r(self.saving_vs_self_use),
                 "wear_cost": r(self.wear_cost),
+                "stored_energy_kwh": r(self.stored_energy_kwh, 3),
+                "stored_energy_rate": r(self.stored_energy_rate),
+                "stored_energy_value": r(self.stored_energy_value),
                 "net_saving_vs_self_use": r(self.net_saving_vs_self_use),
             },
             "forecast_error_kwh_per_slot": {
@@ -534,6 +587,15 @@ def summarise(
         summary.load_bias = math.fsum(load_errors) / len(load_errors)
     if shadow is not None:
         summary.self_use_cost = shadow.cost
+        summary.stored_energy_rate = _percentile(
+            [record.import_price for record in ordered], STORED_ENERGY_FRACTION
+        )
+        real_end = next(
+            (r.soc_end for r in reversed(ordered) if r.soc_end is not None), None
+        )
+        if real_end is not None and shadow.capacity_kwh > 0:
+            at_cells = (real_end - shadow.soc) / 100.0 * shadow.capacity_kwh
+            summary.stored_energy_kwh = at_cells * shadow.discharge_efficiency
 
     _add_caveats(summary, ordered)
     return summary
@@ -564,6 +626,12 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
     elif summary.controlled_slots < summary.slots:
         summary.notes.append(
             f"armed for {summary.controlled_slots} of {summary.slots} slots"
+        )
+    if abs(summary.stored_energy_kwh) > 0.2:
+        summary.notes.append(
+            f"ended {summary.stored_energy_kwh:+.1f} kWh against the self-use "
+            f"counterfactual, valued at {summary.stored_energy_rate:.1f} and "
+            "already counted in the net saving"
         )
     soc_first = next((r.soc_start for r in records if r.soc_start is not None), None)
     soc_last = next((r.soc_end for r in reversed(records) if r.soc_end is not None), None)

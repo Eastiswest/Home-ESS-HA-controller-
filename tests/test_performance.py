@@ -449,6 +449,110 @@ class TestSummary:
         assert data["money"]["actual"] == pytest.approx(300.0)
 
 
+class TestTheComparisonIsLikeForLike:
+    """A week's saving read -476.6 while the battery sat full.
+
+    The self-use counterfactual spends its charge covering the house every
+    evening and arrives at its floor. A plan holding for tomorrow arrives full.
+    Charging the plan for every kWh it bought while crediting the shadow for
+    having burnt its own measures nothing except how much charge each happened
+    to be sitting on when the window closed -- and it reads as the optimiser
+    losing money, which is the one conclusion the number must not invite when it
+    is not true.
+    """
+
+    PRICES = [4.0, 6.0, 20.0, 30.0, 40.0]
+
+    def _records(self, end_soc: float) -> list[SlotRecord]:
+        records = []
+        for index, price in enumerate(self.PRICES):
+            records.append(
+                record(
+                    index,
+                    import_price=price,
+                    load_kwh=0.3,
+                    grid_import_kwh=0.3,
+                    grid_measured=True,
+                    soc_start=50.0,
+                    soc_end=end_soc if index == len(self.PRICES) - 1 else 50.0,
+                )
+            )
+        return records
+
+    def _summary(self, end_soc: float, shadow_soc: float = 20.0):
+        shadow = SelfUseShadow(
+            soc=shadow_soc,
+            capacity_kwh=10.0,
+            min_soc=shadow_soc,
+            max_soc=90.0,
+            max_charge_kw=3.0,
+            max_discharge_kw=0.0,
+            discharge_efficiency=0.95,
+        )
+        return summarise(self._records(end_soc), shadow=shadow)
+
+    def test_a_fuller_battery_is_credited_not_charged(self):
+        summary = self._summary(end_soc=70.0)
+        # 50 points of a 10 kWh pack, delivered at 95%.
+        assert summary.stored_energy_kwh == pytest.approx(5.0 * 0.95)
+        assert summary.stored_energy_value > 0
+        gross = summary.saving_vs_self_use
+        assert gross is not None
+        assert summary.net_saving_vs_self_use == pytest.approx(
+            gross - summary.wear_cost + summary.stored_energy_value
+        )
+        assert summary.net_saving_vs_self_use > gross
+
+    def test_an_emptier_battery_is_penalised_by_the_same_rule(self):
+        """The correction has to cut both ways or it is just flattery."""
+        summary = self._summary(end_soc=10.0)
+        assert summary.stored_energy_kwh < 0
+        gross = summary.saving_vs_self_use
+        assert gross is not None
+        assert summary.net_saving_vs_self_use < gross
+
+    def test_it_is_valued_at_what_it_costs_to_put_back(self):
+        """The cheap end of the window, not the average.
+
+        Valuing leftover charge at a typical price lets a report flatter itself
+        by ending full: it books the energy at more than the half-hours that
+        would actually refill it.
+        """
+        summary = self._summary(end_soc=70.0)
+        mean = sum(self.PRICES) / len(self.PRICES)
+        assert summary.stored_energy_rate < mean
+        assert summary.stored_energy_rate == pytest.approx(4.8)
+
+    def test_the_adjustment_is_shown_not_buried(self):
+        summary = self._summary(end_soc=70.0)
+        money = summary.as_dict()["money"]
+        assert money["stored_energy_kwh"] == pytest.approx(4.75)
+        assert money["stored_energy_value"] == pytest.approx(
+            summary.stored_energy_value, abs=0.01
+        )
+        assert any("against the self-use counterfactual" in n for n in summary.notes)
+
+    def test_a_matched_ending_needs_no_correction(self):
+        summary = self._summary(end_soc=20.0)
+        assert summary.stored_energy_kwh == pytest.approx(0.0)
+        gross = summary.saving_vs_self_use
+        assert summary.net_saving_vs_self_use == pytest.approx(gross - summary.wear_cost)
+
+    def test_without_a_recorded_charge_nothing_is_invented(self):
+        """No SoC sensor means no correction, not a guessed one."""
+        shadow = SelfUseShadow(
+            soc=20.0,
+            capacity_kwh=10.0,
+            min_soc=20.0,
+            max_soc=90.0,
+            max_charge_kw=3.0,
+            max_discharge_kw=0.0,
+        )
+        summary = summarise([record(1, import_price=10.0, load_kwh=0.3)], shadow=shadow)
+        assert summary.stored_energy_kwh == pytest.approx(0.0)
+        assert summary.stored_energy_value == pytest.approx(0.0)
+
+
 class TestSummaryCaveats:
     def test_short_window_is_flagged(self):
         summary = summarise([record(1), record(2)])

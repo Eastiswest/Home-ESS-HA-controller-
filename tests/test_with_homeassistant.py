@@ -2071,6 +2071,67 @@ class TestHorizonReachIsReported:
         assert calls == []
 
 
+class TestTheWeeklySavingIsATotalNotARate:
+    """It shipped labelled ``p/kWh`` and read "-476.6 p/kWh" on a phone.
+
+    That is not a quantity anybody can act on, and graphed against a y-axis in
+    p/kWh a week's money looks like a tariff gone mad. It is a total in pence,
+    the same as every other money sensor on the page.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_the_unit_is_money(self, hass):
+        from custom_components.ess_controller.sensor import COST_UNIT, PRICE_UNIT
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        state = hass.states.get("sensor.ai_ess_controller_saving_vs_self_use_this_week")
+        assert state is not None
+        unit = state.attributes.get("unit_of_measurement")
+        assert unit == COST_UNIT
+        assert unit != PRICE_UNIT
+
+    async def test_the_counterfactual_starts_where_the_window_does(self, hass):
+        """Not where the whole log does.
+
+        A seven-day report was beginning its counterfactual at whatever the
+        battery held two months ago and then stepping it through this week's
+        slots, so the two batteries were never started from the same charge and
+        part of the difference between them was only that.
+        """
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        log = coordinator.performance_store.log
+        # One stale record far outside the window, at an implausible charge...
+        log.add(SlotRecord(start=now - timedelta(days=40), soc_start=95.0, soc_end=95.0))
+        # ...and this week's, which is what a seven-day report is about.
+        for hours in range(6, 0, -1):
+            log.add(
+                SlotRecord(
+                    start=now - timedelta(hours=hours),
+                    import_price=20.0,
+                    load_kwh=0.3,
+                    grid_import_kwh=0.3,
+                    soc_start=30.0,
+                    soc_end=30.0,
+                )
+            )
+        shadow = coordinator._self_use_shadow(log.window(7.0))
+        assert shadow.soc == pytest.approx(30.0)
+
+
 class TestHorizonIsReportedInHours:
     """ "horizon_slots: 48" was read as a 48-hour horizon. It is 48 half-hours.
 

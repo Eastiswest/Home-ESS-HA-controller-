@@ -580,7 +580,10 @@ SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
         translation_key="weekly_saving",
         name="Saving vs self use this week",
         icon="mdi:chart-line",
-        native_unit_of_measurement=PRICE_UNIT,
+        # A total, not a rate. Labelled p/kWh it read as "-476.6 p/kWh", which is
+        # not a quantity anybody can act on -- and on a graph of it, the y-axis
+        # made a week's money look like a tariff gone mad.
+        native_unit_of_measurement=COST_UNIT,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         value=_performance_state,

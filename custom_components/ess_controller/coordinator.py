@@ -816,10 +816,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._report_cache = {}
         self.performance_store.async_schedule_save()
 
-    def _self_use_shadow(self) -> SelfUseShadow:
-        """A self-use battery starting where the history does."""
+    def _self_use_shadow(self, records: list[SlotRecord]) -> SelfUseShadow:
+        """A self-use battery starting where the window does.
+
+        ``records`` is the window being summarised, not the whole log. Reading
+        the starting charge from the full history meant a seven-day report began
+        its counterfactual at whatever the battery held two months ago, then
+        stepped it through this week's slots -- so the two batteries were never
+        even started from the same place, and the difference between them was
+        partly just that.
+        """
         battery = self.battery_spec()
-        records = self.performance_store.log.records
         start_soc = next(
             (r.soc_start for r in records if r.soc_start is not None), battery.min_soc
         )
@@ -848,7 +855,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             records,
             cycle_cost=self.wear_estimate().cycle_cost,
             usable_kwh=self.usable_kwh(),
-            shadow=self._self_use_shadow() if records else None,
+            shadow=self._self_use_shadow(records) if records else None,
         )
         self._report_cache[days] = report
         return report
