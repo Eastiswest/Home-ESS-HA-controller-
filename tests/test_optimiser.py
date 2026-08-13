@@ -1033,6 +1033,124 @@ class TestAHoldThatProtectsNothingIsNotAHold:
         assert slot.as_dict()["hold_value"] == pytest.approx(slot.hold_value, abs=0.005)
 
 
+class TestTheSelfUseFallbackNeverShutsTheBattery:
+    """The fallback plan means "leave the inverter alone". It was doing the opposite.
+
+    Whenever the sweep cannot beat plain self-consumption, that simulation is
+    handed back as the plan -- and the control path reads a slot's action
+    literally, so ``idle`` raises the inverter's reserve to the current charge
+    and holds the battery shut for the half-hour.
+
+    A real install hit it with a full pack on a sunny afternoon: nowhere to put
+    the surplus, so the policy moved nothing, so four consecutive half-hours came
+    back ``idle`` and were printed as "Hold (sun covers the house)" at 38.2p and
+    45.4p with the battery shut behind them. Any load the forecast had not
+    predicted would have been bought at those prices while a full battery
+    watched, on a plan whose whole premise was that nothing clever was worth
+    doing. Not moving is not the same as refusing to move.
+    """
+
+    def _slots(self):
+        # A full pack, a sunny afternoon with nowhere to put the surplus, then an
+        # evening the battery covers on its own.
+        rows = [(38.2, 0.42, 0.36), (45.4, 0.46, 0.39)] * 2 + [
+            (49.2, 0.06, 0.38),
+            (68.7, 0.0, 0.31),
+        ]
+        slots = []
+        for index, (price, pv, load) in enumerate(rows):
+            start = START + timedelta(minutes=30 * index)
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=pv,
+                    load_kwh=load,
+                )
+            )
+        return slots
+
+    def _plan(self):
+        return simulate_self_use(
+            self._slots(),
+            95.0,
+            make_battery(min_soc=20.0, max_soc=95.0),
+            make_grid(allow_export=False, allow_battery_export=False),
+        )
+
+    def test_a_full_pack_under_sun_is_not_expressed_as_a_hold(self):
+        plan = self._plan()
+        assert plan.slots
+        assert not [s for s in plan.slots if s.action is SlotAction.IDLE], [
+            (f"{s.start:%H:%M}", s.import_price, s.action.value)
+            for s in plan.slots
+            if s.action is SlotAction.IDLE
+        ]
+
+    def test_the_slots_that_moved_nothing_say_self_use(self):
+        plan = self._plan()
+        stuck = [s for s in plan.slots if s.battery_delta_kwh == pytest.approx(0.0)]
+        assert stuck, "the case under test did not arise"
+        assert all(s.action is SlotAction.SELF_USE for s in stuck)
+
+    def test_relabelling_changes_no_money(self):
+        """It is a statement about the inverter's mode, not about the energy."""
+        plan = self._plan()
+        assert plan.total_cost == pytest.approx(plan.self_use_cost)
+        assert all(s.grid_import_kwh == pytest.approx(0.0, abs=1e-9) for s in plan.slots)
+
+    def test_the_do_nothing_baseline_still_holds_because_that_is_what_it_is(self):
+        """``simulate_idle`` is the counterfactual, never handed back as a plan."""
+        plan = simulate_idle(
+            self._slots(),
+            95.0,
+            make_battery(min_soc=20.0, max_soc=95.0),
+            make_grid(allow_export=False, allow_battery_export=False),
+        )
+        assert all(s.action is SlotAction.IDLE for s in plan.slots)
+
+    def test_no_plan_ever_holds_without_having_priced_the_hold(self):
+        """The invariant that would have caught this, whichever branch returns.
+
+        A hold shuts the battery for a half-hour, so something must have decided
+        it was worth more shut than open. ``hold_value`` is that decision. A slot
+        carrying ``idle`` without one is a hold nobody priced, and the sweep is
+        the only thing entitled to price it -- so any plan that leaves this
+        module holding something must be able to say what it is protecting.
+        """
+        battery = make_battery(min_soc=20.0, max_soc=95.0, cycle_cost_per_kwh=1.147)
+        grids = (
+            make_grid(allow_export=False, allow_battery_export=False),
+            make_grid(allow_export=False, allow_grid_charge=False),
+            make_grid(),
+        )
+        shapes = (
+            ([25.0] * 12, 0.5, 0.3),  # flat, sunny, nothing to arbitrage
+            ([25.0] * 12, 0.0, 0.3),  # flat, dark
+            ([5.0] * 6 + [70.0] * 6, 0.0, 0.4),  # a real spread
+            ([70.0] * 6 + [5.0] * 6, 0.45, 0.35),  # dear first, sunny
+            ([25.0] * 12, 0.42, 0.36),  # the surplus that will not fit
+        )
+        for prices, pv, load in shapes:
+            for grid in grids:
+                for soc in (20.0, 55.0, 95.0):
+                    plan = optimise(
+                        build_slots(prices, pv=pv, load=load),
+                        soc,
+                        battery,
+                        grid,
+                        OptimiserSettings(),
+                    )
+                    unpriced = [
+                        s
+                        for s in plan.slots
+                        if s.action is SlotAction.IDLE and s.hold_value is None
+                    ]
+                    assert not unpriced, (prices[0], pv, load, soc, plan.reason)
+
+
 class TestStartingChargeIsNeverOverstated:
     """The plan must not begin believing it has energy the battery lacks.
 

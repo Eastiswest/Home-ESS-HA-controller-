@@ -919,8 +919,33 @@ def simulate_self_use(
     grid: GridSpec,
     created: datetime | None = None,
 ) -> Plan:
-    """Plain self-consumption, the behaviour of an unmanaged hybrid inverter."""
-    return _simulate(slots, start_soc, battery, grid, created, _self_use_policy)
+    """Plain self-consumption, the behaviour of an unmanaged hybrid inverter.
+
+    Never emits a hold, and the difference is not cosmetic. This simulation is
+    handed back as the plan whenever the sweep cannot beat it, and the control
+    path reads a slot's action literally: ``idle`` raises the inverter's reserve
+    to the current charge and shuts the battery for the half-hour. So on a plan
+    that means "leave the inverter doing self-use", every slot the policy
+    happened not to move became an enforced hold.
+
+    A full pack under a sunny sky is exactly that case, and it is the one a real
+    install hit: the battery at 95% with nowhere to put the surplus, four
+    consecutive half-hours labelled ``idle``, printed as "Hold (sun covers the
+    house)" at 38.2p and 45.4p, and the battery shut behind them. Any load the
+    forecast missed would have been bought at those prices while a full battery
+    watched -- on a plan whose entire premise was that nothing clever was worth
+    doing.
+
+    The shadow-price release cannot save it either: that reads a value function
+    this simulation does not have, so ``hold_value`` is ``None`` on every slot
+    and the release never fires. Not moving is not the same as refusing to move,
+    and only the sweep is ever entitled to refuse.
+    """
+    plan = _simulate(slots, start_soc, battery, grid, created, _self_use_policy)
+    for slot in plan.slots:
+        if slot.action is SlotAction.IDLE:
+            slot.action = SlotAction.SELF_USE
+    return plan
 
 
 def _describe(plan: Plan, battery: BatterySpec) -> str:
