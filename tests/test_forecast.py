@@ -1373,3 +1373,62 @@ class TestDailyTotalForecasts:
         dates = [date(2026, 12, 21)] * 4
         _scale_to_daily_totals(predictions, dates, {date(2026, 12, 21): 5.0})
         assert all(p.kwh == 0.0 for p in predictions)
+
+
+class TestTheTemperatureDialsAreVisible:
+    """Two settings tripled a real forecast and nothing said so.
+
+    Cooling and heating load-per-degree are quoted in kWh per degree per hour,
+    which reads like a small number and is not: at 2.0 a four-degree day adds
+    8 kW of continuous load. A real install set both to 2.0 and its 48-hour
+    forecast went to 96 kWh against a measured 12.7 kWh a day. The plan bought
+    31 kWh it would never use and held it through 45 half-hours while the house
+    ran off the grid. Every figure on every screen was merely large.
+
+    Not clamped, deliberately -- see ``climate_uplift``. What is testable is that
+    the proportion gets said out loud.
+    """
+
+    def test_a_dominating_uplift_is_described(self):
+        from custom_components.ess_controller.forecast.load import (
+            describe_climate_uplift,
+        )
+
+        note = describe_climate_uplift(96.3, 61.0)
+        assert note
+        assert "63%" in note
+        assert "kW per degree" in note
+
+    def test_a_sane_uplift_says_nothing(self):
+        from custom_components.ess_controller.forecast.load import (
+            describe_climate_uplift,
+        )
+
+        # 0.1 kW/degree on a small house: real air conditioning, not a typo.
+        assert describe_climate_uplift(33.0, 4.0) == ""
+
+    def test_no_uplift_says_nothing(self):
+        from custom_components.ess_controller.forecast.load import (
+            describe_climate_uplift,
+        )
+
+        assert describe_climate_uplift(33.0, 0.0) == ""
+        assert describe_climate_uplift(0.0, 0.0) == ""
+
+    def test_the_real_settings_reproduce_the_real_forecast(self):
+        """2.0 kW/degree against a 24.3 C day, as configured on the install."""
+        from custom_components.ess_controller.forecast.load import (
+            describe_climate_uplift,
+        )
+
+        forecaster = LoadForecaster(
+            LearningModel(),
+            daily_kwh=16.0,
+            cooling_threshold_c=20.0,
+            cooling_kwh_per_degree_hour=2.0,
+        )
+        hot = forecaster.predict_slot(dt(9), 0.5, temperature=24.3)
+        # (24.3 - 20) * 2.0 * 0.5 = 4.3 kWh of uplift on a 0.30 kWh profile slot.
+        assert hot.climate_uplift_kwh == pytest.approx(4.3, abs=0.01)
+        assert hot.kwh == pytest.approx(4.6, abs=0.05)
+        assert describe_climate_uplift(hot.kwh, hot.climate_uplift_kwh)

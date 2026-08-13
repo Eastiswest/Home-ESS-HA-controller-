@@ -1764,11 +1764,21 @@ class TestTheCurrentSlotDoesNotChurn:
     async def _coordinator(self, hass):
         from homeassistant.setup import async_setup_component
 
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
         await async_setup_component(hass, DOMAIN, {})
         await _complete_flow(hass)
         entry = hass.config_entries.async_entries(DOMAIN)[0]
         await hass.async_block_till_done()
-        return hass.data[DOMAIN][entry.entry_id]
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        # A readable battery, which every real install has and this harness does
+        # not: with no inverter entities the SoC is unavailable, and the
+        # controller now refuses to act on the placeholder that stands in for it.
+        # These tests are about holding an action steady, not about SoC.
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        return coordinator
 
     @staticmethod
     def _slot(coordinator, now):
@@ -2408,3 +2418,87 @@ class TestTheInvertersOwnReserveIsCompared:
     async def test_it_is_in_the_diagnostics(self, hass):
         coordinator = await self._coordinator(hass, 90.0)
         assert coordinator.diagnostics()["reserve_conflict"]
+
+
+class TestAMissingStateOfChargeStopsTheWriting:
+    """A plan is fine to display on a guess; it must not reach the hardware.
+
+    ``_read_site_state`` substitutes 50% when the battery cannot be read, so the
+    rest of the cycle has a number to carry. Every action the optimiser then
+    chooses turns on where the charge really is -- a pack at 90% told to charge,
+    one at 15% told to discharge -- and none of it can be checked. The tariff
+    comparison already refused to score on the placeholder; the path that writes
+    to the inverter did not.
+
+    The plan is deliberately still built: an advisory install with no
+    state-of-charge sensor still wants its prices and forecasts.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _reading(coordinator, soc):
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=soc,
+            soc_source="sensor.gone" if soc is None else "sensor.back",
+            capacity_kwh=22.0,
+        )
+
+    async def test_it_holds_self_use_when_the_battery_cannot_be_read(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        self._reading(coordinator, None)
+        await coordinator.async_refresh()
+        assert coordinator.last_command is not None
+        assert coordinator.last_command.action is SlotAction.SELF_USE
+
+    async def test_it_says_why(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._reading(coordinator, None)
+        await coordinator.async_refresh()
+        assert "state of charge unavailable" in coordinator.last_command.reason
+        assert "sensor.gone" in coordinator.last_command.reason
+
+    async def test_the_plan_is_still_published(self, hass):
+        """Advisory installs keep their forecasts and prices."""
+        coordinator = await self._coordinator(hass)
+        self._reading(coordinator, None)
+        await coordinator.async_refresh()
+        assert coordinator.plan is not None
+        assert coordinator.plan.slots
+
+    async def test_a_deliberate_override_still_wins(self, hass):
+        """An override is an instruction, not an inference."""
+        from datetime import timedelta
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        self._reading(coordinator, None)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(hours=1))
+        await coordinator.async_refresh()
+        assert coordinator.last_command.action is SlotAction.CHARGE
+
+    async def test_control_resumes_once_the_reading_returns(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        self._reading(coordinator, None)
+        await coordinator.async_refresh()
+        assert "unavailable" in coordinator.last_command.reason
+
+        self._reading(coordinator, 57.0)
+        coordinator.clear_commitment()
+        await coordinator.async_refresh()
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert "unavailable" not in command.reason

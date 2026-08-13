@@ -125,7 +125,7 @@ from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import describe as describe_confidence
 from .forecast.confidence import evening_uplift
 from .forecast.energy import EnergySeries
-from .forecast.load import LoadForecaster
+from .forecast.load import LoadForecaster, describe_climate_uplift
 from .forecast.solar import (
     SolarForecaster,
     build_forecast_series,
@@ -244,6 +244,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._import_prices = PriceSeries()
         self._export_prices = PriceSeries()
         self._diagnostics: dict[str, Any] = {}
+        # Per-slot climate uplift, so the temperature dials' contribution can be
+        # read off rather than inferred from the size of the bill.
+        self._climate_uplift: dict[datetime, float] = {}
+        self._climate_note: str = ""
         self._plan_error: str | None = None
         self.sessions: list[SessionEvent] = []
         self.adjustment_result: AdjustmentResult | None = None
@@ -530,6 +534,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_refresh_forecasts(now)
         self._read_sessions(now)
         self._assess_outage(now)
+
         slots, price_note = await self._async_build_horizon(now)
 
         if not slots:
@@ -1259,9 +1264,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             now,
         )
 
+        # What the temperature dials contributed, per slot, so a wrong one is
+        # visible rather than something to be inferred from an expensive plan.
+        # The dials are quoted per degree per hour and a pair set to 2.0 tripled a
+        # real forecast; the only clue on any screen was that the numbers were
+        # large, which is not a clue.
+        self._climate_uplift = {
+            start: demand.climate_uplift_kwh
+            for (start, _), demand in zip(boundaries, load_predictions, strict=True)
+        }
+        climate_kwh = sum(self._climate_uplift.values())
+        self._climate_note = describe_climate_uplift(
+            sum(slot.load_kwh for slot in slots), climate_kwh
+        )
+        if self._climate_note:
+            _LOGGER.warning("Load forecast: %s", self._climate_note)
+
         self._diagnostics = {
             "solar_sources": [p.source for p in solar_predictions[:8]],
             "load_sources": [p.source for p in load_predictions[:8]],
+            "climate_uplift_kwh": round(climate_kwh, 3),
+            "evening_allowance_kwh": round(sum(uplift), 3),
+            "climate_note": self._climate_note,
         }
         return slots, note
 
@@ -1788,6 +1812,30 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     **base,
                 )
 
+        if not self.battery.valid:
+            # The plan above was built on the 50% ``_read_site_state`` substitutes
+            # when the battery cannot be read. That is fine to display -- an
+            # advisory install with no state-of-charge sensor still wants its
+            # prices and forecasts -- but it must not reach the hardware. Every
+            # action the optimiser chooses turns on where the charge actually is:
+            # a pack really at 90% would be told to charge, one at 15% told to
+            # discharge, and neither could be checked.
+            #
+            # The tariff comparison already refused to score on the placeholder.
+            # The path that writes to the inverter did not, which was the wrong
+            # way round. Self-use is the honest answer to not being able to see
+            # the battery: the inverter runs its own logic until the reading is
+            # back. A deliberate override or strategy lock still wins, above --
+            # those are instructions, not inferences.
+            return ControlCommand(
+                action=SlotAction.SELF_USE,
+                reason=(
+                    f"battery state of charge unavailable from "
+                    f"{self.battery.soc_source}; not acting on a guess"
+                ),
+                **base,
+            )
+
         if self.plan is None:
             # No plan (no prices, or an error). Self-use is the safe default: it
             # keeps the house running off PV and battery without gambling.
@@ -2069,11 +2117,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for slot in self.plan.slots:
             key = dt_util.as_local(slot.start).date().isoformat()
             day = totals.setdefault(
-                key, {"solar_kwh": 0.0, "load_kwh": 0.0, "hours": 0.0}
+                key,
+                {
+                    "solar_kwh": 0.0,
+                    "load_kwh": 0.0,
+                    "hours": 0.0,
+                    "climate_uplift_kwh": 0.0,
+                },
             )
             day["solar_kwh"] += slot.pv_kwh
             day["load_kwh"] += slot.load_kwh
             day["hours"] += slot.duration_hours
+            # How much of that load is the temperature dials rather than the
+            # house. A figure that rivals load_kwh means the dials are wrong.
+            day["climate_uplift_kwh"] += self._climate_uplift.get(slot.start, 0.0)
 
         today = dt_util.as_local(dt_util.utcnow()).date()
         tomorrow = today + timedelta(days=1)
@@ -2190,6 +2247,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "disabled_inverter_controls": self.disabled_inverter_controls(),
             "horizon_reach": self.horizon_reach,
             "solar_forecast_note": self._solar_forecast_note,
+            "climate_note": self._climate_note,
             "reserve_conflict": self.reserve_conflict(),
             "rejected_writes": self._adapter.rejected_roles(),
             "settings": self.settings.as_dict(),

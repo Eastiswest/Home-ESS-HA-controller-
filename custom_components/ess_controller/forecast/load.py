@@ -91,6 +91,40 @@ DIURNAL_WEIGHTS: tuple[float, ...] = (
 
 _WEIGHT_SUM = sum(DIURNAL_WEIGHTS)
 
+# Above this share of the forecast, the temperature dials are supplying more
+# demand than the house itself and are worth querying out loud.
+#
+# They are quoted in kWh per degree per hour, which reads like a small number and
+# is not: at 2.0 a four-degree warm spell adds eight kilowatts of continuous
+# load. A real install set both to 2.0, and its forecast went to 96 kWh over two
+# days against a measured 12.7 kWh a day. The plan bought 31 kWh it would never
+# use and held it through 45 half-hours while the house ran off the grid --
+# roughly £18 for the two days. Every number on every screen was merely large;
+# nothing anywhere said the forecast had tripled, or which setting did it.
+CLIMATE_UPLIFT_QUERY_SHARE = 0.5
+
+
+def describe_climate_uplift(total_kwh: float, uplift_kwh: float) -> str:
+    """Say when the temperature dials are dominating the load forecast.
+
+    A ratio rather than a threshold, because the dials cannot be bounded from
+    outside: real cooling load genuinely dwarfs a small house's baseline. What is
+    always suspicious is the *proportion* -- when more than half the forecast
+    demand comes from two settings rather than from the house, that is worth a
+    sentence wherever somebody might look.
+    """
+    if uplift_kwh <= 0.01 or total_kwh <= 0.01:
+        return ""
+    share = uplift_kwh / total_kwh
+    if share < CLIMATE_UPLIFT_QUERY_SHARE:
+        return ""
+    return (
+        f"{share * 100:.0f}% of the forecast demand ({uplift_kwh:.1f} of "
+        f"{total_kwh:.1f} kWh) is the cooling and heating load-per-degree "
+        f"settings, not the house. They are in kW per degree, so 2.0 means a "
+        f"four-degree day adds 8 kW. Set them to 0 to rely on learned history."
+    )
+
 
 def default_slot_load(
     hour: int, minute: int, daily_kwh: float, duration_hours: float = 0.5
@@ -139,6 +173,14 @@ class LoadForecaster:
         Zero by default: the learned temperature buckets are the better answer
         once they exist. This exists so a new install behaves sensibly during a
         heatwave before it has learned anything.
+
+        Deliberately not clamped. Every threshold I could justify either fired on
+        settings that are perfectly reasonable -- 0.1 kW per degree on a small
+        house is 2.5x its baseline on a hot afternoon, and real air conditioning
+        does that -- or sat so far above a mistyped dial that it caught nothing.
+        A cooling load genuinely can dwarf the rest of the house, so the number
+        cannot be bounded from inside this function. What was actually missing is
+        that nobody could *see* it: see :func:`describe_climate_uplift`.
         """
         if temperature is None:
             return 0.0
