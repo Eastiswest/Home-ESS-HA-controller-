@@ -14,6 +14,7 @@ from custom_components.ess_controller.dashboard import (
     ACTION_WORDS,
     APEX_CARD,
     DASHBOARD_TITLE,
+    IDLE_ON_SOLAR,
     _action_legend,
     _plan_table,
     build_dashboard,
@@ -572,6 +573,73 @@ class TestTemplatesRender:
         assert "**Wed 18 Feb**" in table  # grouped by day
         assert any("grid-charge 19.8 kWh" in text for text in rendered)
 
+    def test_plan_table_splits_a_hold_by_what_it_buys(self):
+        """Two holds, one importing and one not, must not read the same.
+
+        The report that prompted this: two consecutive holds at 38.2p and 45.4p
+        labelled "Hold (house on grid)" while the Buy column beside them said
+        nothing and the sun was ahead of the house. The label was the only thing
+        wrong -- the plan was right -- but at the top of the tariff it reads as
+        the controller deliberately buying at peak.
+        """
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "reason": "holding",
+                "slots": [
+                    {
+                        "start": "2026-02-18T17:00:00+00:00",
+                        "import_price": 45.4,
+                        "action": "idle",
+                        "grid_import_kwh": 0.0,
+                        "soc_end": 62.0,
+                    },
+                    {
+                        "start": "2026-02-18T17:30:00+00:00",
+                        "import_price": 45.4,
+                        "action": "idle",
+                        "grid_import_kwh": 0.4,
+                        "soc_end": 62.0,
+                    },
+                ],
+            }
+        }
+        table = next(
+            text
+            for text in (
+                self._render(card, attributes)
+                for card in self._cards(build_dashboard(resolved()))
+            )
+            if "| Time |" in text
+        )
+        sunny = next(row for row in table.splitlines() if "| 17:00 |" in row)
+        bought = next(row for row in table.splitlines() if "| 17:30 |" in row)
+        assert ACTION_WORDS[IDLE_ON_SOLAR] in sunny, sunny
+        assert ACTION_WORDS["idle"] in bought, bought
+
+    def test_a_hold_with_no_import_figure_at_all_still_reads_sensibly(self):
+        """Older plans, and diagnostics captures, carry no import column."""
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "slots": [
+                    {
+                        "start": "2026-02-18T17:00:00+00:00",
+                        "import_price": 45.4,
+                        "action": "idle",
+                        "soc_end": 62.0,
+                    }
+                ]
+            }
+        }
+        rendered = [
+            self._render(card, attributes)
+            for card in self._cards(build_dashboard(resolved()))
+        ]
+        table = next(text for text in rendered if "| Time |" in text)
+        assert "Hold" in table
+        assert "Undefined" not in table
+
     def test_plan_table_renders_the_fallback_with_no_plan(self):
         cards = self._cards(build_dashboard(resolved("plan_cost")))
         # Only the cards that read the plan. The state legend is static prose and
@@ -1059,6 +1127,20 @@ class TestActionWording:
     def test_a_hold_says_where_the_house_gets_its_power(self):
         assert "grid" in ACTION_WORDS["idle"].lower()
 
+    def test_a_hold_that_buys_nothing_does_not_blame_the_grid(self):
+        words = ACTION_WORDS[IDLE_ON_SOLAR].lower()
+        assert "grid" not in words
+        assert "sun" in words
+        # Still recognisably the same decision, so the two rows read as a pair
+        # rather than as unrelated states.
+        assert "hold" in words
+
+    def test_the_solar_hold_is_display_only(self):
+        """Nothing decides it: the table derives it from what the slot buys."""
+        from custom_components.ess_controller.models import SlotAction
+
+        assert IDLE_ON_SOLAR not in {action.value for action in SlotAction}
+
     def test_the_table_maps_the_raw_values(self):
         table = _plan_table("sensor.plan")
         for value, words in ACTION_WORDS.items():
@@ -1221,7 +1303,7 @@ class TestTheBuyColumnSeparatesSunFromGrid:
 
 
 class TestTheStateLegend:
-    """Five state names on a page mean nothing without a line each.
+    """State names on a page mean nothing without a line each.
 
     Tied to ``ACTION_WORDS`` by key so the legend cannot drift out of step with
     the table above it, and so a new action cannot ship undocumented.
@@ -1270,6 +1352,24 @@ class TestTheStateLegend:
 
     def test_the_hold_state_name_says_where_the_power_comes_from(self):
         assert "grid" in ACTION_WORDS["idle"].lower()
+
+    def test_the_hold_reason_is_a_comparison_not_a_price(self):
+        """ "The grid is cheap" was wrong as often as it was right.
+
+        Printed beside a 45.4p half-hour it made the plan look deranged rather
+        than patient: the hold is chosen because the charge earns more later, and
+        that is true whatever this half-hour costs.
+        """
+        _, why = ACTION_NOTES["idle"]
+        assert "cheap" not in why.lower()
+
+    def test_the_solar_hold_has_its_own_line(self):
+        does, why = ACTION_NOTES[IDLE_ON_SOLAR]
+        assert does != ACTION_NOTES["idle"][0]
+        assert "sun" in does.lower()
+        # It is the *absence* of a purchase that distinguishes it, so the legend
+        # has to say so or the two hold rows look like a rendering bug.
+        assert "bought" in why.lower() or "buy" in why.lower()
 
 
 class TestPlannedFiguresSayPlanned:

@@ -50,6 +50,12 @@ MIN_USABLE_KWH = 0.05
 # pence-worth of electricity, and does it at whatever the price happens to be.
 MIN_GRID_CHARGE_KWH = 0.15
 
+# The smallest solar surplus worth refining the whole level grid to be able to
+# store. Thirty watt-hours is barely a penny even at the top of the tariff, and
+# chasing it would multiply the sweep's cost for less than the rounding on the
+# price it saves.
+MIN_USEFUL_SURPLUS_KWH = 0.03
+
 # Below this share of the pack, the SoC limits have made the battery a spectator and
 # the plan is worth almost nothing -- but it is still a *valid* plan, so nothing used
 # to say so. A real install ran with Minimum charge at 90% against a maximum of 95%,
@@ -299,16 +305,28 @@ def _smallest_useful_move(
 ) -> float | None:
     """The finest cell-side movement the plan needs to be able to represent.
 
-    Only discharge is considered, and only where the site may not push the
-    battery into the grid: that is the case where the household's own demand is a
-    hard cap on how much may leave the battery, and so the case where a coarse
-    level grid silently forbids discharging at all. Charging has no such cap --
-    surplus can always be topped up from the grid -- so it does not constrain the
-    resolution.
+    Two things cap a move at a size the level grid may be too coarse to express,
+    and a capped move that cannot be expressed is simply never made.
+
+    *Discharge* is capped by the household's own demand wherever the site may not
+    push the battery into the grid: the energy would have nowhere else to go, so
+    a level step larger than a half-hour's deficit makes every discharge
+    transition infeasible and freezes the battery.
+
+    *Charging* is capped by the solar surplus. This used to be free of any such
+    cap -- a charge slightly larger than the surplus could always be topped up
+    from the grid -- but ``MIN_GRID_CHARGE_KWH`` withdrew that escape. A charge
+    needing only a sliver from the grid is now rejected outright, so a surplus
+    smaller than one level can be stored neither on its own nor with a top-up,
+    and is spilled instead. A real plan showed two consecutive half-hours with
+    0.06 and 0.07 kWh of surplus against a 0.069 kWh step: both were given away
+    because the only representable alternative was a 0.15 kWh purchase at 45p.
 
     Returns ``None`` when nothing constrains it, meaning the configured
     resolution stands.
     """
+    limits: list[float] = []
+
     # Both permissions bind here, and checking only one of them left the bug
     # half-fixed. ``allow_battery_export`` is the direct statement that the
     # battery may not push to the grid; ``allow_export`` withdraws the export
@@ -317,16 +335,30 @@ def _smallest_useful_move(
     # the ordinary import-only configuration -- kept the coarse grid and stayed
     # frozen, so the plan bought the house's power through the evening peak while
     # sitting on a charged battery.
-    if grid.allow_battery_export and grid.allow_export:
-        return None
-    deficits = [
-        (slot.load_kwh - slot.pv_kwh) / battery.discharge_efficiency
+    if not (grid.allow_battery_export and grid.allow_export):
+        deficits = [
+            (slot.load_kwh - slot.pv_kwh) / battery.discharge_efficiency
+            for slot in slots
+            if slot.load_kwh - slot.pv_kwh > EPS
+        ]
+        if deficits:
+            limits.append(min(deficits))
+
+    # Measured at the cells, because that is what a level step measures: the
+    # surplus is what the AC side can offer, and only part of it arrives.
+    #
+    # Surpluses too small to be worth a penny are ignored rather than allowed to
+    # drive the resolution: they would pin the grid to its ceiling on every sunny
+    # horizon and buy nothing for it.
+    surpluses = [
+        (slot.pv_kwh - slot.load_kwh) * battery.charge_efficiency
         for slot in slots
-        if slot.load_kwh - slot.pv_kwh > EPS
+        if slot.pv_kwh - slot.load_kwh > MIN_USEFUL_SURPLUS_KWH
     ]
-    if not deficits:
-        return None
-    return min(deficits)
+    if surpluses:
+        limits.append(min(surpluses))
+
+    return min(limits) if limits else None
 
 
 def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> float:

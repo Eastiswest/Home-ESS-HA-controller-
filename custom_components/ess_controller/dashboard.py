@@ -510,12 +510,26 @@ APEX_RESOURCE = "apexcharts-card"
 #
 # These are the *observed* mix, not modes: the optimiser labels a charging slot
 # by where the energy came from after it has decided how much to move.
+
+# A display-only refinement of ``idle``, never emitted by the optimiser. It is
+# deliberately not a ``SlotAction``: nothing decides it, the table derives it
+# from what the slot buys. Kept distinct from every enum value so the mapping in
+# ``_action_expr`` cannot collide with a real action.
+IDLE_ON_SOLAR = "idle_on_solar"
+
 ACTION_WORDS = {
     "charge": "Grid charge",
     "charge_solar_only": "Solar charge",
     "discharge": "Forced discharge",
     "self_use": "Self use",
     "idle": "Hold (house on grid)",
+    # A hold that buys nothing, which the plain "idle" wording described as
+    # putting the house on the grid. On a sunny half-hour at 45p that reads as
+    # the controller burning money at the top of the tariff, when the import
+    # column beside it says 0.00 and the house is running on sunshine. Not a
+    # real action -- the optimiser only ever emits ``idle`` -- but the table
+    # picks between the two by what the slot actually buys.
+    IDLE_ON_SOLAR: "Hold (sun covers the house)",
 }
 
 
@@ -540,9 +554,18 @@ ACTION_NOTES: dict[str, tuple[str, str]] = {
     # The one people ask about, because on a sunny half-hour it can look like
     # Solar charge. The difference is the direction that is blocked: a hold will
     # not *discharge*, but it does not shut the array out either.
+    #
+    # "The grid is cheap" was wrong as often as it was right. A hold is chosen
+    # because the charge earns more in a later half-hour than it saves in this
+    # one, which is a comparison, not a price -- and printing it beside a 45.4p
+    # slot made the plan look deranged rather than patient.
     "idle": (
         "Will not discharge; sun may still top it up",
-        "The grid is cheap; the charge is worth more later",
+        "The charge saves more in a later half-hour than in this one",
+    ),
+    IDLE_ON_SOLAR: (
+        "Nothing to do: the sun is meeting the house",
+        "No shortfall to cover, and nothing bought",
     ),
     "discharge": (
         "Empties past what the house needs",
@@ -566,6 +589,29 @@ def _action_expr(var: str) -> str:
     return (
         "{{ {" + pairs + "}.get(" + var + ", " + var + " | replace('_', ' ') "
         "| capitalize) }}"
+    )
+
+
+def _doing_expr(slot: str = "slot") -> str:
+    """The wording for one slot's action, split by what it actually buys.
+
+    Only ``idle`` is ambiguous. It covers both "the battery is held while the
+    house buys" and "the sun is meeting the house and there is nothing to do",
+    and the single label described every one of them as the former. A real plan
+    showed two consecutive holds at 38.2p and 45.4p reading "Hold (house on
+    grid)" while importing 0.00 kWh, with solar comfortably ahead of the load --
+    which is the opposite of what the row said, at the scariest moment to say it.
+    """
+    return (
+        "{% set bought = " + slot + ".grid_import_kwh | default(0) | float(0) %}"
+        "{% set doing = '"
+        + IDLE_ON_SOLAR
+        + "' if ("
+        + slot
+        + ".action == 'idle' and bought <= 0.005) else "
+        + slot
+        + ".action %}"
+        + _action_expr("doing")
     )
 
 
@@ -823,7 +869,7 @@ def _plan_table(
         "{{ '*' if slot.price_is_forecast else '' }} "
         + bar_cell
         + "| "
-        + _action_expr("slot.action")
+        + _doing_expr()
         + " "
         + buy_cell
         + "| {{ '%.0f' | format(slot.soc_end) }}% |\n"

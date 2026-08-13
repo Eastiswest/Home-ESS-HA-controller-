@@ -634,10 +634,11 @@ class TestResolutionDoesNotFreezeTheBattery:
         slots = build_slots(self.PEAKY, load=0.25)
         assert _smallest_useful_move(slots, make_battery(), make_grid()) is None
 
-    def test_a_horizon_with_no_deficit_keeps_the_configured_resolution(self):
+    def test_a_horizon_with_nothing_to_move_keeps_the_configured_resolution(self):
         from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
 
-        slots = build_slots([20.0] * 6, load=0.0, pv=1.0)
+        # Sun and house exactly matched: no deficit to cover, no surplus to store.
+        slots = build_slots([20.0] * 6, load=1.0, pv=1.0)
         grid = make_grid(allow_export=False, allow_battery_export=False)
         assert _smallest_useful_move(slots, make_battery(), grid) is None
 
@@ -653,6 +654,139 @@ class TestResolutionDoesNotFreezeTheBattery:
         )
         assert plan.slots
         assert MAX_REFINED_LEVELS <= 240
+
+
+class TestASmallSurplusIsStoredRatherThanSpilled:
+    """A solar surplus smaller than one level had nowhere to go.
+
+    Storing exactly the surplus is the only free move available, and a level grid
+    coarser than the surplus cannot express it. The next move up is a *grid*
+    charge, which is either refused outright or -- once ``MIN_GRID_CHARGE_KWH``
+    landed -- rejected as a sliver not worth a mode change. So the sun was given
+    away: on a real plan, two consecutive half-hours with 0.06 and 0.07 kWh of
+    surplus against a 0.069 kWh step, both curtailed.
+    """
+
+    # Flat, so nothing is being arbitraged: the only reason to move energy is
+    # that free sun is worth keeping.
+    FLAT = [20.0] * 8
+
+    # Sun comfortably ahead of the house, but by less than one configured level.
+    PV = 0.35
+    LOAD = 0.25
+
+    def slots(self):
+        return build_slots(self.FLAT, pv=self.PV, load=self.LOAD)
+
+    def grid(self):
+        # Import-only, and grid charging refused: a charge larger than the
+        # surplus is not merely uneconomic here, it is impossible. What the plan
+        # cannot store, it curtails.
+        return make_grid(
+            allow_export=False, allow_battery_export=False, allow_grid_charge=False
+        )
+
+    def test_the_configured_grid_really_was_coarser_than_the_surplus(self):
+        battery = make_battery()
+        step = battery.usable_kwh / OptimiserSettings().clamped_levels()
+        # One level, taken back to the AC side, is more sun than the half-hour
+        # has -- which is exactly the condition that spilled it.
+        assert step / battery.charge_efficiency > self.PV - self.LOAD
+
+    def test_the_surplus_now_constrains_the_resolution(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        battery = make_battery()
+        finest = _smallest_useful_move(self.slots(), battery, self.grid())
+        assert finest is not None
+        assert finest <= (self.PV - self.LOAD) * battery.charge_efficiency
+
+    def _finest_step(self) -> float:
+        """The step ``optimise`` actually sweeps with, refinement included."""
+        import math
+
+        from custom_components.ess_controller.optimiser.dp import (
+            MAX_REFINED_LEVELS,
+            _smallest_useful_move,
+        )
+
+        battery = make_battery()
+        levels = OptimiserSettings().clamped_levels()
+        step = battery.usable_kwh / levels
+        finest = _smallest_useful_move(self.slots(), battery, self.grid())
+        if finest is not None and step > finest:
+            levels = min(math.ceil(battery.usable_kwh / finest), MAX_REFINED_LEVELS)
+            step = battery.usable_kwh / levels
+        return step
+
+    def test_storing_the_sun_becomes_a_move_the_grid_can_express(self):
+        """The mechanism, stated directly.
+
+        A charge is feasible without buying only when the AC energy it needs is
+        no more than the surplus. On the configured grid the smallest non-zero
+        charge overshoots that, and the overshoot is a sliver too small to be
+        worth a mode change -- so the transition is rejected and the only
+        remaining move is to do nothing and lose the sun.
+        """
+        from custom_components.ess_controller.optimiser.dp import _price_delta
+
+        battery = make_battery()
+        slot = self.slots()[0]
+        coarse = battery.usable_kwh / OptimiserSettings().clamped_levels()
+        assert _price_delta(slot, coarse, battery, self.grid()) is None
+
+        flow = _price_delta(slot, self._finest_step(), battery, self.grid())
+        assert flow is not None
+        assert flow.grid_import_kwh == pytest.approx(0.0, abs=1e-9)
+        assert flow.curtailed_kwh < self.PV - self.LOAD
+
+    def test_the_sun_goes_into_the_battery(self):
+        plan = optimise(
+            self.slots(), 50.0, make_battery(), self.grid(), OptimiserSettings()
+        )
+        assert sum(s.charge_ac_kwh for s in plan.slots) > 0.5
+        # Not exactly zero: the level grid still cannot land on the surplus to
+        # the milliwatt-hour. What matters is that the bulk of it is kept.
+        assert sum(s.curtailed_kwh for s in plan.slots) < 0.1
+        assert sum(s.grid_import_kwh for s in plan.slots) == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_ceiling_can_still_bind(self):
+        """Refinement is capped, and the cap is not a bug -- but it is a limit.
+
+        A household whose smallest half-hour deficit is tiny already pins the
+        level grid to ``MAX_REFINED_LEVELS``, and adding the surplus to the
+        calculation cannot make the grid finer than that ceiling. Where the cap
+        binds, a surplus below one level is still spilled; it is worth about a
+        penny, and refining past the ceiling would cost the sweep far more.
+        """
+        import math
+
+        from custom_components.ess_controller.optimiser.dp import (
+            MAX_REFINED_LEVELS,
+            _smallest_useful_move,
+        )
+
+        battery = make_battery()
+        # A half-hour where sun and house nearly cancel: a 5 Wh deficit.
+        slots = build_slots(self.FLAT, pv=0.35, load=0.25)
+        slots[0].pv_kwh, slots[0].load_kwh = 0.25, 0.255
+        finest = _smallest_useful_move(slots, battery, self.grid())
+        assert finest is not None
+        assert math.ceil(battery.usable_kwh / finest) > MAX_REFINED_LEVELS
+
+    def test_a_surplus_too_small_to_matter_does_not_drive_the_resolution(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        # Ten watt-hours over a half-hour. Chasing it would pin the level grid to
+        # its ceiling on every sunny horizon and buy a fraction of a penny.
+        slots = build_slots(self.FLAT, pv=0.26, load=0.25)
+        assert _smallest_useful_move(slots, make_battery(), self.grid()) is None
+
+    def test_a_horizon_with_no_sun_is_unaffected(self):
+        from custom_components.ess_controller.optimiser.dp import _smallest_useful_move
+
+        slots = build_slots(self.FLAT, pv=0.0, load=0.0)
+        assert _smallest_useful_move(slots, make_battery(), make_grid()) is None
 
 
 class TestStartingChargeIsNeverOverstated:
