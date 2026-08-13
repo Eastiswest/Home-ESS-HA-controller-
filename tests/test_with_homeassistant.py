@@ -1785,13 +1785,16 @@ class TestTheCurrentSlotDoesNotChurn:
         return coordinator.plan.slot_at(now)
 
     async def test_the_action_holds_for_the_rest_of_the_slot(self, hass):
-        import homeassistant.util.dt as ha_dt
 
         from custom_components.ess_controller.models import SlotAction
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = ha_dt.utcnow()
+        # Taken from the plan, not the wall clock. Reading utcnow() again after
+        # the refresh let a half-hour boundary fall between the two, so the slot
+        # the test reasoned about was not the slot the command was committed to
+        # -- and the suite failed for a minute either side of every :00 and :30.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         slot = self._slot(coordinator, now)
         assert slot is not None
         first = coordinator._resolve_command(now).action
@@ -1802,13 +1805,16 @@ class TestTheCurrentSlotDoesNotChurn:
         assert coordinator._resolve_command(now).action is first
 
     async def test_a_new_slot_is_free_to_differ(self, hass):
-        import homeassistant.util.dt as ha_dt
 
         from custom_components.ess_controller.models import SlotAction
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = ha_dt.utcnow()
+        # Taken from the plan, not the wall clock. Reading utcnow() again after
+        # the refresh let a half-hour boundary fall between the two, so the slot
+        # the test reasoned about was not the slot the command was committed to
+        # -- and the suite failed for a minute either side of every :00 and :30.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         first = coordinator._resolve_command(now).action
 
         later = coordinator.plan.slots[2]
@@ -1817,13 +1823,16 @@ class TestTheCurrentSlotDoesNotChurn:
         assert coordinator._resolve_command(later.start).action is other
 
     async def test_an_explicit_replan_reconsiders_now(self, hass):
-        import homeassistant.util.dt as ha_dt
 
         from custom_components.ess_controller.models import SlotAction
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = ha_dt.utcnow()
+        # Taken from the plan, not the wall clock. Reading utcnow() again after
+        # the refresh let a half-hour boundary fall between the two, so the slot
+        # the test reasoned about was not the slot the command was committed to
+        # -- and the suite failed for a minute either side of every :00 and :30.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         first = coordinator._resolve_command(now).action
         slot = self._slot(coordinator, now)
         other = next(a for a in SlotAction if a is not first)
@@ -1835,13 +1844,16 @@ class TestTheCurrentSlotDoesNotChurn:
     async def test_a_settings_change_reconsiders_now(self, hass):
         """A permission or limit change can alter what the right action is, so a
         commitment made before it must not survive it."""
-        import homeassistant.util.dt as ha_dt
 
         from custom_components.ess_controller.models import SlotAction
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = ha_dt.utcnow()
+        # Taken from the plan, not the wall clock. Reading utcnow() again after
+        # the refresh let a half-hour boundary fall between the two, so the slot
+        # the test reasoned about was not the slot the command was committed to
+        # -- and the suite failed for a minute either side of every :00 and :30.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         first = coordinator._resolve_command(now).action
 
         # A commitment to something the plan does not want.
@@ -1862,7 +1874,11 @@ class TestTheCurrentSlotDoesNotChurn:
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = ha_dt.utcnow()
+        # Taken from the plan, not the wall clock. Reading utcnow() again after
+        # the refresh let a half-hour boundary fall between the two, so the slot
+        # the test reasoned about was not the slot the command was committed to
+        # -- and the suite failed for a minute either side of every :00 and :30.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         coordinator._resolve_command(now)
         await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=30))
         command = coordinator._resolve_command(ha_dt.utcnow())
@@ -2479,6 +2495,106 @@ class TestTheInvertersOwnReserveIsCompared:
     async def test_it_is_in_the_diagnostics(self, hass):
         coordinator = await self._coordinator(hass, 90.0)
         assert coordinator.diagnostics()["reserve_conflict"]
+
+
+class TestBatteryThroughputSurvivesAGapInTheMarks:
+    """Battery energy is read from the state of charge, and gaps swallowed it.
+
+    Each slot measured its own opening and closing mark, so anything that
+    happened between one slot's close and the next slot's open was recorded
+    nowhere: a slot dropped for poor coverage took its movement with it, a
+    missing opening mark discarded the whole slot, and the marks are sampled a
+    little either side of the boundary so most joins lost a point as well.
+
+    On a real day the marks ran 63% to 93% -- thirty points -- while the
+    within-slot deltas summed to seventeen. Forty-three per cent of the day's
+    throughput was charged to nothing, wore nothing, and made the round-trip
+    figure meaningless.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _slot(start):
+        from custom_components.ess_controller.sampling import CompletedSlot
+
+        return CompletedSlot(
+            start=start,
+            end=start + timedelta(minutes=30),
+            pv_kwh=0.0,
+            load_kwh=0.3,
+            coverage=1.0,
+            grid_measured=True,
+        )
+
+    async def test_the_movement_across_a_gap_is_not_lost(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        capacity = coordinator.nominal_capacity_kwh()
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        first, second = now - timedelta(hours=1), now - timedelta(minutes=30)
+
+        coordinator._slot_marks[first] = {"soc_start": 60.0, "soc_end": 70.0}
+        coordinator._record_completed([self._slot(first)])
+        # The next slot closes at 80% but never recorded an opening mark, which
+        # used to discard its ten points entirely.
+        coordinator._slot_marks[second] = {"soc_end": 80.0}
+        coordinator._record_completed([self._slot(second)])
+
+        records = coordinator.performance_store.log.records[-2:]
+        moved = sum(r.battery_charge_kwh - r.battery_discharge_kwh for r in records)
+        assert moved == pytest.approx((80.0 - 60.0) / 100.0 * capacity, rel=1e-6)
+
+    async def test_the_join_between_two_slots_is_not_lost(self, hass):
+        """The marks drift a point either side of the boundary; it still counts."""
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        capacity = coordinator.nominal_capacity_kwh()
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        first, second = now - timedelta(hours=1), now - timedelta(minutes=30)
+
+        coordinator._slot_marks[first] = {"soc_start": 60.0, "soc_end": 62.0}
+        coordinator._record_completed([self._slot(first)])
+        coordinator._slot_marks[second] = {"soc_start": 63.0, "soc_end": 65.0}
+        coordinator._record_completed([self._slot(second)])
+
+        records = coordinator.performance_store.log.records[-2:]
+        moved = sum(r.battery_charge_kwh - r.battery_discharge_kwh for r in records)
+        # Five points, not the four the two slots reported between them.
+        assert moved == pytest.approx((65.0 - 60.0) / 100.0 * capacity, rel=1e-6)
+
+    async def test_a_long_outage_is_not_dumped_into_one_half_hour(self, hass):
+        """Bridging is honest about energy and vague about timing, within limits.
+
+        After hours offline the battery may be anywhere, and attributing the
+        whole difference to the half-hour that happens to close the gap would
+        invent a discharge that never happened there.
+        """
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        old = now - timedelta(hours=6)
+
+        coordinator._slot_marks[old] = {"soc_start": 90.0, "soc_end": 90.0}
+        coordinator._record_completed([self._slot(old)])
+        coordinator._slot_marks[now] = {"soc_start": 40.0, "soc_end": 41.0}
+        coordinator._record_completed([self._slot(now)])
+
+        last = coordinator.performance_store.log.records[-1]
+        assert last.battery_discharge_kwh == pytest.approx(0.0)
+        assert last.battery_charge_kwh == pytest.approx(
+            0.01 * coordinator.nominal_capacity_kwh(), rel=1e-6
+        )
 
 
 class TestAMissingStateOfChargeStopsTheWriting:

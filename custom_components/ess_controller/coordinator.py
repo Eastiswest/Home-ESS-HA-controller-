@@ -767,6 +767,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for start in [s for s in self._slot_marks if s < cutoff]:
             self._slot_marks.pop(start, None)
 
+    # How far back a slot may reach for the charge it is measuring from.
+    #
+    # Bridging a gap attributes everything that happened in it to the slot that
+    # closes it, which is honest about the energy and vague about the timing --
+    # the right way round, since the totals are what the wear allowance and the
+    # cycle count are built on. But only for a gap short enough that the timing
+    # still means something: after an afternoon offline, dropping half a pack
+    # into one half-hour would invent a discharge that never happened there.
+    MAX_SOC_BRIDGE = timedelta(hours=1)
+
+    def _last_recorded_soc(self, start: datetime) -> float | None:
+        """The charge at the close of the last record, if it is recent enough."""
+        records = self.performance_store.log.records
+        if not records:
+            return None
+        last = records[-1]
+        if last.soc_end is None or last.start >= start:
+            return None
+        if start - (last.start + _SLOT) > self.MAX_SOC_BRIDGE:
+            return None
+        return last.soc_end
+
     def _record_completed(self, completed: list[Any]) -> None:
         """Turn closed half-hours into performance records."""
         if not completed:
@@ -805,7 +827,21 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Battery flow from the SoC change rather than a power sensor: it is
             # the one figure every inverter reports, and over a half-hour the
             # quantisation matters far less than the missing sensor would.
+            #
+            # Measured from where the battery was when we last looked, not from
+            # this slot's own opening mark. The two are usually the same and the
+            # difference is not small when they are not: on a real day the marks
+            # ran 63 -> 93%, thirty points, but the within-slot deltas summed to
+            # seventeen. A slot dropped for poor coverage takes its movement with
+            # it, a missing opening mark discards the whole slot, and the marks
+            # are sampled a little either side of the boundary so most slots also
+            # lost a point at the join. Forty-three per cent of the day's
+            # throughput went unrecorded, which is charged to nothing, wears
+            # nothing, and makes the round-trip figure meaningless.
             start_soc, end_soc = record.soc_start, record.soc_end
+            bridged = self._last_recorded_soc(slot.start)
+            if bridged is not None:
+                start_soc = bridged
             if start_soc is not None and end_soc is not None and capacity > 0:
                 delta = (end_soc - start_soc) / 100.0 * capacity
                 if delta >= 0:
