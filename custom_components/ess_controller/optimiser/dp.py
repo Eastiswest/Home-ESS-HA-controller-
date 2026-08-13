@@ -361,6 +361,56 @@ def _smallest_useful_move(
     return min(limits) if limits else None
 
 
+def _hold_value(
+    values: list[float],
+    level: int,
+    levels: int,
+    step: float,
+    battery: BatterySpec,
+    span: int,
+) -> float | None:
+    """What the next kWh out of the battery is worth, in price units.
+
+    The slope of the cost-to-go is the shadow price of stored energy at the
+    cells: how much cheaper the rest of the horizon becomes for having more
+    charge. Delivering a kWh of it to the house costs more than a kWh of that,
+    because the discharge loses efficiency on the way out and wears the pack, and
+    both belong in the comparison -- the sweep charges them on every real
+    discharge, so leaving them out would answer a different question from the one
+    the optimiser asked itself.
+
+    Measured over ``span`` levels *below* the planned charge rather than across a
+    single one. The question being asked is what an unforecast load would cost,
+    and an oven is not a marginal quantity: a true marginal value can be near
+    zero at the top of a pack that free sun is about to refill, while a kilowatt
+    hour out of it is worth a great deal more. Reading the slope across the
+    energy the battery could actually deliver in one half-hour is the honest
+    scale for the decision, and errs towards protecting the charge, because the
+    cost-to-go flattens as the pack fills.
+
+    The result is directly comparable with an import price: above it, the charge
+    is worth more later than the grid costs now and should be protected; at or
+    below it, the battery is the cheaper source and should be left available.
+
+    ``None`` when no slope can be read -- an unreachable level, or a grid with no
+    room on either side.
+    """
+    if step <= 0 or levels <= 0:
+        return None
+    low = max(level - max(span, 1), 0)
+    high = level
+    if low == high:
+        # Sitting on the floor: nothing below to read, so take the step above.
+        high = min(level + 1, levels)
+        if low == high:
+            return None
+    below, above = values[low], values[high]
+    if below == INF or above == INF:
+        return None
+    at_cells = (below - above) / ((high - low) * step)
+    return (at_cells + battery.cycle_cost_per_kwh * 0.5) / battery.discharge_efficiency
+
+
 def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> float:
     """Value per kWh assigned to energy still in the battery at horizon end.
 
@@ -537,6 +587,15 @@ def optimise(
 
     # --- backward sweep ----------------------------------------------------
     choices: list[list[int]] = [[-1] * (levels + 1) for _ in range(n)]
+    # The cost-to-go from the start of each slot, kept rather than discarded.
+    #
+    # Its slope is the shadow price of stored energy -- what the next kWh in the
+    # pack is worth over the rest of the horizon -- and that is the number the
+    # control side needs to answer a question the plan alone cannot: if a load
+    # nobody forecast turns up, is it cheaper to serve it from the battery or to
+    # buy it? ``values[i]`` is the cost-to-go entering slot ``i``, so
+    # ``values[i + 1]`` is what the charge is worth once slot ``i`` has ended.
+    values: list[list[float]] = [[] for _ in range(n)] + [future]
 
     for i in range(n - 1, -1, -1):
         slot = slots[i]
@@ -580,6 +639,7 @@ def optimise(
             current[j] = best
             slot_choices[j] = best_k
 
+        values[i] = current
         future = current
 
     if future[start_level] == INF or choices[0][start_level] < 0:
@@ -607,11 +667,46 @@ def optimise(
         assert flow is not None
         soc_start = battery.energy_to_soc(level * step)
         soc_end = battery.energy_to_soc(next_level * step)
+        # The most an unforecast load could take out of the battery within this
+        # half-hour, which is the largest deviation this slot's decision could
+        # possibly absorb. Beyond it the plan re-runs and decides again.
+        span = int(
+            battery.max_discharge_kw
+            * slot.duration_hours
+            / battery.discharge_efficiency
+            / step
+        )
+        hold_value = _hold_value(values[i + 1], next_level, levels, step, battery, span)
+        # A hold that is protecting nothing should not be expressed as a hold.
+        #
+        # The plan is a forecast, and the forecast is wrong all day: an oven, a
+        # dishwasher, a car. Where the sun already covers the house, "idle" and
+        # "self use" are the same plan -- nothing moves either way -- so the
+        # optimiser has no reason to prefer one, and the label it happened to
+        # emit decided real behaviour. Expressed as a hold, the inverter's
+        # reserve is raised to the current charge and *any* load the forecast
+        # missed is bought at whatever the half-hour costs, which on a sunny
+        # 45.4p slot is the worst possible answer to switching the oven on.
+        #
+        # So the shadow price decides it, not the label. Above this slot's price
+        # the charge really is worth more later and the hold stands; at or below
+        # it the battery is the cheaper source and stays available. Restricted to
+        # slots with no shortfall, where the two are identical in every figure
+        # the plan reports -- a hold that makes the house buy *forecast* load is
+        # a decision the optimiser did take, and is left alone.
+        action = flow.action
+        if (
+            action is SlotAction.IDLE
+            and slot.pv_kwh + EPS >= slot.load_kwh
+            and hold_value is not None
+            and hold_value <= slot.import_price
+        ):
+            action = SlotAction.SELF_USE
         plan.slots.append(
             PlanSlot(
                 start=slot.start,
                 end=slot.end,
-                action=flow.action,
+                action=action,
                 import_price=slot.import_price,
                 export_price=slot.export_price,
                 pv_kwh=slot.pv_kwh,
@@ -626,6 +721,7 @@ def optimise(
                 soc_end=soc_end,
                 cost=flow.cost,
                 price_is_forecast=slot.price_is_forecast,
+                hold_value=hold_value,
             )
         )
         total_cost += flow.cost

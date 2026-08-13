@@ -156,6 +156,19 @@ class PlanSlot:
     cost: float
     """Net cost for this slot in minor units (negative = earning)."""
 
+    hold_value: float | None = None
+    """What the next kWh out of the battery is worth here, in price units.
+
+    The optimiser's own shadow price for stored energy, delivered to the house:
+    the value it loses by spending a kWh now instead of later, plus the wear and
+    the discharge loss. Directly comparable with ``import_price``, which is the
+    comparison that decides whether a hold protects anything.
+
+    ``None`` on plans the sweep did not produce -- the self-use and idle
+    baselines have no value function to read a slope from -- and treated by
+    everything downstream as "no opinion", leaving the planned action to stand.
+    """
+
     price_is_forecast: bool = False
     """True when this slot was priced from a prediction, not an announced rate.
 
@@ -202,6 +215,9 @@ class PlanSlot:
             "soc_end": round(self.soc_end, 1),
             "cost": round(self.cost, 2),
             "price_is_forecast": self.price_is_forecast,
+            "hold_value": (
+                None if self.hold_value is None else round(self.hold_value, 2)
+            ),
         }
 
 

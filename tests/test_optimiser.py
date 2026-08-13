@@ -789,6 +789,134 @@ class TestASmallSurplusIsStoredRatherThanSpilled:
         assert _smallest_useful_move(slots, make_battery(), make_grid()) is None
 
 
+class TestAHoldThatProtectsNothingIsNotAHold:
+    """The plan is a forecast, and the forecast is wrong all day.
+
+    Where the sun already covers the house, ``idle`` and ``self_use`` are the
+    same plan -- nothing moves either way -- so the optimiser had no reason to
+    prefer one and the label it happened to emit decided real behaviour. As a
+    hold the inverter's reserve is raised to the current charge, and every load
+    the forecast missed is bought at whatever the half-hour costs: switch the
+    oven on during a sunny 45.4p slot and the grid pays for all of it while a
+    charged battery watches.
+
+    So the shadow price decides it. Above this slot's price the charge is worth
+    more later and the hold stands; at or below it the battery is the cheaper
+    source and stays available.
+    """
+
+    def _slots(self, rows):
+        out = []
+        for index, (price, pv, load) in enumerate(rows):
+            start = START + timedelta(minutes=30 * index)
+            out.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=pv,
+                    load_kwh=load,
+                )
+            )
+        return out
+
+    def _plan(self, rows, start_soc):
+        return optimise(
+            self._slots(rows),
+            start_soc,
+            make_battery(cycle_cost_per_kwh=2.0),
+            make_grid(allow_export=False, allow_battery_export=False),
+            OptimiserSettings(),
+        )
+
+    # Cheap overnight, a sunny afternoon where the house needs nothing at a dear
+    # price, then a dearer evening the plan is saving charge for.
+    DEAR_SUNNY = (
+        [(8.0, 0.0, 0.35)] * 6
+        + [(38.0, 0.45, 0.35)] * 4
+        + [(45.0, 0.42, 0.36)] * 2
+        + [(70.0, 0.0, 0.9)] * 6
+    )
+
+    # A full pack, sun covering the house, and an evening dear enough that every
+    # kWh in the battery is spoken for.
+    CHEAP_SUNNY = [(5.0, 0.45, 0.35)] * 4 + [(95.0, 0.0, 1.2)] * 8
+
+    def test_a_dear_sunny_slot_leaves_the_battery_available(self):
+        plan = self._plan(self.DEAR_SUNNY, 55.0)
+        sunny = [s for s in plan.slots if s.import_price == 45.0]
+        assert sunny
+        for slot in sunny:
+            assert slot.action is SlotAction.SELF_USE, slot
+            # Nothing was actually planned to move: the change is what happens
+            # when reality departs from the forecast, not what the plan spends.
+            assert slot.battery_delta_kwh == pytest.approx(0.0, abs=1e-9)
+            assert slot.grid_import_kwh == pytest.approx(0.0, abs=1e-9)
+
+    def test_a_cheap_sunny_slot_before_a_brutal_evening_still_holds(self):
+        """The other half of the rule, and the reason it is not just self-use."""
+        plan = self._plan(self.CHEAP_SUNNY, 95.0)
+        sunny = [s for s in plan.slots if s.import_price == 5.0]
+        assert sunny
+        assert all(s.action is SlotAction.IDLE for s in sunny), sunny
+        # Sun ahead of house and nothing bought: this is the hold the dashboard
+        # labels "sun covers the house", and here it is protecting something.
+        assert all(s.pv_kwh > s.load_kwh for s in sunny)
+
+    def test_the_hold_value_is_what_decides_it(self):
+        for rows, soc, price in (
+            (self.DEAR_SUNNY, 55.0, 45.0),
+            (self.CHEAP_SUNNY, 95.0, 5.0),
+        ):
+            for slot in self._plan(rows, soc).slots:
+                if slot.import_price != price:
+                    continue
+                assert slot.hold_value is not None
+                held = slot.action is SlotAction.IDLE
+                assert held == (slot.hold_value > slot.import_price), slot
+
+    def test_the_hold_value_is_a_price_not_a_marginal_sliver(self):
+        """Measured across a half-hour's discharge, not one level.
+
+        At the top of a pack that free sun is about to refill, the true marginal
+        value of one more level is near zero -- swapping it for grid energy costs
+        almost nothing, because the sun puts it straight back. An oven is not a
+        marginal quantity, and reading the slope one level at a time released a
+        hold in front of a 95p evening for want of asking about a real kWh.
+        """
+        plan = self._plan(self.CHEAP_SUNNY, 95.0)
+        first = plan.slots[0]
+        assert first.hold_value is not None
+        assert first.hold_value > first.import_price
+
+    def test_a_hold_that_makes_the_house_buy_is_left_alone(self):
+        """A shortfall the plan chose not to cover is a decision, not an accident."""
+        plan = self._plan(self.DEAR_SUNNY, 55.0)
+        held = [
+            s for s in plan.slots if s.action is SlotAction.IDLE and s.load_kwh > s.pv_kwh
+        ]
+        for slot in held:
+            assert slot.grid_import_kwh > 0
+            assert slot.hold_value is not None
+            assert slot.hold_value > slot.import_price
+
+    def test_the_baselines_express_no_opinion(self):
+        """Neither counterfactual runs a sweep, so neither has a slope to read."""
+        slots = self._slots(self.DEAR_SUNNY)
+        battery, grid = make_battery(), make_grid(allow_export=False)
+        for plan in (
+            simulate_idle(slots, 55.0, battery, grid, START),
+            simulate_self_use(slots, 55.0, battery, grid, START),
+        ):
+            assert all(s.hold_value is None for s in plan.slots)
+
+    def test_the_figure_is_published(self):
+        """Diagnostics have to be able to show why a hold was or was not kept."""
+        slot = self._plan(self.DEAR_SUNNY, 55.0).slots[0]
+        assert slot.as_dict()["hold_value"] == pytest.approx(slot.hold_value, abs=0.005)
+
+
 class TestStartingChargeIsNeverOverstated:
     """The plan must not begin believing it has energy the battery lacks.
 

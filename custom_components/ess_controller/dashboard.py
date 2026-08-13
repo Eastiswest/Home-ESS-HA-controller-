@@ -529,6 +529,10 @@ ACTION_WORDS = {
     # column beside it says 0.00 and the house is running on sunshine. Not a
     # real action -- the optimiser only ever emits ``idle`` -- but the table
     # picks between the two by what the slot actually buys.
+    #
+    # A hold reaching this row is a deliberate one: the optimiser now releases a
+    # sunny hold to self-use unless the charge is worth more than the grid costs,
+    # so what survives is the battery being kept back for something dearer.
     IDLE_ON_SOLAR: "Hold (sun covers the house)",
 }
 
@@ -563,9 +567,14 @@ ACTION_NOTES: dict[str, tuple[str, str]] = {
         "Will not discharge; sun may still top it up",
         "The charge saves more in a later half-hour than in this one",
     ),
+    # Not "nothing is happening", which is what it used to say and what it looked
+    # like. Where the sun covers the house the plan releases the battery unless
+    # the charge is genuinely worth more later, so a hold that still shows here
+    # is holding something back on purpose -- and the reason has to say so, or it
+    # reads as the controller idling through a dear half-hour for no reason.
     IDLE_ON_SOLAR: (
-        "Nothing to do: the sun is meeting the house",
-        "No shortfall to cover, and nothing bought",
+        "Sun covers the house; battery kept back for later",
+        "Nothing is bought, and the charge is worth more later",
     ),
     "discharge": (
         "Empties past what the house needs",
