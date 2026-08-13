@@ -2497,6 +2497,71 @@ class TestTheInvertersOwnReserveIsCompared:
         assert coordinator.diagnostics()["reserve_conflict"]
 
 
+class TestAnUnjustifiedHoldNeverReachesTheInverter:
+    """A hold shuts the battery. It has to be able to say why, at the write.
+
+    Three separate routes have now published a hold that could not justify
+    itself: a labelling artefact on a sunny half-hour, the self-use fallback
+    carrying ``idle`` from slots where nothing moved, and a forecast shortfall
+    too small for the level grid to express. Each was fixed where the plan is
+    built, and each time the damage was done here, at the point the reserve is
+    raised and the house goes on the grid for the rest of the half-hour.
+
+    On a real install the third one held a 93% pack behind a 49.2p half-hour
+    while valuing the charge at 23.9p. An oven would have been bought at 49.2p.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=93.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        return coordinator
+
+    async def _slot(self, hass, hold_value, price=49.2):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        slot = coordinator.plan.slots[0]
+        slot.action = SlotAction.IDLE
+        slot.import_price = price
+        slot.hold_value = hold_value
+        # The plan committed to the slot's action before the test rewrote it.
+        coordinator._committed = None
+        return coordinator, slot
+
+    async def test_a_hold_worth_less_than_the_grid_is_downgraded(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator, slot = await self._slot(hass, hold_value=23.9)
+        command = coordinator._resolve_command(slot.start + timedelta(minutes=1))
+        assert command.action is SlotAction.SELF_USE
+
+    async def test_a_hold_worth_more_than_the_grid_still_stands(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator, slot = await self._slot(hass, hold_value=60.0)
+        command = coordinator._resolve_command(slot.start + timedelta(minutes=1))
+        assert command.action is SlotAction.IDLE
+
+    async def test_a_plan_that_priced_nothing_is_left_alone(self, hass):
+        """Only a stated value can overrule the plan; absence is not evidence."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator, slot = await self._slot(hass, hold_value=None)
+        command = coordinator._resolve_command(slot.start + timedelta(minutes=1))
+        assert command.action is SlotAction.IDLE
+
+
 class TestBatteryThroughputSurvivesAGapInTheMarks:
     """Battery energy is read from the state of charge, and gaps swallowed it.
 

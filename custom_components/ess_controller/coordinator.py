@@ -1896,6 +1896,25 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         action = self._committed_action(slot)
 
+        # Last line of defence before a hold reaches the hardware.
+        #
+        # A hold raises the inverter's reserve to the current charge, so for the
+        # rest of the half-hour every kilowatt-hour the house draws is bought,
+        # whatever it costs. That is worth doing only while the charge is worth
+        # more than the grid, and the plan carries the optimiser's own answer to
+        # that question. Three separate routes have now published a hold that
+        # could not justify itself -- a labelling artefact, the self-use fallback,
+        # and a shortfall too small for the level grid to express -- and each time
+        # the damage was done here, at the write. So the test is applied here as
+        # well as where the plan is built: whatever produced it, a hold that
+        # cannot say the charge is worth more than this half-hour does not go out.
+        if (
+            action is SlotAction.IDLE
+            and slot.hold_value is not None
+            and slot.hold_value <= slot.import_price
+        ):
+            action = SlotAction.SELF_USE
+
         power = (
             slot.charge_power_kw if slot.charge_ac_kwh > 0 else slot.discharge_power_kw
         )

@@ -1006,16 +1006,49 @@ class TestAHoldThatProtectsNothingIsNotAHold:
         assert first.hold_value is not None
         assert first.hold_value > first.import_price
 
-    def test_a_hold_that_makes_the_house_buy_is_left_alone(self):
-        """A shortfall the plan chose not to cover is a decision, not an accident."""
-        plan = self._plan(self.DEAR_SUNNY, 55.0)
-        held = [
-            s for s in plan.slots if s.action is SlotAction.IDLE and s.load_kwh > s.pv_kwh
-        ]
-        for slot in held:
-            assert slot.grid_import_kwh > 0
-            assert slot.hold_value is not None
-            assert slot.hold_value > slot.import_price
+    # A dear half-hour whose forecast shortfall is far below one level of the
+    # grid, so the sweep cannot discharge into it however much it would like to.
+    # ...followed by the evening it is holding for and a cheap night after it, so
+    # the sweep has something to schedule and the plan is its own rather than the
+    # self-use fallback.
+    TINY_SHORTFALL = (
+        [(49.2, 0.26, 0.29), (68.7, 0.06, 0.31), (69.7, 0.02, 0.30)]
+        + [(56.4, 0.01, 1.13)] * 4
+        + [(24.0, 0.0, 0.4)] * 12
+        + [(60.0, 0.0, 0.9)] * 6
+    )
+
+    def test_no_hold_anywhere_costs_more_than_it_protects(self):
+        """The whole of the test, on every slot of every shape.
+
+        This was once restricted to slots where the sun covered the house, on the
+        reasoning that a hold making the house buy *forecast* load must have been
+        chosen deliberately. It was not always chosen at all: a shortfall smaller
+        than one level of the grid leaves holding as the only move that can be
+        represented, and the slot goes out as a hold regardless of what the charge
+        is worth. A real plan did exactly that at 49.2p, against its own valuation
+        of 23.9p, with the pack at 93%.
+        """
+        for rows, soc in (
+            (self.DEAR_SUNNY, 55.0),
+            (self.CHEAP_SUNNY, 95.0),
+            (self.TINY_SHORTFALL, 93.0),
+        ):
+            for slot in self._plan(rows, soc).slots:
+                if slot.action is not SlotAction.IDLE:
+                    continue
+                assert slot.hold_value is not None, slot
+                assert slot.hold_value > slot.import_price, slot
+
+    def test_a_shortfall_too_small_to_cover_is_not_a_refusal_to_cover_it(self):
+        plan = self._plan(self.TINY_SHORTFALL, 93.0)
+        dear = plan.slots[0]
+        assert dear.import_price == 49.2
+        assert dear.hold_value is not None
+        assert dear.hold_value < dear.import_price
+        # Whatever it does, it must not shut the battery and put the house on the
+        # grid at 49.2p while holding charge it values at half that.
+        assert dear.action is not SlotAction.IDLE, dear
 
     def test_the_baselines_express_no_opinion(self):
         """Neither counterfactual runs a sweep, so neither has a slope to read."""

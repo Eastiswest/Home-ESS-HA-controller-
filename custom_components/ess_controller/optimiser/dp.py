@@ -732,16 +732,27 @@ def optimise(
         # missed is bought at whatever the half-hour costs, which on a sunny
         # 45.4p slot is the worst possible answer to switching the oven on.
         #
-        # So the shadow price decides it, not the label. Above this slot's price
-        # the charge really is worth more later and the hold stands; at or below
-        # it the battery is the cheaper source and stays available. Restricted to
-        # slots with no shortfall, where the two are identical in every figure
-        # the plan reports -- a hold that makes the house buy *forecast* load is
-        # a decision the optimiser did take, and is left alone.
+        # So the shadow price decides it, and nothing else does. Above this
+        # slot's price the charge really is worth more later and the hold stands;
+        # at or below it the battery is the cheaper source and stays available.
+        #
+        # This was once restricted to slots with no shortfall, on the reasoning
+        # that a hold which makes the house buy *forecast* load is a decision the
+        # optimiser took deliberately, and that by its own optimality such slots
+        # would price out above the line anyway. Both halves were wrong, and a
+        # real plan showed how: a half-hour at 49.2p with a three-hundredth of a
+        # kilowatt-hour of shortfall -- far below one level of the grid, so
+        # holding was not chosen over discharging, it was the only move that
+        # could be represented at all. The slot was published as a hold, the
+        # reserve went up to 93%, and a full battery sat behind an oven buying at
+        # 49.2p. The optimiser's own valuation of that charge was 23.9p.
+        #
+        # A shortfall the plan cannot cover is not a decision to refuse. Where
+        # the sweep would have discharged if the grid could express it, the
+        # shadow price says so, and that is the whole of the test.
         action = flow.action
         if (
             action is SlotAction.IDLE
-            and slot.pv_kwh + EPS >= slot.load_kwh
             and hold_value is not None
             and hold_value <= slot.import_price
         ):
