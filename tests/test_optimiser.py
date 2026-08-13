@@ -643,8 +643,7 @@ class TestResolutionDoesNotFreezeTheBattery:
         assert _smallest_useful_move(slots, make_battery(), grid) is None
 
     def test_a_tiny_load_does_not_make_the_sweep_enormous(self):
-        from custom_components.ess_controller.optimiser.dp import MAX_REFINED_LEVELS
-
+        """A milliwatt-hour deficit must not be chased to arbitrary resolution."""
         plan = optimise(
             build_slots([20.0] * 8, load=0.001),
             50.0,
@@ -653,7 +652,48 @@ class TestResolutionDoesNotFreezeTheBattery:
             OptimiserSettings(),
         )
         assert plan.slots
-        assert MAX_REFINED_LEVELS <= 240
+
+    def test_the_refinement_is_bounded_by_work_not_by_a_level_count(self):
+        """Levels alone do not bound the cost, and pretending they did was wrong.
+
+        Every level is priced against every transition reachable inside a slot,
+        and how many that is scales with the resolution too -- so the sweep is
+        quadratic. A small pack behind a large inverter crosses most of its own
+        window in a half-hour, and there the same level count costs several times
+        as much. The budget is the work, and the level count follows from it.
+        """
+        from custom_components.ess_controller.optimiser.dp import (
+            MAX_SWEEP_TRANSITIONS,
+            _refined_levels,
+        )
+
+        slots = build_slots([20.0] * 96, load=0.25)
+        roomy = make_battery()
+        cramped = make_battery(capacity_kwh=5.0, max_charge_kw=6.0, max_discharge_kw=6.0)
+        # Ask for an impossible resolution, and let the budget answer.
+        for battery in (roomy, cramped):
+            levels = _refined_levels(slots, battery, 60, finest=0.0001)
+            hours = slots[0].duration_hours
+            reach = max(
+                battery.max_charge_kw * hours * battery.charge_efficiency,
+                battery.max_discharge_kw * hours / battery.discharge_efficiency,
+            )
+            span = min(int(reach / (battery.usable_kwh / levels)), levels) * 2 + 1
+            assert len(slots) * (levels + 1) * span <= MAX_SWEEP_TRANSITIONS
+            assert levels >= 60
+        # The cramped pack has to give up resolution the roomy one can afford.
+        assert _refined_levels(slots, cramped, 60, 0.0001) < _refined_levels(
+            slots, roomy, 60, 0.0001
+        )
+
+    def test_a_grid_no_finer_than_asked_for_is_not_refined(self):
+        """The budget is a ceiling, not a target."""
+        from custom_components.ess_controller.optimiser.dp import _refined_levels
+
+        slots = build_slots([20.0] * 8, load=0.25)
+        battery = make_battery()
+        # One level of the configured grid already covers this move.
+        assert _refined_levels(slots, battery, 60, battery.usable_kwh) == 60
 
 
 class TestASmallSurplusIsStoredRatherThanSpilled:
@@ -750,6 +790,73 @@ class TestASmallSurplusIsStoredRatherThanSpilled:
         assert sum(s.curtailed_kwh for s in plan.slots) < 0.1
         assert sum(s.grid_import_kwh for s in plan.slots) == pytest.approx(0.0, abs=1e-6)
 
+    def test_it_waits_for_the_sun_instead_of_buying_the_last_two_percent(self):
+        """Taken from a real horizon, where this cost money and looked absurd.
+
+        A 22 kWh pack at 92.8% with a 68.7p evening four hours off. Three of the
+        afternoon's surpluses were 54-68 Wh at the cells against a 69 Wh level,
+        so none of them could be stored: the plan could not climb the last of the
+        way on sunshine however much of it arrived. Rather than enter the peak
+        short it bought the difference from the grid at 21.3p and spilled the sun
+        it could not hold -- with the array still producing and the battery all
+        but full, which is precisely when a user asks what on earth it is doing.
+        """
+        rows = [
+            # price, pv, load -- the afternoon, then the evening it is filling for
+            (21.3, 0.60, 0.35),
+            (38.1, 0.54, 0.40),
+            (38.2, 0.42, 0.36),
+            (45.4, 0.46, 0.39),
+            (49.2, 0.26, 0.38),
+            (68.7, 0.06, 0.31),
+            (69.7, 0.02, 0.30),
+            (56.4, 0.01, 1.13),
+            (57.4, 0.02, 1.13),
+            (44.7, 0.01, 0.47),
+        ]
+        slots = []
+        for index, (price, pv, load) in enumerate(rows):
+            start = START + timedelta(minutes=30 * index)
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=pv,
+                    load_kwh=load,
+                )
+            )
+        from custom_components.ess_controller.optimiser.dp import (
+            _refined_levels,
+            _smallest_useful_move,
+        )
+
+        battery = make_battery(min_soc=20.0, max_soc=95.0, cycle_cost_per_kwh=1.147)
+        grid = make_grid(allow_export=False, allow_battery_export=False)
+
+        # The resolution is the fix, so the resolution is what is asserted: at 240
+        # levels the step is 69 Wh and the three smallest surpluses are 54, 57 and
+        # 66 Wh, so none of them is a move the plan can make.
+        smallest = min(
+            (s.pv_kwh - s.load_kwh) * battery.charge_efficiency
+            for s in slots
+            if s.pv_kwh > s.load_kwh
+        )
+        finest = _smallest_useful_move(slots, battery, grid)
+        assert finest is not None
+        step = battery.usable_kwh / _refined_levels(slots, battery, 60, finest)
+        assert step <= smallest, f"step {step:.4f} cannot store {smallest:.4f}"
+        assert battery.usable_kwh / 240 > smallest  # ...as the old ceiling could not
+
+        plan = optimise(slots, 92.8, battery, grid, OptimiserSettings())
+        afternoon = plan.slots[:5]
+        # The sun fills the last of the pack. Not a penny of it is bought.
+        assert sum(s.grid_import_kwh for s in afternoon) == pytest.approx(0.0, abs=0.01)
+        assert sum(s.charge_ac_kwh for s in afternoon) > 0.3
+        # ...and it is full before the dear half-hours arrive.
+        assert plan.slots[4].soc_end > 94.0
+
     def test_the_ceiling_can_still_bind(self):
         """Refinement is capped, and the cap is not a bug -- but it is a limit.
 
@@ -844,14 +951,23 @@ class TestAHoldThatProtectsNothingIsNotAHold:
     CHEAP_SUNNY = [(5.0, 0.45, 0.35)] * 4 + [(95.0, 0.0, 1.2)] * 8
 
     def test_a_dear_sunny_slot_leaves_the_battery_available(self):
+        """What matters is that the battery is not shut, not which state says so.
+
+        A finer level grid can now store the small surplus these slots carry, so
+        they come out as a solar charge rather than a bare self-use. Both leave
+        the inverter in self-use with its ordinary reserve -- only a hold raises
+        the floor to the current charge and puts an unforecast oven on the grid.
+        """
         plan = self._plan(self.DEAR_SUNNY, 55.0)
         sunny = [s for s in plan.slots if s.import_price == 45.0]
         assert sunny
         for slot in sunny:
-            assert slot.action is SlotAction.SELF_USE, slot
-            # Nothing was actually planned to move: the change is what happens
-            # when reality departs from the forecast, not what the plan spends.
-            assert slot.battery_delta_kwh == pytest.approx(0.0, abs=1e-9)
+            assert slot.action is not SlotAction.IDLE, slot
+            assert slot.action in (
+                SlotAction.SELF_USE,
+                SlotAction.CHARGE_SOLAR_ONLY,
+            ), slot
+            # Whatever it does, it does not buy: the sun covers the house here.
             assert slot.grid_import_kwh == pytest.approx(0.0, abs=1e-9)
 
     def test_a_cheap_sunny_slot_before_a_brutal_evening_still_holds(self):

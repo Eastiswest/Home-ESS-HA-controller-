@@ -253,10 +253,54 @@ def _price_delta(
 
 
 # A ceiling on the refined level count, so a tiny household load cannot turn the
-# sweep into something that takes seconds. Two hundred and forty levels over an
-# 18 kWh window is 75 Wh of resolution, which is finer than any half-hour
-# decision needs.
-MAX_REFINED_LEVELS = 240
+# sweep into something that takes minutes.
+#
+# It was 240, chosen as "finer than any half-hour decision needs". That was wrong,
+# and a real horizon showed how: a 22 kWh pack wanted 305 levels to be able to
+# store its smallest afternoon surplus, got 240, and so could not represent a
+# 57 Wh top-up. Three consecutive sunny half-hours were therefore unstorable, and
+# rather than sit at 94.5% into a 68.7p evening the plan bought 0.27 kWh from the
+# grid at 21.3p and spilled 0.30 kWh of free sun. Lifting the ceiling turned all
+# five of those slots into solar charges and took 6p off a two-day horizon -- small
+# money, but it happens every sunny day, and "why is it buying when the sun is
+# out" is not a question a correct plan should provoke.
+MAX_REFINED_LEVELS = 400
+
+# ...and a ceiling on the sweep's total work, because the level count alone does
+# not bound it. Every level is priced against every transition reachable within a
+# slot, and how many that is *also* scales with the resolution -- so the cost is
+# quadratic, not linear. A small pack behind a large inverter can cross most of
+# its own window in one half-hour, and there the two multiply: the same 400 levels
+# that cost a fifth of a second on a 22 kWh pack cost nearly a second on a 5 kWh
+# one. Twelve million transitions is a comfortable fraction of a second and far
+# inside the planning cadence; the sweep runs in an executor, so it is the budget
+# rather than the event loop that governs.
+MAX_SWEEP_TRANSITIONS = 12_000_000
+
+
+def _refined_levels(
+    slots: list[HorizonSlot], battery: BatterySpec, configured: int, finest: float
+) -> int:
+    """The finest grid that fits both the movement wanted and the work budget."""
+    usable = battery.usable_kwh
+    levels = min(math.ceil(usable / finest), MAX_REFINED_LEVELS)
+    if levels <= configured or not slots:
+        return configured
+    hours = min(slot.duration_hours for slot in slots)
+    if hours <= 0:
+        return configured
+    # The furthest the battery can move in one slot, at the cells, which is what
+    # sets how many transitions each level has to be priced against.
+    reach = max(
+        battery.max_charge_kw * hours * battery.charge_efficiency,
+        battery.max_discharge_kw * hours / battery.discharge_efficiency,
+    )
+    while levels > configured:
+        span = min(int(reach / (usable / levels)), levels) * 2 + 1
+        if len(slots) * (levels + 1) * span <= MAX_SWEEP_TRANSITIONS:
+            break
+        levels -= max(levels // 20, 1)
+    return max(levels, configured)
 
 
 # Charged per kWh of generation the plan expects to give away for nothing --
@@ -563,7 +607,7 @@ def optimise(
     # fixes it without making the sweep expensive.
     finest = _smallest_useful_move(slots, battery, grid)
     if finest is not None and step > finest:
-        levels = min(math.ceil(usable / finest), MAX_REFINED_LEVELS)
+        levels = _refined_levels(slots, battery, levels, finest)
         step = usable / levels
     n = len(slots)
 
