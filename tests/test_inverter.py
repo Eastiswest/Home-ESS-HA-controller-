@@ -275,6 +275,64 @@ class TestDiscovery:
         assert found[ROLE_SOC] == "sensor.solax_battery_capacity"
         assert found[ROLE_LOCK] == "select.solax_lock_state"
 
+    def test_finds_the_grid_charge_control_by_the_name_it_really_has(self):
+        """The suffix was one word longer than the entity, and nothing noticed.
+
+        The role looked for ``selfuse_night_charge_enable``; a real SolaX calls it
+        ``select.<prefix>_selfuse_night_charge``. So the role never matched, the
+        capability reported false, and the controller could not turn grid charging
+        off -- while the inverter went on topping the battery up from the grid
+        through half-hours the plan had costed as self-use. Every test covering
+        this used the invented name, so the whole thing was green.
+        """
+        from custom_components.ess_controller.inverter.roles import ROLE_GRID_CHARGE
+
+        for entity_id in (
+            "select.solax_selfuse_night_charge",
+            "select.solax_selfuse_nightcharge",
+            "switch.solax_selfuse_night_charge_enable",
+            "switch.solax_charge_from_grid",
+        ):
+            hass = build_solax_hass()
+            domain = entity_id.partition(".")[0]
+            if domain == "select":
+                hass.states.set(entity_id, "Disabled", options=["Enabled", "Disabled"])
+            else:
+                hass.states.set(entity_id, "on")
+            found = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+            assert found.get(ROLE_GRID_CHARGE) == entity_id, entity_id
+
+    def test_peak_shaving_is_still_refused(self):
+        """The exclusion that stopped the last wrong binding must survive."""
+        from custom_components.ess_controller.inverter.roles import ROLE_GRID_CHARGE
+
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_peakshaving_charge_from_grid", "on")
+        found = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        assert found.get(ROLE_GRID_CHARGE) is None
+
+    def test_a_truncated_candidate_list_says_so(self):
+        """It exists to answer "why has nothing found it?".
+
+        Cut silently at sixty, sorted alphabetically, it answers "it is not there"
+        instead -- which is the one wrong answer it can give, and the answer it
+        gave while a control the inverter plainly had went unmapped.
+        """
+        from custom_components.ess_controller.inverter.roles import unmatched_candidates
+
+        hass = build_solax_hass()
+        for index in range(80):
+            hass.states.set(f"number.solax_zz_battery_spare_{index:03d}", 1.0)
+        listed = unmatched_candidates(hass, {}, prefix="solax", limit=60)
+        assert len(listed) == 61
+        assert "more not shown" in listed[-1]
+
+    def test_a_short_candidate_list_says_nothing_extra(self):
+        from custom_components.ess_controller.inverter.roles import unmatched_candidates
+
+        listed = unmatched_candidates(build_solax_hass(), {}, prefix="solax")
+        assert not any("more not shown" in entry for entry in listed)
+
     def test_prefers_most_specific_suffix(self):
         # battery_voltage_charge must win over a bare battery_voltage.
         hass = build_solax_hass()

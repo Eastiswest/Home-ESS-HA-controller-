@@ -165,7 +165,21 @@ SOLAX_ROLE_SPECS: tuple[RoleSpec, ...] = (
     RoleSpec(
         ROLE_GRID_CHARGE,
         ("switch", "select"),
-        ("selfuse_night_charge_enable", "charge_from_grid", "grid_charge"),
+        (
+            "selfuse_night_charge_enable",
+            # The name it actually has. The suffix above was one word longer than
+            # the entity -- ``select.<prefix>_selfuse_night_charge`` -- so the
+            # role never matched on a real SolaX, the capability reported false,
+            # and the controller could not turn grid charging off. The inverter
+            # went on topping the battery up from the grid whenever its own
+            # self-use settings said to, through half-hours the plan had costed
+            # as self-use, and the only clue was a line saying the control could
+            # not be found. Both spellings appear across firmware.
+            "selfuse_night_charge",
+            "selfuse_nightcharge",
+            "charge_from_grid",
+            "grid_charge",
+        ),
         description="Whether charging from the grid is permitted",
         # Peak shaving has its own charge-from-grid switch, for a different
         # feature entirely. Better to find nothing and say so than to write to it.
@@ -352,7 +366,15 @@ def unmatched_candidates(
         if not any(word in object_id for word in CANDIDATE_WORDS):
             continue
         found.append(entity_id)
-    return sorted(found)[:limit]
+    found.sort()
+    if len(found) > limit:
+        # Say so rather than stop mid-alphabet. This list exists to answer "the
+        # control is plainly there, why has nothing found it?", and a silent cut
+        # makes it answer "it does not exist" instead -- which is the one wrong
+        # answer it can give.
+        dropped = len(found) - limit
+        return [*found[:limit], f"... and {dropped} more not shown"]
+    return found
 
 
 def _clean(text: str) -> str:
