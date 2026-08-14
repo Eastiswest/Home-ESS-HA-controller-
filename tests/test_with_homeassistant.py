@@ -2497,6 +2497,118 @@ class TestTheInvertersOwnReserveIsCompared:
         assert coordinator.diagnostics()["reserve_conflict"]
 
 
+class TestTheDiagnosticsExplainTheBehaviour:
+    """Everything in here was worked out by hand, from a file that held the data.
+
+    A whole afternoon went on proving that an inverter really was charging from
+    the grid during self-use, then on finding the control that was doing it. Both
+    answers were latent in figures the download already carried; neither was
+    stated. These are the statements.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _now():
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    async def test_the_file_says_when_it_was_taken(self, hass):
+        """Not the same as when the plan was built, and reading one as the other
+        once produced a confident and completely wrong explanation."""
+        from custom_components.ess_controller.diagnostics import (
+            async_get_config_entry_diagnostics,
+        )
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        data = await async_get_config_entry_diagnostics(hass, entry)
+        assert data["generated_at"]
+        assert data["controller"]["plan"]["created"] != data["generated_at"]
+
+    async def test_unplanned_grid_charging_is_named(self, hass):
+        """The check that settled the argument, run for you instead of by you."""
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        log = coordinator.performance_store.log
+        # Sun could give 0.16 kWh; the pack gained 0.88. The rest was bought.
+        log.add(
+            SlotRecord(
+                start=now - timedelta(minutes=30),
+                import_price=20.8,
+                pv_kwh=0.44,
+                load_kwh=0.27,
+                grid_import_kwh=1.02,
+                soc_start=62.0,
+                soc_end=66.0,
+                planned_action="self_use",
+                applied_action="self_use",
+            )
+        )
+        found = coordinator.unexplained_charge()
+        assert len(found) == 1
+        assert found[0]["applied_action"] == "self_use"
+        assert found[0]["unexplained_kwh"] > 0.5
+        assert found[0]["cost_estimate"] > 10
+
+    async def test_a_planned_charge_is_not_reported_as_unexplained(self, hass):
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        coordinator.performance_store.log.add(
+            SlotRecord(
+                start=now - timedelta(minutes=30),
+                import_price=8.0,
+                grid_import_kwh=3.0,
+                soc_start=40.0,
+                soc_end=52.0,
+                planned_action="charge",
+                applied_action="charge",
+            )
+        )
+        assert coordinator.unexplained_charge() == []
+
+    async def test_dropped_half_hours_are_counted(self, hass):
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        log = coordinator.performance_store.log
+        for index in (0, 1, 3, 4):  # the third half-hour never arrived
+            log.add(SlotRecord(start=now - timedelta(minutes=30 * (5 - index))))
+        coverage = coordinator.slot_coverage()
+        assert coverage["recorded"] == 4
+        assert coverage["expected"] == 5
+        assert coverage["missing"] == 1
+
+    async def test_every_apply_is_kept_not_just_the_last(self, hass):
+        """A leftover setting is a sequence, and one snapshot cannot show it."""
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+        history = coordinator.diagnostics()["apply_history"]
+        assert len(history) >= 2
+        assert all(entry["at"] for entry in history)
+
+    async def test_the_live_flows_reach_the_file(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        power = coordinator.diagnostics()["live_power"]
+        assert set(power) == {"battery_kw", "pv_kw", "grid_kw", "load_kw"}
+
+
 class TestAnUnjustifiedHoldNeverReachesTheInverter:
     """A hold shuts the battery. It has to be able to say why, at the write.
 

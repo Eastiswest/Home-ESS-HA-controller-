@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .const import DOMAIN
+
 DASHBOARD_URL_PATH = "ess-controller"
 DASHBOARD_TITLE = "ESS Controller"
 DASHBOARD_ICON = "mdi:home-battery-outline"
@@ -408,6 +410,33 @@ def _actions(keys: list[str], resolved: dict[str, str]) -> list[dict[str, Any]]:
             }
         )
     return cards
+
+
+def _diagnostics_link() -> dict[str, Any]:
+    """A one-tap shortcut to where the diagnostics download lives.
+
+    Home Assistant serves diagnostics from an authenticated API endpoint, and a
+    Lovelace card cannot send the token it needs -- so a card that downloads the
+    file directly is not something this dashboard can honestly offer. What it can
+    do is stop the hunt: the file is the first thing anyone asks for when a plan
+    looks wrong, and finding it means knowing to go to Settings, then Devices &
+    services, then this integration, then a menu behind three dots.
+
+    A link rather than a tile, and deliberately. A tile card wants an entity;
+    there is no entity for "a page", and borrowing an unrelated one to carry the
+    tap would put a card on the page whose icon and state describe something
+    other than what pressing it does. An entity-less tile risks rendering as the
+    error box this dashboard exists to avoid, which is a poor trade for looking
+    more like a button.
+    """
+    return _markdown(
+        f"### [⬇ Download diagnostics](/config/integrations/integration/{DOMAIN})\n\n"
+        "The whole picture — what it decided, what it read from the inverter, "
+        "what it wrote, and what actually happened. The link opens the "
+        "integration page; press the three dots beside the entry and choose "
+        "*Download diagnostics*. It is the first thing to attach to a question "
+        "about why a plan looks wrong."
+    )
 
 
 def _markdown(content: str) -> dict[str, Any]:
@@ -1262,7 +1291,7 @@ def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
                 ],
             ),
             _section(
-                "Export the history",
+                "Getting the data out",
                 "mdi:file-download-outline",
                 [
                     _markdown(
@@ -1276,7 +1305,7 @@ def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
                     # Prose follows substance: instructions for exporting a history
                     # that cannot exist would be the only thing on the page.
                     if weekly or wear
-                    else None
+                    else None,
                 ],
             ),
         ],
@@ -1407,6 +1436,12 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
                     )
                     if anything
                     else None,
+                    # Beside the other administrative actions, and gated with
+                    # them: a view that exists only to hold a shortcut to a
+                    # Home Assistant page is the "static prose" this dashboard
+                    # refuses to build elsewhere, and the rule does not stop
+                    # applying because the prose is shaped like a button.
+                    _diagnostics_link() if anything else None,
                     *_actions(
                         [
                             "replan",

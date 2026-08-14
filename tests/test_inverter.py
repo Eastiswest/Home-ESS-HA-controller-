@@ -311,6 +311,51 @@ class TestDiscovery:
         found = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
         assert found.get(ROLE_GRID_CHARGE) is None
 
+    def test_bound_entities_report_what_they_read(self):
+        """Ids answer "what is it wired to"; only values answer "saying what".
+
+        A real install had its inverter charging from the grid because a self-use
+        setting was enabled, and the diagnostics file listed the entity that
+        governed it -- by id, with no value. The setting was invisible in the one
+        file meant to explain the behaviour.
+        """
+        from custom_components.ess_controller.inverter.roles import entity_states
+
+        hass = build_solax_hass()
+        states = entity_states(
+            hass,
+            {
+                "use_mode": "select.solax_charger_use_mode",
+                "charge_limit": "number.solax_battery_charge_max_current",
+                "missing": "switch.not_here",
+            },
+        )
+        assert states["use_mode"]["state"] == "Self Use"
+        # What else it could be set to, which is the next question every time.
+        assert "Manual Mode" in states["use_mode"]["options"]
+        assert states["charge_limit"]["max"] == 30.0
+        assert states["missing"] == {
+            "entity_id": "switch.not_here",
+            "state": None,
+            "found": False,
+        }
+
+    def test_the_live_flows_are_reported(self):
+        """``as_dict`` read them every cycle and then dropped all four."""
+        from custom_components.ess_controller.inverter.base import InverterState
+
+        state = InverterState(
+            available=True, battery_power_kw=1.2, pv_power_kw=2.0, grid_power_kw=-0.4
+        )
+        assert state.power_summary() == {
+            "battery_kw": 1.2,
+            "pv_kw": 2.0,
+            "grid_kw": -0.4,
+            # None rather than absent: no entity mapped for the role is itself
+            # the answer to why the figure is missing.
+            "load_kw": None,
+        }
+
     def test_a_truncated_candidate_list_says_so(self):
         """It exists to answer "why has nothing found it?".
 

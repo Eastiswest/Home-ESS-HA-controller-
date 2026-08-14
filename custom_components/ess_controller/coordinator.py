@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -188,6 +189,21 @@ _LOGGER = logging.getLogger(__name__)
 
 _SLOT = timedelta(minutes=SLOT_MINUTES)
 
+# How many applies to keep for the diagnostics download. Twenty half-hourly-ish
+# cycles is a couple of hours of behaviour: long enough to show a setting that
+# was written once and never cleared, short enough not to bloat the file.
+APPLY_HISTORY = 20
+
+# How much of a half-hour's battery gain the sun must fail to explain before the
+# slot is worth reporting. A whole-percent state of charge on a 22 kWh pack
+# quantises to 0.22 kWh, so this is comfortably clear of the rounding.
+UNEXPLAINED_CHARGE_KWH = 0.15
+
+# Solar reaching the cells rather than the meter. The real figure is a setting;
+# this only has to be close enough not to invent an unexplained kilowatt-hour out
+# of an efficiency rounding, and erring high makes the check quieter, not louder.
+CHARGE_EFFICIENCY_HINT = 1.0
+
 # Weather and solar forecasts change slowly; refetching every cycle would spam
 # the upstream integration for no benefit.
 FORECAST_REFRESH = timedelta(minutes=20)
@@ -228,6 +244,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.plan: Plan | None = None
         self.override: Override | None = None
         self.last_apply: ApplyResult | None = None
+        # One apply is a snapshot; a fault is usually a sequence. A leftover
+        # Force Charge, a write that stopped landing, a mode flapping every
+        # cycle -- none of them are visible in the single most recent result,
+        # and each of them has cost a real install money while the file that was
+        # meant to explain it showed one clean line. Cheap to keep, and the
+        # first thing worth reading when the behaviour and the plan disagree.
+        self._apply_history: deque[dict[str, Any]] = deque(maxlen=APPLY_HISTORY)
         self.last_command: ControlCommand | None = None
         self.inverter_state = InverterState()
         self.battery: BatteryReading = BatteryReading()
@@ -564,6 +587,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 dry_run=not self.settings.controlling,
                 verify=self.settings.controlling,
             )
+            self._remember_apply(now, self.last_apply)
             if self.last_apply.writes:
                 _LOGGER.info("%s: %s", command.action.value, self.last_apply.summary())
 
@@ -614,6 +638,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dry_run=not self.settings.may_write,
             verify=False,
         )
+        self._remember_apply(now, self.last_apply)
         await self._async_drive_appliances(now)
 
     # ------------------------------------------------------------------
@@ -788,6 +813,84 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if start - (last.start + _SLOT) > self.MAX_SOC_BRIDGE:
             return None
         return last.soc_end
+
+    def _remember_apply(self, now: datetime, result: ApplyResult) -> None:
+        """Keep an apply in the rolling history, timestamped."""
+        entry = result.as_dict()
+        entry["at"] = now.isoformat()
+        self._apply_history.append(entry)
+
+    def unexplained_charge(self, days: float = 2.0) -> list[dict[str, Any]]:
+        """Half-hours where the battery gained more than the sun could have given.
+
+        The one check that says "something other than the plan is driving this
+        inverter", and it needs nothing the log does not already hold. A real
+        install had its self-use grid charging enabled at the inverter, so the
+        pack filled from the grid through half-hours the plan had costed as
+        self-use; every figure in the file was individually plausible and the
+        arithmetic across two of them was not. Working it out by hand settled an
+        argument about whether the behaviour was even real, so it should not need
+        working out by hand.
+
+        Conservative on purpose. Solar is credited at the full surplus and the
+        threshold is well above the quantisation in a whole-percent state of
+        charge, so a slot listed here is one where the sun genuinely cannot
+        account for what arrived.
+        """
+        capacity = self.nominal_capacity_kwh()
+        if capacity <= 0:
+            return []
+        found: list[dict[str, Any]] = []
+        for record in self.performance_store.log.window(days):
+            if record.applied_action in (None, "charge", "discharge"):
+                continue
+            if record.soc_start is None or record.soc_end is None:
+                continue
+            gained = (record.soc_end - record.soc_start) / 100.0 * capacity
+            from_sun = max(record.pv_kwh - record.load_kwh, 0.0) * CHARGE_EFFICIENCY_HINT
+            unexplained = gained - from_sun
+            if unexplained <= UNEXPLAINED_CHARGE_KWH or record.grid_import_kwh <= 0.05:
+                continue
+            found.append(
+                {
+                    "start": record.start.isoformat(),
+                    "planned_action": record.planned_action,
+                    "applied_action": record.applied_action,
+                    "import_price": round(record.import_price, 3),
+                    "sun_could_supply_kwh": round(from_sun, 3),
+                    "battery_gained_kwh": round(gained, 3),
+                    "unexplained_kwh": round(unexplained, 3),
+                    "grid_import_kwh": round(record.grid_import_kwh, 3),
+                    "cost_estimate": round(
+                        unexplained / CHARGE_EFFICIENCY_HINT * record.import_price, 1
+                    ),
+                }
+            )
+        return found
+
+    def slot_coverage(self, days: float = 2.0) -> dict[str, Any]:
+        """How much of the window was actually recorded.
+
+        A slot with too few samples is dropped, and a dropped slot teaches the
+        model nothing, costs nothing and appears nowhere. Eleven of ninety-eight
+        went missing on a real install without a word, which is both a sensor
+        problem worth knowing about and an explanation for a model maturing more
+        slowly than the calendar suggests.
+        """
+        records = self.performance_store.log.window(days)
+        if not records:
+            return {"recorded": 0, "expected": 0, "missing": 0}
+        ordered = sorted(records, key=lambda r: r.start)
+        span = (ordered[-1].start - ordered[0].start).total_seconds() / 60.0
+        expected = int(span // SLOT_MINUTES) + 1
+        thin = [r.start.isoformat() for r in ordered if r.coverage < 0.95]
+        return {
+            "recorded": len(ordered),
+            "expected": expected,
+            "missing": max(expected - len(ordered), 0),
+            "thin_slots": thin[:20],
+            "learning_observations": self.learning_store.model.solar_observations,
+        }
 
     def _record_completed(self, completed: list[Any]) -> None:
         """Turn closed half-hours into performance records."""
@@ -2369,7 +2472,47 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "recommendation": (
                 self.recommendation.as_dict() if self.recommendation else None
             ),
+            "apply_history": list(self._apply_history),
+            "live_power": self.inverter_state.power_summary(),
+            "unexplained_charge": self.unexplained_charge(),
+            "slot_coverage": self.slot_coverage(),
+            "disabled_inverter_entities": self._disabled_inverter_entities(),
         }
+
+    def _disabled_inverter_entities(self) -> list[str]:
+        """Inverter entities that exist but are switched off in Home Assistant.
+
+        Discovery reads ``hass.states``, and a disabled entity has no state, so
+        it is invisible to both the role matcher and the candidate list. That is
+        exactly where a real install's grid-charge control was hiding: present in
+        the registry, absent from every list the controller could produce, and so
+        reported as a control the inverter did not have.
+
+        Listing them turns "your inverter has no such control" into "your
+        inverter has one and it is disabled", which is a fix rather than a dead
+        end.
+        """
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+        except Exception:  # pragma: no cover - diagnostics must not fail
+            return []
+        raw = str(self.options.get(CONF_INVERTER_PREFIX) or "")
+        prefix = raw.strip().lower().replace(" ", "_").replace("-", "_")
+        found: list[str] = []
+        for entry in registry.entities.values():
+            if not entry.disabled_by or entry.domain not in (
+                "switch",
+                "select",
+                "number",
+            ):
+                continue
+            object_id = entry.entity_id.partition(".")[2]
+            if prefix and not object_id.lower().startswith(prefix):
+                continue
+            found.append(f"{entry.entity_id} (disabled by {entry.disabled_by})")
+        return sorted(found)[:40]
 
 
 def _as_list(value: Any) -> list[str]:

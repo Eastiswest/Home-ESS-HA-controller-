@@ -13,6 +13,7 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_OCTOPUS_ACCOUNT, CONF_OCTOPUS_API_KEY, DOMAIN
 from .coordinator import EssCoordinator
@@ -29,12 +30,19 @@ async def async_get_config_entry_diagnostics(
     coordinator: EssCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
 
     data: dict[str, Any] = {
+        # When the file was taken, which is not the same as when the plan was
+        # built and is the difference between "this is what it is doing now" and
+        # "this is what it decided an hour ago and has not revisited". Reading
+        # the plan's own timestamp as the capture time once produced a confident
+        # and completely wrong explanation of why a screenshot and a download
+        # disagreed. Both are here now, so neither has to be inferred.
+        "generated_at": dt_util.utcnow().isoformat(),
         "entry": {
             "title": entry.title,
             "version": entry.version,
             "data": async_redact_data(dict(entry.data), REDACT),
             "options": async_redact_data(dict(entry.options), REDACT),
-        }
+        },
     }
 
     if coordinator is None:

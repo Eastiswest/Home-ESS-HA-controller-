@@ -54,6 +54,7 @@ from .roles import (
     ROLE_TARGET_SOC,
     ROLE_USE_MODE,
     SOLAX_ROLE_SPECS,
+    entity_states,
     unmatched_candidates,
 )
 
@@ -488,6 +489,7 @@ class SolaxModbusAdapter(InverterAdapter):
         # the inverter's own app will happily show it sitting there enabled. Listing
         # the near-misses turns "why is charge-from-grid still on?" into a name that
         # can be mapped, rather than another guess at an entity ID.
+        data["entity_states"] = entity_states(self.hass, self._entities)
         data["unbound_candidates"] = unmatched_candidates(self.hass, self._entities)
         data["unfilled_roles"] = sorted(
             spec.role for spec in SOLAX_ROLE_SPECS if not self.entity(spec.role)

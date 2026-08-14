@@ -336,6 +336,39 @@ CANDIDATE_WORDS: tuple[str, ...] = (
 )
 
 
+def entity_states(hass: Any, entities: dict[str, str]) -> dict[str, Any]:
+    """What every bound entity reads right now, role by role.
+
+    Diagnostics listed the entity *ids* a role had bound and the value of a
+    hand-picked six. Everything else was invisible, and the thing that was
+    invisible turned out to matter: a real install had its inverter quietly
+    charging from the grid because a self-use setting was enabled, and the file
+    that was supposed to explain the behaviour could not show the setting. The
+    ids alone answer "what is it wired to"; only the values answer "and what is
+    it wired to *saying*".
+
+    Options, bounds and units come too, because the next question after "what
+    does it read" is always "and what else could it read".
+    """
+    described: dict[str, Any] = {}
+    for role, entity_id in sorted(entities.items()):
+        state = hass.states.get(entity_id) if entity_id else None
+        if state is None:
+            described[role] = {"entity_id": entity_id, "state": None, "found": False}
+            continue
+        attributes = dict(getattr(state, "attributes", {}) or {})
+        entry: dict[str, Any] = {
+            "entity_id": entity_id,
+            "state": getattr(state, "state", None),
+            "found": True,
+        }
+        for key in ("options", "min", "max", "step", "unit_of_measurement"):
+            if key in attributes:
+                entry[key] = attributes[key]
+        described[role] = entry
+    return described
+
+
 def unmatched_candidates(
     hass: Any,
     bound: dict[str, str],

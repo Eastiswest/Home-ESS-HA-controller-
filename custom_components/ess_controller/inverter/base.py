@@ -177,6 +177,26 @@ class InverterState:
             "locked": self.locked,
         }
 
+    def power_summary(self) -> dict[str, Any]:
+        """The four live flows, which ``as_dict`` has never carried.
+
+        They are read on every cycle and then thrown away before anything can
+        look at them, so a diagnostics download could say what mode the inverter
+        was in but not what it was *doing*. Every argument about whether the
+        battery was charging has therefore been settled by differencing a
+        whole-percent state of charge across a half-hour -- which is how a
+        forty-three per cent under-count of throughput went unnoticed for weeks.
+
+        ``None`` where no entity is mapped for that role, which is itself the
+        answer to why the figure is missing.
+        """
+        return {
+            "battery_kw": self.battery_power_kw,
+            "pv_kw": self.pv_power_kw,
+            "grid_kw": self.grid_power_kw,
+            "load_kw": self.load_power_kw,
+        }
+
 
 def pick_option(options: Sequence[str], candidates: Iterable[str]) -> str | None:
     """Choose the option best matching one of ``candidates``.

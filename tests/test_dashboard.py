@@ -1372,6 +1372,46 @@ class TestTheStateLegend:
         assert "bought" in why.lower() or "buy" in why.lower()
 
 
+class TestGettingTheDiagnosticsOut:
+    """The file is the first thing asked for, and the hardest thing to find.
+
+    Settings, then Devices & services, then the integration, then a menu behind
+    three dots. Nothing on the dashboard said so.
+    """
+
+    @staticmethod
+    def _prose(config):
+        return " ".join(
+            card.get("content", "")
+            for card in walk_cards(config)
+            if card["type"] == "markdown"
+        )
+
+    def test_the_shortcut_is_on_the_settings_view(self):
+        config = build_dashboard(resolved())
+        view = next(v for v in config["views"] if v["path"] == "settings")
+        prose = self._prose({"views": [view]})
+        assert "/config/integrations/integration/ess_controller" in prose
+        assert "Download diagnostics" in prose
+
+    def test_it_says_what_to_press_when_it_gets_there(self):
+        """A link to a page whose button is behind a menu needs the last step."""
+        prose = self._prose(build_dashboard(resolved()))
+        assert "three dots" in prose
+
+    def test_it_is_not_a_tile_without_an_entity(self):
+        """A tile card wants an entity; one without renders as an error box."""
+        for card in walk_cards(build_dashboard(resolved())):
+            if card["type"] == "tile":
+                assert "entity" in card, card
+
+    def test_it_does_not_conjure_a_view_out_of_nothing(self):
+        """The rule against views that are only static prose still applies."""
+        config = build_dashboard(resolved("plan_action"))
+        paths = [view["path"] for view in config["views"]]
+        assert "settings" not in paths
+
+
 class TestPlannedFiguresSayPlanned:
     """A plan's number read as a live reading is the recurring bug on this page.
 
