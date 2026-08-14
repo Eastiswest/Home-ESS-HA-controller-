@@ -888,8 +888,8 @@
       "description": "About {kwh} kWh went into the battery that the sun cannot account for, in half-hours the plan had costed as self-use. Estimated cost: {cost}p.\n\nThis is usually the inverter's own settings: a self-use charge-from-grid option, a charge period, or a manual mode left armed. Those are set on the inverter and are not all visible to Home Assistant."
     },
     "forecast_entity_missing": {
-      "title": "A forecast sensor no longer exists",
-      "description": "{count} configured forecast entity is missing: {entities}\n\nThe controller has fallen back to estimating from the sun's position, which is cruder. Re-add the integration that provided it, or clear it from the options so the warning stops."
+      "title": "A forecast sensor is not reporting",
+      "description": "{count} configured forecast entity has no value:\n\n{entities}\n\nThe controller has fallen back to estimating from the sun's position, which is cruder.\n\nA working forecast on the Energy dashboard does not mean these are working: that comes from the forecast provider's own config entry, not from these sensors. If one is disabled, enable it under Settings → Devices & services → its integration → Entities. If the name is wrong, fix it in this integration's options, or clear it so the warning stops."
     },
     "load_not_measured": {
       "title": "The house consumption sensor has gone quiet",

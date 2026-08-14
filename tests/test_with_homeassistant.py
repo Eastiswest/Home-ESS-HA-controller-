@@ -2409,7 +2409,10 @@ class TestUnusableForecastSensorsAreNamed:
     async def test_a_missing_sensor_is_reported(self, hass):
         coordinator = await self._coordinator(hass, ["sensor.not_here"])
         note = coordinator.diagnostics()["solar_forecast_note"]
-        assert "sensor.not_here" in note and "not found" in note
+        assert "sensor.not_here" in note
+        # Which kind of missing, because each kind has a different fix and
+        # "not found" reads as "you typed it wrong" whichever one it is.
+        assert "no such entity" in note
 
     async def test_an_unknown_state_is_reported(self, hass):
         hass.states.async_set("sensor.energy_production_tomorrow", "unknown", {})
@@ -2539,6 +2542,28 @@ class TestProblemsReachTheRepairsPanel:
         )
         await coordinator.async_refresh()
         assert "soc_unreadable" not in self._issues(hass)
+
+    async def test_a_missing_entity_says_which_kind_of_missing(self, hass):
+        """ "Not found" is true and useless.
+
+        It reads as "you typed it wrong", and a real install spent two days
+        assuming that while the entity sat in the registry, disabled -- with a
+        forecast visibly working on the Energy dashboard, because that comes
+        from the provider's config entry and not from these sensors at all.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        coordinator = await self._coordinator(hass)
+        registry = er.async_get(hass)
+        entry = registry.async_get_or_create(
+            "sensor", "forecast_solar", "unique-today", suggested_object_id="switched_off"
+        )
+        registry.async_update_entity(
+            entry.entity_id, disabled_by=er.RegistryEntryDisabler.USER
+        )
+
+        assert "disabled" in coordinator.why_no_state(entry.entity_id)
+        assert "no such entity" in coordinator.why_no_state("sensor.never_existed")
 
     async def test_a_healthy_install_raises_nothing(self, hass):
         coordinator = await self._coordinator(hass)

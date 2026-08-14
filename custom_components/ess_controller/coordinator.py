@@ -844,6 +844,31 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return last.soc_end
 
+    def why_no_state(self, entity_id: str) -> str:
+        """Why a configured entity has no value, in words that suggest a fix.
+
+        "Not found" is true and useless. It reads as "you typed it wrong" or
+        "your integration is broken", and a real install spent two days assuming
+        the first while the entity sat in the registry, disabled -- with a
+        forecast visibly working on the Energy dashboard, because that comes from
+        the provider's config entry and not from these sensors at all.
+
+        The registry knows the difference between an entity that was never
+        created, one that exists and is switched off, and one whose integration
+        has not loaded. Each has a different fix, so each gets said.
+        """
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            entry = er.async_get(self.hass).async_get(entity_id)
+        except Exception:  # pragma: no cover - diagnostics must not fail
+            return "not found"
+        if entry is None:
+            return "no such entity; check the name"
+        if entry.disabled_by:
+            return f"disabled in Home Assistant (by {entry.disabled_by}); enable it"
+        return "registered but reporting nothing; is its integration loaded?"
+
     def problem_snapshot(self) -> problems.Snapshot:
         """The facts the fault rules are allowed to look at.
 
@@ -852,7 +877,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         unexplained = self.unexplained_charge()
         missing = [
-            entity_id
+            f"{entity_id} — {self.why_no_state(entity_id)}"
             for entity_id in _as_list(self.options.get(CONF_SOLAR_FORECAST_ENTITIES))
             if self.hass.states.get(entity_id) is None
         ]
@@ -1221,7 +1246,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for entity_id in entity_ids:
             state = self.hass.states.get(entity_id)
             if state is None:
-                unusable.append(f"{entity_id} (not found)")
+                unusable.append(f"{entity_id} ({self.why_no_state(entity_id)})")
                 continue
             if parse_solar_forecast_attributes(state.attributes):
                 attribute_sets.append(state.attributes)
