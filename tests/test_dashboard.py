@@ -1249,12 +1249,24 @@ class TestTheBuyColumnSeparatesSunFromGrid:
 
     @staticmethod
     def render(slot: dict) -> str:
+        import datetime as _dt
+
         import jinja2
+
+        # Parsed for real, not stubbed to zero. A stub that returns 0.0 for every
+        # timestamp cannot tell a half-hour from eighteen minutes, which is
+        # precisely the difference that put 0.11 kWh of grid import beside the
+        # words "Solar charge" on a live dashboard.
+        def as_timestamp(value, default=None):
+            try:
+                return _dt.datetime.fromisoformat(str(value)).timestamp()
+            except (TypeError, ValueError):
+                return default
 
         template = _plan_table("sensor.plan", bars=False)
         env = jinja2.Environment(autoescape=False)
         env.globals["state_attr"] = lambda *_: [slot]
-        env.globals["as_timestamp"] = lambda value: 0.0
+        env.globals["as_timestamp"] = as_timestamp
         env.filters["timestamp_custom"] = lambda *_a, **_k: "17:00"
         return env.from_string(template).render()
 
@@ -1297,6 +1309,33 @@ class TestTheBuyColumnSeparatesSunFromGrid:
         # 1 kWh of sun, 0.9 used by the house: only 0.1 spare for the battery.
         rendered = self.render(self.slot(charge_power_kw=0.6, pv_kwh=1.0, load_kwh=0.9))
         assert "0.20" in rendered
+
+    def test_the_half_hour_already_running_is_not_counted_as_a_whole_one(self):
+        """The first row of a live plan is a part-slot, and this assumed thirty
+        minutes for the charge while taking the real, shorter sun and load beside
+        it. On a real dashboard that put 0.11 kWh of grid import against the words
+        "Solar charge"."""
+        rendered = self.render(
+            self.slot(
+                start="2026-08-14T17:12:00+00:00",
+                end="2026-08-14T17:30:00+00:00",
+                action="charge_solar_only",
+                charge_power_kw=0.72,  # 0.216 kWh over eighteen minutes
+                pv_kwh=0.30,
+                load_kwh=0.08,
+            )
+        )
+        assert "0.11" not in rendered
+        assert "—" in rendered
+
+    def test_a_solar_only_charge_never_shows_a_purchase(self):
+        """The optimiser only uses that label when the charge fits in the surplus,
+        so a figure derived by subtraction can only ever contradict it."""
+        rendered = self.render(
+            self.slot(action="charge_solar_only", charge_power_kw=3.6, pv_kwh=0.0)
+        )
+        assert "1.80" not in rendered
+        assert "—" in rendered
 
     def test_the_column_is_explained(self):
         assert "off the grid into the battery" in _plan_table("sensor.plan")

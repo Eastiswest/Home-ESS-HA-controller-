@@ -67,10 +67,6 @@ PLACEHOLDER_VIEW_PATH = "waiting"
 # has to survive being skim-read at the top of a card full of prices.
 OUTAGE_HOLD_MARK = "⚠️"
 
-# Planning slots are half-hours, matching how the tariff is published, so a rate
-# in kW is this many hours' worth of energy.
-SLOT_HOURS = 0.5
-
 # Short names, one per entity key.
 #
 # Home Assistant builds a friendly name by joining the device name to the entity
@@ -853,14 +849,30 @@ def _plan_table(
     # wrong: a slot topping up from the sun and taking 0.05 kWh from the grid was
     # indistinguishable from one importing at full rate. The number is the answer,
     # so the number goes on the page.
+    #
+    # Two things this got wrong, and both put a number beside a label that
+    # contradicted it. The charge was worked out as the rate times half an hour,
+    # but the first row of a live plan is the half-hour *already running* -- at
+    # 17:12 that is eighteen minutes, not thirty -- while the sun and the load
+    # beside it were the real, shorter figures. Subtracting one from the other
+    # invented 0.11 kWh of grid import on a slot labelled "Solar charge". The
+    # duration now comes from the slot.
+    #
+    # And a solar-only charge has bought nothing by construction: the optimiser
+    # only labels it that way when the charge fits inside the surplus. Deriving
+    # a figure by subtraction where the action already states the answer is how
+    # arithmetic gets to argue with the word next to it, so it no longer tries.
     buy_cell = (
+        "{% set hours = (as_timestamp(slot.end, 0) - as_timestamp(slot.start, 0))"
+        " / 3600 %}"
         "{% set rate = slot.charge_power_kw | default(0) | float(0) %}"
-        "{% set charge = rate * " + str(SLOT_HOURS) + " %}"
+        "{% set charge = rate * hours %}"
         "{% set sun = slot.pv_kwh | default(0) | float(0) %}"
         "{% set used = slot.load_kwh | default(0) | float(0) %}"
         "{% set spare = [sun - used, 0] | max %}"
         "{% set bought = [charge - spare, 0] | max %}"
-        "| {% if bought > 0.005 %}{{ '%.2f' | format(bought) }}{% else %}—{% endif %} "
+        "| {% if slot.action == 'charge' and bought > 0.005 %}"
+        "{{ '%.2f' | format(bought) }}{% else %}—{% endif %} "
     )
     bar_cell = (
         (
