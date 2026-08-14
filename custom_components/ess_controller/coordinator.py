@@ -716,17 +716,27 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model = self.learning_store.model
         for slot in completed:
             local = dt_util.as_local(slot.start)
-            model.observe_solar(
-                SolarObservation(
-                    month=local.month,
-                    hour=local.hour,
-                    minute=local.minute,
-                    kwh=slot.pv_kwh,
-                    cloud_cover=slot.cloud_cover,
-                    uv_index=slot.uv_index,
-                    forecast_kwh=slot.forecast_kwh,
+            # Never learn from a signal nobody measured. A slot whose sensor was
+            # unavailable throughout reads zero, and zero is indistinguishable
+            # from a genuinely idle half-hour -- so an inverter switched off for
+            # an afternoon would teach the model that the house uses nothing and
+            # the sun does not shine, at whatever time of day the work happened.
+            if not slot.load_measured and not slot.pv_measured:
+                continue
+            if slot.pv_measured:
+                model.observe_solar(
+                    SolarObservation(
+                        month=local.month,
+                        hour=local.hour,
+                        minute=local.minute,
+                        kwh=slot.pv_kwh,
+                        cloud_cover=slot.cloud_cover,
+                        uv_index=slot.uv_index,
+                        forecast_kwh=slot.forecast_kwh,
+                    )
                 )
-            )
+            if not slot.load_measured:
+                continue
             model.observe_load(
                 LoadObservation(
                     hour=local.hour,

@@ -57,6 +57,23 @@ class CompletedSlot:
     """Whether a grid power sensor was actually contributing. Without one the
     two figures above are zero and must not be read as "imported nothing"."""
 
+    pv_measured: bool = True
+    load_measured: bool = False
+    """Whether the sensor behind each figure was actually reporting.
+
+    Coverage counted the *clock*, not the readings: a sample arriving with the
+    load sensor unavailable still advanced it, so a slot with nothing to measure
+    finished fully covered and reading zero. That is not "the house used
+    nothing", it is "we could not see the house", and the model has no way to
+    tell the two apart -- it would learn a zero-load evening from an inverter
+    that was switched off, which is exactly what happens the day someone takes
+    the battery out to work on it.
+
+    ``load_measured`` defaults false because a load figure with no sensor behind
+    it is the dangerous case; ``pv_measured`` defaults true because a site with
+    no array genuinely does generate nothing.
+    """
+
 
 @dataclass(slots=True)
 class _Bucket:
@@ -66,6 +83,8 @@ class _Bucket:
     grid_import_kwh: float = 0.0
     grid_export_kwh: float = 0.0
     grid_seconds: float = 0.0
+    pv_seconds: float = 0.0
+    load_seconds: float = 0.0
     covered_seconds: float = 0.0
     cloud_samples: list[float] = field(default_factory=list)
     uv_samples: list[float] = field(default_factory=list)
@@ -137,8 +156,10 @@ class SlotAccumulator:
                 hours = seconds / 3600.0
                 if pv_power_kw is not None:
                     self._bucket.pv_kwh += max(float(pv_power_kw), 0.0) * hours
+                    self._bucket.pv_seconds += seconds
                 if load_power_kw is not None:
                     self._bucket.load_kwh += max(float(load_power_kw), 0.0) * hours
+                    self._bucket.load_seconds += seconds
                 if grid_power_kw is not None:
                     # Sign convention: positive is import, negative is export.
                     grid = float(grid_power_kw)
@@ -178,8 +199,14 @@ class SlotAccumulator:
             return None
 
         # Scale a partially covered slot up to a full half-hour equivalent so
-        # a slot with 80% coverage still teaches the right magnitude.
+        # a slot with 80% coverage still teaches the right magnitude. Each signal
+        # is scaled by *its own* coverage: a slot where the grid sensor dropped
+        # out for ten minutes and the load sensor did not should not have both
+        # stretched by the same factor.
         scale = 1.0 / coverage
+        full = _SLOT_LENGTH.total_seconds()
+        pv_scale = full / bucket.pv_seconds if bucket.pv_seconds > 0 else 0.0
+        load_scale = full / bucket.load_seconds if bucket.load_seconds > 0 else 0.0
         cloud = (
             sum(bucket.cloud_samples) / len(bucket.cloud_samples)
             if bucket.cloud_samples
@@ -196,8 +223,8 @@ class SlotAccumulator:
         return CompletedSlot(
             start=bucket.start,
             end=bucket.start + _SLOT_LENGTH,
-            pv_kwh=bucket.pv_kwh * scale,
-            load_kwh=bucket.load_kwh * scale,
+            pv_kwh=bucket.pv_kwh * pv_scale,
+            load_kwh=bucket.load_kwh * load_scale,
             coverage=min(coverage, 1.0),
             cloud_cover=cloud,
             uv_index=uv,
@@ -206,6 +233,8 @@ class SlotAccumulator:
             grid_import_kwh=bucket.grid_import_kwh * scale,
             grid_export_kwh=bucket.grid_export_kwh * scale,
             grid_measured=bucket.grid_seconds > 0,
+            pv_measured=bucket.pv_seconds >= full * MIN_COVERAGE,
+            load_measured=bucket.load_seconds >= full * MIN_COVERAGE,
         )
 
 

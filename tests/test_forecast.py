@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -1550,3 +1550,55 @@ class TestTheTemperatureDialsAreVisible:
         assert hot.climate_uplift_kwh == pytest.approx(4.3, abs=0.01)
         assert hot.kwh == pytest.approx(4.6, abs=0.05)
         assert describe_climate_uplift(hot.kwh, hot.climate_uplift_kwh)
+
+
+class TestAnUnmeasuredHalfHourIsNotAZeroOne:
+    """Coverage counted the clock, not the readings.
+
+    A sample arriving with the load sensor unavailable still advanced coverage,
+    so a slot with nothing to measure finished fully covered and reading zero.
+    Zero is indistinguishable from a genuinely idle half-hour, so an inverter
+    switched off for an afternoon -- to work on the battery, say -- would teach
+    the model that the house uses nothing and the sun does not shine, at
+    whatever time of day the work happened.
+    """
+
+    @staticmethod
+    def _run(samples, minutes=30):
+        acc = SlotAccumulator()
+        start = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+        completed = []
+        for index in range(minutes + 1):
+            pv, load = samples(index)
+            completed += acc.add_sample(
+                start + timedelta(minutes=index), pv, load, grid_power_kw=0.0
+            )
+        return completed
+
+    def test_a_dead_load_sensor_does_not_report_an_idle_house(self):
+        done = self._run(lambda i: (0.5, None), minutes=35)
+        assert done
+        slot = done[0]
+        assert slot.load_kwh == pytest.approx(0.0)
+        # ...but flagged, so nothing downstream reads it as a measurement.
+        assert slot.load_measured is False
+        assert slot.pv_measured is True
+
+    def test_a_live_sensor_is_measured(self):
+        done = self._run(lambda i: (0.5, 0.4), minutes=35)
+        assert done[0].load_measured is True
+        assert done[0].load_kwh == pytest.approx(0.2, abs=0.02)
+
+    def test_a_sensor_that_drops_out_briefly_still_counts(self):
+        """Two minutes of nothing is not a reason to distrust a half-hour."""
+        done = self._run(lambda i: (0.5, None if 10 <= i < 12 else 0.4), minutes=35)
+        assert done[0].load_measured is True
+        # Scaled by its own coverage, so the magnitude survives the gap.
+        assert done[0].load_kwh == pytest.approx(0.2, abs=0.02)
+
+    def test_each_signal_is_scaled_by_its_own_coverage(self):
+        """The grid sensor dropping out must not stretch the load figure."""
+        done = self._run(lambda i: (None if i < 15 else 1.0, 0.4), minutes=35)
+        assert done[0].load_kwh == pytest.approx(0.2, abs=0.02)
+        # Fifteen minutes at 1 kW, scaled to the half-hour it represents.
+        assert done[0].pv_kwh == pytest.approx(0.5, abs=0.05)
