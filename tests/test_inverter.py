@@ -1125,6 +1125,56 @@ class TestTheHandBackUndoesEverything:
         assert hass.states.get("number.solax_battery_minimum_capacity").state == 10.0
         assert hass.states.get("number.solax_battery_charge_max_current").state > 5.0
 
+    def test_the_forced_charge_is_disarmed_not_just_stepped_away_from(self):
+        """Switching the working mode back is not the same as putting the gun down.
+
+        Only the working mode was written on the way back, so the manual selector
+        kept whatever the last forced slot left on it. On a real install it read
+        "Force Charge" in every snapshot across an afternoon, hours after the last
+        planned charge, with the working mode showing Self Use throughout -- and
+        the house reported the battery filling from the grid during a self-use
+        period. Whether the inverter honours it depends on firmware and on its own
+        manual-mode switch, neither of which the controller can see, which is the
+        argument for not leaving it armed rather than against it.
+        """
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_lock_state", "Unlocked", options=["Locked", "Unlocked"]
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.CHARGE, power_kw=1.0, min_soc=94.0))
+        assert hass.states.get("select.solax_manual_mode_select").state == "Force Charge"
+
+        apply(adapter, self._hand_back())
+        assert hass.states.get("select.solax_charger_use_mode").state == "Self Use"
+        assert (
+            hass.states.get("select.solax_manual_mode_select").state
+            == "Stop Charge and Discharge"
+        )
+
+    def test_disarming_costs_nothing_when_it_is_already_stopped(self):
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_manual_mode_select",
+            "Stop Charge and Discharge",
+            options=SOLAX_MANUAL,
+        )
+        adapter = solax_adapter(hass)
+        writes, _ = adapter.plan_writes(self._hand_back())
+        assert not [w for w in writes if w.entity_id == "select.solax_manual_mode_select"]
+
+    def test_a_forced_slot_still_arms_what_it_needs(self):
+        """Disarming is for the hand-back, not for the slot that wants the mode."""
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_lock_state", "Unlocked", options=["Locked", "Unlocked"]
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.DISCHARGE, power_kw=1.0, min_soc=20.0))
+        assert (
+            hass.states.get("select.solax_manual_mode_select").state == "Force Discharge"
+        )
+
     def test_a_raised_reserve_comes_back_down(self):
         hass = build_solax_hass()
         adapter = solax_adapter(hass)

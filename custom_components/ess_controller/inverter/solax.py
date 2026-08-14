@@ -256,6 +256,9 @@ class SolaxModbusAdapter(InverterAdapter):
             # throttled to 1 kW left solar charging capped at 1 kW for the rest of
             # the day.
             writes.extend(self._restore_rate_writes(command, voltage, skipped))
+            writes.extend(
+                self._disarm_manual_writes(manual_entity, manual_options, skipped)
+            )
 
         writes.extend(self._grid_charge_writes(command, action, skipped))
         writes.extend(self._min_soc_writes(command, action, manual, skipped))
@@ -273,6 +276,38 @@ class SolaxModbusAdapter(InverterAdapter):
         if _normalised_state(self.hass, use_mode_entity) == _norm(option):
             return []
         return [_select_write(use_mode_entity, option, ROLE_USE_MODE)]
+
+    def _disarm_manual_writes(
+        self, manual_entity: str | None, manual_options: list[str], skipped: list[str]
+    ) -> list[Write]:
+        """Leave the manual-mode selector on Stop, never on Force Charge.
+
+        Handing the inverter back its own logic switches the working mode to Self
+        Use, and the manual selector is meant to be inert while that is so. It was
+        left wherever the last forced slot put it, and on a real install that was
+        "Force Charge" in every reading over an afternoon -- hours after the last
+        planned charge, with the working mode showing Self Use the whole time.
+
+        Whether the inverter acts on it depends on firmware and on its own
+        "Manual mode control" switch, which is not ours to manage and which the
+        controller cannot see. That is precisely the argument for not leaving a
+        forced grid charge armed behind a mode that is supposed to have retired
+        it: the cost of writing Stop is one select write that mostly does not
+        happen, and the cost of being wrong about the inertness is the pack
+        filling from the grid at whatever the half-hour costs.
+
+        Stop rather than Self Use, because this selector is the *manual* action:
+        if anything does promote it, doing nothing is the safe thing to promote.
+        """
+        if not manual_entity:
+            return []
+        option = pick_option(manual_options, self.OPT_STOP)
+        if option is None:
+            skipped.append("no Stop option on the manual-mode entity to disarm it")
+            return []
+        if _normalised_state(self.hass, manual_entity) == _norm(option):
+            return []
+        return [_select_write(manual_entity, option, ROLE_MANUAL_MODE)]
 
     def _restore_rate_writes(
         self, command: ControlCommand, voltage: float | None, skipped: list[str]
