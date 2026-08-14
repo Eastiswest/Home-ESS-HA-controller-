@@ -29,7 +29,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from . import outage as outage_mod
-from . import recommend
+from . import problems, recommend
 from .adjustments import (
     KIND_FREE_ELECTRICITY,
     KIND_SAVING_SESSION,
@@ -194,6 +194,13 @@ _SLOT = timedelta(minutes=SLOT_MINUTES)
 # was written once and never cleared, short enough not to bloat the file.
 APPLY_HISTORY = 20
 
+# Roles whose absence stops the controller doing something it was asked to do.
+# The measurement roles are optional by design -- an install with no battery
+# power sensor works fine -- so their absence is not a fault.
+CONTROL_ROLES = frozenset(
+    {"use_mode", "manual_mode", "charge_limit", "discharge_limit", "grid_charge"}
+)
+
 # How much of a half-hour's battery gain the sun must fail to explain before the
 # slot is worth reporting. A whole-percent state of charge on a 22 kWh pack
 # quantises to 0.22 kWh, so this is comfortably clear of the rounding.
@@ -251,6 +258,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # meant to explain it showed one clean line. Cheap to keep, and the
         # first thing worth reading when the behaviour and the plan disagree.
         self._apply_history: deque[dict[str, Any]] = deque(maxlen=APPLY_HISTORY)
+        self._raised_problems: set[str] = set()
+        # Consecutive cycles the inverter has looked wrong for. A single
+        # Modbus timeout is not a fault; the same one for a quarter of an
+        # hour is.
+        self._failing_cycles = 0
         self.last_command: ControlCommand | None = None
         self.inverter_state = InverterState()
         self.battery: BatteryReading = BatteryReading()
@@ -591,6 +603,14 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.last_apply.writes:
                 _LOGGER.info("%s: %s", command.action.value, self.last_apply.summary())
 
+        # Counted here rather than in the rules, because "how many cycles has
+        # this looked wrong for" is state and the rules are meant to be pure.
+        if self.inverter_state.available:
+            self._failing_cycles = 0
+        else:
+            self._failing_cycles += 1
+        self._sync_problems()
+
         self._note_slot_state(now, site)
         return self._build_data(now, site)
 
@@ -823,6 +843,74 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if start - (last.start + _SLOT) > self.MAX_SOC_BRIDGE:
             return None
         return last.soc_end
+
+    def problem_snapshot(self) -> problems.Snapshot:
+        """The facts the fault rules are allowed to look at.
+
+        Assembled here rather than reached for by the rules, so every rule can be
+        handed a hand-written case in a test instead of a running instance.
+        """
+        unexplained = self.unexplained_charge()
+        missing = [
+            entity_id
+            for entity_id in _as_list(self.options.get(CONF_SOLAR_FORECAST_ENTITIES))
+            if self.hass.states.get(entity_id) is None
+        ]
+        recent = self.performance_store.log.window(0.25)
+        return problems.Snapshot(
+            controlling=self.settings.controlling,
+            inverter_available=self.inverter_state.available,
+            soc_readable=self.battery.valid,
+            rejected_roles=dict(self._adapter.rejected_roles()),
+            unverified_writes=list(self.last_apply.unverified if self.last_apply else []),
+            unfilled_control_roles=[
+                role
+                for role in self._adapter.describe().get("unfilled_roles", [])
+                if role in CONTROL_ROLES
+            ],
+            disabled_candidates=self._disabled_inverter_entities(),
+            missing_forecast_entities=missing,
+            unexplained_charge_kwh=sum(row["unexplained_kwh"] for row in unexplained),
+            unexplained_charge_cost=sum(row["cost_estimate"] for row in unexplained),
+            quiet_load_slots=sum(1 for r in recent if not r.load_measured),
+            failing_cycles=self._failing_cycles,
+        )
+
+    @callback
+    def _sync_problems(self) -> None:
+        """Raise what is wrong in the Repairs panel, and clear what is not.
+
+        Every fault the controller found today was already visible in its own
+        state and said out loud nowhere: a control it could not find, an inverter
+        charging outside the plan, a forecast entity that had stopped existing.
+        Repairs is where Home Assistant users already look for "something needs
+        attention", so that is where these go.
+
+        Cleared as readily as raised. A fault that lingers after it is fixed
+        teaches people to ignore the panel, which costs more than the warning
+        was ever worth.
+        """
+        from homeassistant.helpers import issue_registry as ir
+
+        found = problems.detect(self.problem_snapshot())
+        wanted = {problem.key for problem in found}
+        for problem in found:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                problem.key,
+                is_fixable=False,
+                severity=(
+                    ir.IssueSeverity.ERROR
+                    if problem.severity == "error"
+                    else ir.IssueSeverity.WARNING
+                ),
+                translation_key=problem.key,
+                translation_placeholders=problem.placeholders or None,
+            )
+        for issue_id in [key for key in self._raised_problems if key not in wanted]:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        self._raised_problems = wanted
 
     def _remember_apply(self, now: datetime, result: ApplyResult) -> None:
         """Keep an apply in the rolling history, timestamped."""

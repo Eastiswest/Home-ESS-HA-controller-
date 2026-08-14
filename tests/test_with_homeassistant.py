@@ -2497,6 +2497,87 @@ class TestTheInvertersOwnReserveIsCompared:
         assert coordinator.diagnostics()["reserve_conflict"]
 
 
+class TestProblemsReachTheRepairsPanel:
+    """Detection is worthless if nothing surfaces it where people look."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _issues(hass):
+        from homeassistant.helpers import issue_registry as ir
+
+        return {
+            issue_id
+            for (domain, issue_id) in ir.async_get(hass).issues
+            if domain == DOMAIN
+        }
+
+    async def test_a_fault_is_raised_and_then_cleared(self, hass):
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.enabled = True
+        coordinator.settings.dry_run = False
+
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=None, soc_source="sensor.gone", capacity_kwh=22.0
+        )
+        await coordinator.async_refresh()
+        assert "soc_unreadable" in self._issues(hass)
+
+        # ...and gone again once the sensor comes back. A fault that lingers
+        # after it is fixed teaches people to ignore the panel.
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.back", capacity_kwh=22.0
+        )
+        await coordinator.async_refresh()
+        assert "soc_unreadable" not in self._issues(hass)
+
+    async def test_a_healthy_install_raises_nothing(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert self._issues(hass) == set()
+
+    async def test_every_key_the_rules_can_emit_has_wording(self, hass):
+        """A repair with no translation renders as its own key, which is worse
+        than silence: it looks like a crash in the thing meant to explain one."""
+        import json
+        import pathlib
+
+        from custom_components.ess_controller.problems import Snapshot, detect
+
+        root = pathlib.Path(__file__).resolve().parents[1] / "custom_components"
+        strings = json.loads((root / DOMAIN / "strings.json").read_text())
+        every = Snapshot(
+            controlling=True,
+            inverter_available=False,
+            soc_readable=False,
+            rejected_roles={"min_soc": "no"},
+            unverified_writes=["use_mode"],
+            unfilled_control_roles=["grid_charge"],
+            disabled_candidates=["select.x"],
+            missing_forecast_entities=["sensor.gone"],
+            unexplained_charge_kwh=1.0,
+            quiet_load_slots=99,
+            failing_cycles=99,
+        )
+        for problem in detect(every):
+            entry = strings["issues"][problem.key]
+            assert entry["title"] and entry["description"]
+            # Every placeholder the rule supplies must be used, and every one
+            # the text asks for must be supplied, or Home Assistant renders the
+            # braces raw.
+            for name in problem.placeholders:
+                assert "{" + name + "}" in entry["title"] + entry["description"], name
+
+
 class TestTheDiagnosticsExplainTheBehaviour:
     """Everything in here was worked out by hand, from a file that held the data.
 

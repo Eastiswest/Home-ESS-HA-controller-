@@ -865,5 +865,39 @@
         }
       }
     }
+  },
+  "issues": {
+    "inverter_unreachable": {
+      "title": "The inverter cannot be reached",
+      "description": "The controller has had no reading from the inverter for several planning cycles, so it has stopped writing to it. The battery keeps doing whatever it was last told.\n\nCheck the inverter integration (SolaX Modbus or equivalent) is loaded and its entities have values. This clears on its own once readings return."
+    },
+    "soc_unreadable": {
+      "title": "The battery charge cannot be read",
+      "description": "The state-of-charge sensor is unavailable, so the controller has stopped writing to the inverter rather than act on a guess. The plan is still shown, but nothing is being applied.\n\nCheck the sensor named as the battery state of charge in the integration's options."
+    },
+    "writes_rejected": {
+      "title": "The inverter refused a setting",
+      "description": "The inverter rejected a write to {controls}. Reported reason: {reason}\n\nThe plan is being made but not fully applied. A wrong register mapping is the usual cause: check that control in the integration's entity mapping."
+    },
+    "writes_not_verified": {
+      "title": "A setting did not stick",
+      "description": "The controller wrote to {controls} and read back a different value. Some inverter dongles accept a write and quietly drop it.\n\nThe plan and the hardware have diverged from here, so the battery may not be doing what the plan says."
+    },
+    "unexplained_grid_charging": {
+      "title": "Something outside the plan is charging the battery",
+      "description": "About {kwh} kWh went into the battery that the sun cannot account for, in half-hours the plan had costed as self-use. Estimated cost: {cost}p.\n\nThis is usually the inverter's own settings: a self-use charge-from-grid option, a charge period, or a manual mode left armed. Those are set on the inverter and are not all visible to Home Assistant."
+    },
+    "forecast_entity_missing": {
+      "title": "A forecast sensor no longer exists",
+      "description": "{count} configured forecast entity is missing: {entities}\n\nThe controller has fallen back to estimating from the sun's position, which is cruder. Re-add the integration that provided it, or clear it from the options so the warning stops."
+    },
+    "load_not_measured": {
+      "title": "The house consumption sensor has gone quiet",
+      "description": "No load reading for {slots} half-hours. Those slots teach the model nothing and are missing from the performance history.\n\nA zero reading and an absent one look identical from here, so the controller declines to learn from them rather than record a house that used nothing."
+    },
+    "control_disabled_in_home_assistant": {
+      "title": "An inverter {noun} is disabled in Home Assistant",
+      "description": "The controller could not find a control for: {roles}\n\nThese entities exist but are disabled, so nothing can see them: {entities}\n\nEnable them under Settings → Devices & services → your inverter integration → Entities, then reload this integration."
+    }
   }
 }
