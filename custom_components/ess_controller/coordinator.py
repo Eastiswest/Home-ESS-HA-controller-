@@ -1074,6 +1074,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 grid_import_kwh=slot.grid_import_kwh,
                 grid_export_kwh=slot.grid_export_kwh,
                 grid_measured=slot.grid_measured,
+                load_measured=slot.load_measured,
                 coverage=slot.coverage,
                 pv_forecast_kwh=mark.get("pv_forecast_kwh"),
                 load_forecast_kwh=mark.get("load_forecast_kwh"),

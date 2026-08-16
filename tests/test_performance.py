@@ -101,6 +101,20 @@ class TestSlotRecordArithmetic:
         assert restored.planned_action == "charge"
         assert restored.controlling is True
 
+    def test_a_record_written_before_the_field_existed_still_loads(self):
+        """History outlives the schema, and the upgrade has to survive it.
+
+        ``load_measured`` arrived after months of records had been written
+        without it. Restored as "not measured" every one of them would be
+        reported as a house nobody can see, so an absent answer reads as
+        measured rather than as a fault.
+        """
+        payload = record(3, import_price=10.0).as_dict()
+        del payload["load_measured"]
+        restored = SlotRecord.from_dict(payload)
+        assert restored is not None
+        assert restored.load_measured is True
+
     def test_unreadable_record_is_dropped_not_raised(self):
         assert SlotRecord.from_dict({"start": "not a timestamp"}) is None
         assert SlotRecord.from_dict({}) is None

@@ -2594,6 +2594,38 @@ class TestProblemsReachTheRepairsPanel:
             if domain == DOMAIN
         }
 
+    async def test_the_rules_survive_a_history_being_there(self, hass):
+        """The whole suite ran the fault rules against an empty log.
+
+        ``quiet_load_slots`` counts records whose load sensor was not reporting,
+        and it read that flag off the wrong object -- the live sample carries it,
+        the stored record did not. A generator over an empty list never
+        evaluates its body, so every test passed and every install with history
+        raised ``AttributeError`` on the first refresh, failed setup, and lost
+        its sidebar. History is not an edge case; it is the normal state of a
+        system that has been running.
+        """
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow()
+        log = coordinator.performance_store.log
+        for index in range(4):
+            log.add(
+                SlotRecord(
+                    start=now - timedelta(minutes=30 * (index + 1)),
+                    import_price=20.0,
+                    load_measured=index < 2,
+                )
+            )
+
+        snapshot = coordinator.problem_snapshot()
+        assert snapshot.quiet_load_slots == 2
+        await coordinator.async_refresh()
+        assert coordinator.last_exception is None
+
     async def test_a_fault_is_raised_and_then_cleared(self, hass):
         from custom_components.ess_controller.inverter.battery import BatteryReading
 

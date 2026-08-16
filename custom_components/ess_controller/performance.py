@@ -80,6 +80,19 @@ class SlotRecord:
     grid_import_kwh: float = 0.0
     grid_export_kwh: float = 0.0
     grid_measured: bool = False
+    load_measured: bool = True
+    """Whether a load sensor was actually reporting for this half-hour.
+
+    Carried through from the completed slot, because the fault rule that asks
+    "is the house being measured at all?" reads records, not live samples, and
+    reading it off the wrong object is what broke setup for anyone who had
+    history to read.
+
+    Defaults *true*, unlike its counterpart on the sample: records written
+    before this field existed have no answer, and treating "unknown" as "not
+    measured" would report every historic half-hour as a fault.
+    """
+
     coverage: float = 1.0
 
     # -- forecasts made for this slot, before it happened -----------------
