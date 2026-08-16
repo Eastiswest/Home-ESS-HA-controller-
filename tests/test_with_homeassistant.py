@@ -1867,6 +1867,78 @@ class TestTheCurrentSlotDoesNotChurn:
         # commitment surviving a change that could have altered the right answer.
         assert coordinator._committed != (slot.start, stale)
 
+    async def test_the_hold_survives_the_plan_being_rebuilt(self, hass):
+        """The case the other tests here could not see, and the one that happened.
+
+        They mutate a slot object and ask again, so ``slot.start`` never moves.
+        In service the plan is rebuilt from scratch every cycle, and its first
+        slot deliberately begins at *now* so the rest of the current half-hour is
+        planned rather than ignored -- 13:32, then 13:38, then 13:43. Keyed on
+        the literal start, the commitment matched none of them and re-committed
+        every five minutes. A real install went charge, solar-only, charge,
+        charge, solar-only inside one half-hour; "charge" is Force Charge, which
+        buys from the grid, so a slot the plan wanted on solar alone spent
+        stretches of itself importing.
+        """
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        first = coordinator._resolve_command(now).action
+
+        # A fresh plan for the same half-hour, six minutes later, wanting
+        # something else -- exactly what the optimiser produces as the first slot
+        # shrinks under it.
+        later = now + timedelta(minutes=6)
+        rebuilt = coordinator.plan.slots[0]
+        rebuilt.start = later
+        rebuilt.action = next(a for a in SlotAction if a is not first)
+
+        assert coordinator._resolve_command(later).action is first
+
+    async def test_the_last_sliver_of_a_slot_changes_nothing(self, hass):
+        """Under two minutes is folded into the next slot rather than planned, so
+        for those two minutes nothing covers now. Falling through to the default
+        handed the inverter a fresh self-use instruction at the tail of every
+        half-hour, undoing what the slot had decided seconds earlier.
+        """
+        from custom_components.ess_controller.sampling import slot_start_for
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        start = coordinator.plan.slots[0].start
+        now = start + timedelta(minutes=1)
+        coordinator._committed = None
+        first = coordinator._resolve_command(now).action
+        coordinator.last_command = coordinator._resolve_command(now)
+
+        # The plan now begins at the next half-hour, leaving the sliver bare.
+        sliver = slot_start_for(now) + timedelta(minutes=29, seconds=30)
+        for slot in coordinator.plan.slots:
+            if slot.start <= sliver:
+                slot.start = sliver + timedelta(seconds=30)
+                slot.end = slot.start + timedelta(minutes=30)
+        assert coordinator.plan.slot_at(sliver) is None
+
+        command = coordinator._resolve_command(sliver)
+        assert command.action is first
+        assert command.reason != "outside plan horizon"
+
+    async def test_a_bare_horizon_still_falls_back_to_self_use(self, hass):
+        """Holding the commitment is for the sliver at the end of a half-hour the
+        plan already decided. A moment with no commitment behind it has nothing
+        to hold, and must still get the safe default.
+        """
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        far = coordinator.plan.slots[-1].end + timedelta(hours=2)
+        command = coordinator._resolve_command(far)
+        assert command.action is SlotAction.SELF_USE
+        assert command.reason == "outside plan horizon"
+
     async def test_an_override_is_never_held_off(self, hass):
         import homeassistant.util.dt as ha_dt
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -2148,6 +2149,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         slot = self.plan.slot_at(now)
         if slot is None:
+            # The last sliver of a half-hour has no slot of its own: anything
+            # under two minutes is folded into the next one rather than planned
+            # separately, so for those two minutes the plan starts in the future
+            # and nothing covers now. Falling through to the default handed the
+            # inverter a fresh self-use instruction at the tail of every slot,
+            # undoing whatever the slot had decided seconds before its end. The
+            # commitment already holds the answer for this half-hour; a sliver is
+            # no reason to change our mind.
+            held = self._committed_for(slot_start_for(now))
+            if held is not None and self.last_command is not None:
+                return replace(self.last_command, action=held)
             return ControlCommand(
                 action=SlotAction.SELF_USE, reason="outside plan horizon", **base
             )
@@ -2239,20 +2251,39 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         override, a strategy lock, a settings change, "Re-plan now" -- clears the
         commitment immediately, because holding a stale decision against an
         explicit instruction would be the same bug in the other direction.
+
+        Keyed on the half-hour, not on ``slot.start``. The horizon's first slot
+        deliberately begins at *now* so the remainder of the current half-hour is
+        planned rather than ignored, which means its start moves forward every
+        cycle -- 13:32, 13:38, 13:43. Comparing literal starts therefore never
+        matched, and this guard re-committed from scratch every five minutes: on
+        a real install the inverter went charge, solar-only, charge, charge,
+        solar-only inside one half-hour, and "charge" means Force Charge, which
+        buys from the grid. Hours of apparently unexplained grid charging in
+        slots the plan wanted on solar alone were this, doing exactly what it was
+        written to prevent.
         """
+        key = slot_start_for(slot.start)
         if self._committed is not None:
             start, action = self._committed
-            if start == slot.start:
+            if start == key:
                 if action is not slot.action:
                     _LOGGER.debug(
                         "Holding %s for the slot from %s; the plan now prefers %s",
                         action.value,
-                        slot.start.isoformat(),
+                        key.isoformat(),
                         slot.action.value,
                     )
                 return action
-        self._committed = (slot.start, slot.action)
+        self._committed = (key, slot.action)
         return slot.action
+
+    def _committed_for(self, half_hour: datetime) -> SlotAction | None:
+        """The action already committed to this half-hour, if there is one."""
+        if self._committed is None:
+            return None
+        start, action = self._committed
+        return action if start == half_hour else None
 
     def clear_commitment(self) -> None:
         """Let the next cycle change the current slot's action again."""
