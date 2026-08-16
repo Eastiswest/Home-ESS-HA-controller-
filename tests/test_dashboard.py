@@ -617,6 +617,69 @@ class TestTemplatesRender:
         assert ACTION_WORDS[IDLE_ON_SOLAR] in sunny, sunny
         assert ACTION_WORDS["idle"] in bought, bought
 
+    def _soc_line(self, attributes, states=None):
+        from custom_components.ess_controller.dashboard import _soc_summary
+
+        return self._render(
+            _soc_summary(entity_id("plan_cost"), entity_id("battery_soc")),
+            attributes,
+            states,
+        )
+
+    def test_the_battery_card_states_now_and_the_end_of_the_plan(self):
+        """The chart's own legend cannot: it takes its figures from the series'
+        entity, and the projection is drawn from the plan sensor, whose state is
+        the horizon's cost in pence. It read "Planned: 58 %" beside a plan that
+        wanted 94% and a pack holding 92% -- a cost, in the wrong unit, read as
+        the controller being thirty-six points adrift of its own plan.
+        """
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "slots": [
+                    {
+                        "start": "2026-02-18T00:00:00+00:00",
+                        "end": "2026-02-18T00:30:00+00:00",
+                        "soc_end": 94.0,
+                    },
+                    {
+                        "start": "2026-02-18T00:30:00+00:00",
+                        "end": "2026-02-18T01:00:00+00:00",
+                        "soc_end": 21.0,
+                    },
+                ]
+            }
+        }
+        line = self._soc_line(attributes, {entity_id("battery_soc"): "92.4"})
+        assert "Battery now **92%**" in line
+        # The *end* of the plan, not the middle and not a cost.
+        assert "plan ends at **21%**" in line
+        assert "01:00" in line
+        assert "58" not in line
+
+    def test_an_unreadable_state_of_charge_does_not_blank_the_card(self):
+        """An unreadable SoC is a fault this integration exists to report, so it
+        is the worst possible moment for the card describing the battery to
+        raise instead of render."""
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "slots": [
+                    {
+                        "start": "2026-02-18T00:00:00+00:00",
+                        "end": "2026-02-18T00:30:00+00:00",
+                        "soc_end": 21.0,
+                    }
+                ]
+            }
+        }
+        line = self._soc_line(attributes, {entity_id("battery_soc"): "unavailable"})
+        assert "Battery now" not in line
+        assert "plan ends at **21%**" in line
+
+    def test_no_plan_yet_says_so_rather_than_showing_nothing(self):
+        assert "waiting for prices" in self._soc_line({entity_id("plan_cost"): {}})
+
     def test_a_hold_with_no_import_figure_at_all_still_reads_sensibly(self):
         """Older plans, and diagnostics captures, carry no import column."""
         plan = entity_id("plan_cost")

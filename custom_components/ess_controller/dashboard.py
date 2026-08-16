@@ -719,6 +719,14 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
     Deliberately its own chart rather than a second axis on the price chart. A
     percentage and a price share no scale, and a chart with two y-axes invites
     reading a crossing point that means nothing.
+
+    The legend shows names only. Its figures come from the series' *entity*, and
+    the projection is drawn from the plan sensor -- whose state is the horizon's
+    cost in pence. So the legend read "Planned: 58 %" while the plan wanted 94%
+    and the pack held 92%: a cost, in the wrong unit, presented as the headline
+    disagreement between plan and reality. The two numbers worth having are the
+    charge now and where the plan ends, and both are stated underneath where
+    they can be worked out correctly.
     """
     series: list[dict[str, Any]] = [
         {
@@ -730,6 +738,7 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
             "float_precision": 0,
             "color": SOC_COLOUR,
             "stroke_width": 2,
+            "show": {"legend_value": False},
             "data_generator": (
                 "return (entity.attributes.slots || []).map(s => "
                 "[new Date(s.end).getTime(), s.soc_end]);"
@@ -747,6 +756,7 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
                 "unit": "%",
                 "float_precision": 0,
                 "stroke_width": 2,
+                "show": {"legend_value": False},
                 "extend_to": "now",
             }
         )
@@ -767,6 +777,43 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
         "series": series,
         "grid_options": {"columns": "full"},
     }
+
+
+def _soc_summary(plan_entity: str, soc_entity: str | None) -> str:
+    """The charge now, and where the plan leaves it, said in words.
+
+    Written here rather than left to the chart's legend because the legend takes
+    its figures from the series' entity, and the projection is drawn from the
+    plan sensor -- a cost in pence. It read "Planned: 58 %" against a plan that
+    wanted 94%, which is not a small mislabelling: it invites the conclusion
+    that the controller is thirty-six points adrift of its own plan.
+
+    Both figures are taken from the same slot list the line is drawn from, so
+    the words and the picture cannot disagree.
+    """
+    # Every figure is guarded. A state of "unknown" is not an exotic case here:
+    # an unreadable state of charge is one of the faults this integration exists
+    # to notice, and a card that raises on it would go blank at exactly the
+    # moment it had something to say.
+    now = (
+        "{% set soc = states('" + soc_entity + "') | float(-1) %}"
+        "{% if soc >= 0 %}Battery now **{{ soc | round(0) | int }}%** · {% endif %}"
+        if soc_entity
+        else ""
+    )
+    return (
+        "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
+        "{% if not slots %}No plan yet — waiting for prices."
+        "{% else %}"
+        "{% set last = slots | last %}"
+        "{% set ends = last.soc_end | float(-1) %}"
+        "{% set stamp = as_timestamp(last.end | default(last.start, true)) %}"
+        + now
+        + "{% if ends >= 0 %}plan ends at **{{ ends | round(0) | int }}%**"
+        "{% if stamp %} ({{ stamp | timestamp_custom('%H:%M %a', true) }})"
+        "{% endif %}{% else %}no end-of-plan charge to show yet{% endif %}"
+        "{% endif %}"
+    )
 
 
 def _plan_sparkline(plan_entity: str) -> str:
@@ -1214,7 +1261,10 @@ def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]
                 [
                     _apex_soc_chart(plan, resolved.get("battery_soc"))
                     if plan and charts
-                    else None
+                    else None,
+                    _markdown(_soc_summary(plan, resolved.get("battery_soc")))
+                    if plan
+                    else None,
                 ],
             ),
             _section(
