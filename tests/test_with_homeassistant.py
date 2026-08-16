@@ -2626,6 +2626,27 @@ class TestProblemsReachTheRepairsPanel:
         await coordinator.async_refresh()
         assert coordinator.last_exception is None
 
+    async def test_a_broken_rule_does_not_stop_the_battery_being_run(self, hass):
+        """The lesson of the outage, rather than the bug that caused it.
+
+        Fault detection is called from the middle of the cycle that plans and
+        drives the inverter, so an AttributeError in a *warning* stopped the
+        controller, failed the config entry and took the dashboard off the
+        sidebar. A house on a 45p evening needs its battery run far more than it
+        needs to be told about a missing sensor.
+        """
+        coordinator = await self._coordinator(hass)
+
+        def _explode():
+            raise RuntimeError("a rule with a typo in it")
+
+        coordinator.problem_snapshot = _explode
+        await coordinator.async_refresh()
+
+        assert coordinator.last_exception is None
+        assert coordinator.last_update_success is True
+        assert coordinator.plan is not None
+
     async def test_a_fault_is_raised_and_then_cleared(self, hass):
         from custom_components.ess_controller.inverter.battery import BatteryReading
 

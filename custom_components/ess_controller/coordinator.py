@@ -947,10 +947,22 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Cleared as readily as raised. A fault that lingers after it is fixed
         teaches people to ignore the panel, which costs more than the warning
         was ever worth.
+
+        Nothing in here may take the cycle down with it. This code exists to
+        *report* faults, and it is called from the middle of the update that
+        plans and drives the battery -- so a bug in a warning stopped the
+        controller dead, failed the whole entry, and took the dashboard off the
+        sidebar. A house on a 45p tariff needs its battery run correctly far
+        more than it needs to be told about a missing sensor, and the one must
+        never be able to cost the other.
         """
         from homeassistant.helpers import issue_registry as ir
 
-        found = problems.detect(self.problem_snapshot())
+        try:
+            found = problems.detect(self.problem_snapshot())
+        except Exception:  # a warning must never stop the control loop
+            _LOGGER.exception("Fault detection failed; continuing without it")
+            return
         wanted = {problem.key for problem in found}
         for problem in found:
             ir.async_create_issue(
