@@ -394,9 +394,17 @@ def unmatched_candidates(
             continue
         if entity_id in taken or _is_our_own(object_id):
             continue
-        if wanted_prefix and not object_id.startswith(wanted_prefix):
-            continue
         if not any(word in object_id for word in CANDIDATE_WORDS):
+            continue
+        # Prefix mismatches are *shown*, marked, not filtered out. This list
+        # exists to answer "the control is plainly there, why has nothing found
+        # it?", and a wrong prefix is one of the two reasons it did not -- so
+        # applying the same prefix that caused the miss guarantees the list
+        # cannot explain it. A real install's grid-charge control was invisible
+        # to every list the controller could produce, and was therefore reported
+        # as a control the inverter did not have.
+        if wanted_prefix and not object_id.startswith(wanted_prefix):
+            found.append(f"{entity_id} (does not match the prefix '{prefix}')")
             continue
         found.append(entity_id)
     found.sort()

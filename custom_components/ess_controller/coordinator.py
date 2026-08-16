@@ -259,6 +259,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # first thing worth reading when the behaviour and the plan disagree.
         self._apply_history: deque[dict[str, Any]] = deque(maxlen=APPLY_HISTORY)
         self._raised_problems: set[str] = set()
+        self._last_site: SiteState | None = None
         # Consecutive cycles the inverter has looked wrong for. A single
         # Modbus timeout is not a fault; the same one for a quarter of an
         # hour is.
@@ -611,6 +612,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._failing_cycles += 1
         self._sync_problems()
 
+        self._last_site = site
         self._note_slot_state(now, site)
         return self._build_data(now, site)
 
@@ -801,7 +803,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         mark["controlling"] = self.settings.controlling
         planned = self.plan.slot_at(now) if self.plan else None
         if planned is not None:
-            mark["planned_action"] = planned.action.value
+            # First value wins, like soc_start. Overwriting each cycle recorded
+            # the plan's *last* view of a half-hour against the action committed
+            # at its *start* -- and the commitment exists precisely to ignore the
+            # plan changing its mind inside a slot. So the two disagreed by
+            # construction, and "plan followed 76%" was measuring churn the
+            # controller had deliberately declined to act on.
+            mark.setdefault("planned_action", planned.action.value)
         if self.last_command is not None:
             mark["applied_action"] = self.last_command.action.value
 
@@ -843,6 +851,30 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if start - (last.start + _SLOT) > self.MAX_SOC_BRIDGE:
             return None
         return last.soc_end
+
+    def _live_power(self) -> dict[str, Any]:
+        """The four live flows, from wherever they are actually configured.
+
+        Wired to the inverter adapter's own roles first time round, which on a
+        real install reported four nulls: those roles were unfilled because the
+        site's power sensors are configured separately, in the integration's own
+        options. The figures existed, were read every cycle, and the file that
+        was meant to show them said nothing on all four counts.
+        """
+        site = self._last_site
+        state = self.inverter_state
+        if site is None:
+            return state.power_summary()
+        # The site reading has already fallen back to the adapter's roles for
+        # anything the options do not configure, so it is the better of the two
+        # by construction -- except on the grid, where a missing sensor is
+        # recorded as zero and flagged, and zero must not be published as fact.
+        return {
+            "battery_kw": site.battery_power_kw,
+            "pv_kw": site.pv_power_kw,
+            "grid_kw": site.grid_power_kw if site.grid_valid else state.grid_power_kw,
+            "load_kw": site.load_power_kw,
+        }
 
     def why_no_state(self, entity_id: str) -> str:
         """Why a configured entity has no value, in words that suggest a fix.
@@ -893,7 +925,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for role in self._adapter.describe().get("unfilled_roles", [])
                 if role in CONTROL_ROLES
             ],
-            disabled_candidates=self._disabled_inverter_entities(),
+            disabled_candidates=self.disabled_inverter_controls(),
             missing_forecast_entities=missing,
             unexplained_charge_kwh=sum(row["unexplained_kwh"] for row in unexplained),
             unexplained_charge_cost=sum(row["cost_estimate"] for row in unexplained),
@@ -2504,13 +2536,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         plan believed it had no way to set them, when in truth they were one tick
         box away. Worth naming precisely, because the fix is on the user's side and
         takes seconds once you know which entities to enable.
+
+        Entities that fail the configured prefix are *marked* rather than dropped,
+        for the same reason the candidate list marks them: a wrong prefix is the
+        other reason a control goes unbound, and filtering this list by that same
+        prefix guarantees it cannot say so.
         """
-        from homeassistant.helpers import entity_registry as er
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+        except Exception:  # pragma: no cover - diagnostics must not fail
+            return []
 
         from .inverter.roles import CANDIDATE_WORDS, _is_our_own
 
-        registry = er.async_get(self.hass)
-        prefix = (self.options.get(CONF_INVERTER_PREFIX) or "").strip().lower()
+        raw = str(self.options.get(CONF_INVERTER_PREFIX) or "")
+        prefix = raw.strip().lower().replace(" ", "_").replace("-", "_")
         found: list[str] = []
         for entry in registry.entities.values():
             if entry.disabled_by is None or entry.domain not in (
@@ -2519,12 +2561,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "select",
             ):
                 continue
-            object_id = entry.entity_id.partition(".")[2]
+            object_id = entry.entity_id.partition(".")[2].lower()
             if _is_our_own(object_id):
                 continue
-            if prefix and not object_id.startswith(prefix):
-                continue
             if not any(word in object_id for word in CANDIDATE_WORDS):
+                continue
+            if prefix and not object_id.startswith(prefix):
+                found.append(f"{entry.entity_id} (does not match the prefix '{raw}')")
                 continue
             found.append(entry.entity_id)
         return sorted(found)[:60]
@@ -2596,46 +2639,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.recommendation.as_dict() if self.recommendation else None
             ),
             "apply_history": list(self._apply_history),
-            "live_power": self.inverter_state.power_summary(),
+            "live_power": self._live_power(),
             "unexplained_charge": self.unexplained_charge(),
             "slot_coverage": self.slot_coverage(),
-            "disabled_inverter_entities": self._disabled_inverter_entities(),
         }
-
-    def _disabled_inverter_entities(self) -> list[str]:
-        """Inverter entities that exist but are switched off in Home Assistant.
-
-        Discovery reads ``hass.states``, and a disabled entity has no state, so
-        it is invisible to both the role matcher and the candidate list. That is
-        exactly where a real install's grid-charge control was hiding: present in
-        the registry, absent from every list the controller could produce, and so
-        reported as a control the inverter did not have.
-
-        Listing them turns "your inverter has no such control" into "your
-        inverter has one and it is disabled", which is a fix rather than a dead
-        end.
-        """
-        try:
-            from homeassistant.helpers import entity_registry as er
-
-            registry = er.async_get(self.hass)
-        except Exception:  # pragma: no cover - diagnostics must not fail
-            return []
-        raw = str(self.options.get(CONF_INVERTER_PREFIX) or "")
-        prefix = raw.strip().lower().replace(" ", "_").replace("-", "_")
-        found: list[str] = []
-        for entry in registry.entities.values():
-            if not entry.disabled_by or entry.domain not in (
-                "switch",
-                "select",
-                "number",
-            ):
-                continue
-            object_id = entry.entity_id.partition(".")[2]
-            if prefix and not object_id.lower().startswith(prefix):
-                continue
-            found.append(f"{entry.entity_id} (disabled by {entry.disabled_by})")
-        return sorted(found)[:40]
 
 
 def _as_list(value: Any) -> list[str]:

@@ -2714,6 +2714,123 @@ class TestTheDiagnosticsExplainTheBehaviour:
         power = coordinator.diagnostics()["live_power"]
         assert set(power) == {"battery_kw", "pv_kw", "grid_kw", "load_kw"}
 
+    async def test_the_live_flows_come_from_the_configured_sensors(self, hass):
+        """Read from the adapter's roles alone, all four came back null.
+
+        The site's power sensors are configured in *these* options, not on the
+        inverter adapter, so on a real install those roles were simply unfilled.
+        The figures were read every cycle and the file that existed to show them
+        said nothing on all four counts -- during an argument about where the
+        power was going.
+        """
+        from custom_components.ess_controller.const import (
+            CONF_GRID_POWER_ENTITY,
+            CONF_LOAD_POWER_ENTITY,
+            CONF_PV_POWER_ENTITY,
+        )
+
+        hass.states.async_set("sensor.house_pv", "2.4", {"unit_of_measurement": "kW"})
+        hass.states.async_set("sensor.house_load", "0.9", {"unit_of_measurement": "kW"})
+        hass.states.async_set("sensor.house_grid", "-1.1", {"unit_of_measurement": "kW"})
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_PV_POWER_ENTITY: "sensor.house_pv",
+                CONF_LOAD_POWER_ENTITY: "sensor.house_load",
+                CONF_GRID_POWER_ENTITY: "sensor.house_grid",
+            },
+        )
+        await hass.async_block_till_done()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_refresh()
+
+        power = coordinator.diagnostics()["live_power"]
+        assert power["pv_kw"] == pytest.approx(2.4)
+        assert power["load_kw"] == pytest.approx(0.9)
+        assert power["grid_kw"] == pytest.approx(-1.1)
+
+    async def test_an_unmeasured_grid_is_null_not_zero(self, hass):
+        """Nothing configured for the grid is recorded as zero and flagged.
+
+        Publishing that zero would read as "balanced", which is the one thing it
+        does not mean.
+        """
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert coordinator._last_site is not None
+        assert coordinator._last_site.grid_valid is False
+        assert coordinator.diagnostics()["live_power"]["grid_kw"] is None
+
+    async def test_the_plan_is_judged_on_what_it_said_at_the_time(self, hass):
+        """The commitment is made at the top of the half-hour and deliberately
+        ignores the plan changing its mind inside it. Recording the plan's *last*
+        view against that commitment therefore compares two things that disagree
+        by construction: "plan followed 76%" was measuring churn the controller
+        had already decided not to act on.
+        """
+        from custom_components.ess_controller.models import SlotAction
+        from custom_components.ess_controller.sampling import slot_start_for
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        # A minute past the top of the current half-hour, so the mark's key and
+        # the slot the plan answers for are the same one whatever the clock says.
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        key = slot_start_for(now)
+        site = coordinator._last_site
+        coordinator._note_slot_state(now, site)
+        first = coordinator._slot_marks[key]["planned_action"]
+
+        # The plan changes its mind halfway through the half-hour.
+        other = (
+            SlotAction.CHARGE if first != SlotAction.CHARGE.value else SlotAction.SELF_USE
+        )
+        for slot in coordinator.plan.slots[:2]:
+            slot.action = other
+        coordinator._note_slot_state(now + timedelta(minutes=10), site)
+
+        assert coordinator._slot_marks[key]["planned_action"] == first
+
+    async def test_a_control_hidden_by_the_prefix_is_still_named(self, hass):
+        """The two lists that answer "why has nothing found it?" both filtered on
+        the configured prefix -- so a control missed *because of* that prefix was
+        invisible to both, and got reported as a control the inverter lacked.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        from custom_components.ess_controller.const import CONF_INVERTER_PREFIX
+
+        coordinator = await self._coordinator(hass)
+        registry = er.async_get(hass)
+        registered = registry.async_get_or_create(
+            "select",
+            "solax_modbus",
+            "unique_night_charge",
+            suggested_object_id="solax1_inverter_selfuse_night_charge",
+        )
+        registry.async_update_entity(
+            registered.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+        )
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_INVERTER_PREFIX: "wrongprefix"}
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+
+        listed = coordinator.disabled_inverter_controls()
+        named = [line for line in listed if "night_charge" in line]
+        assert named, listed
+        assert "does not match the prefix 'wrongprefix'" in named[0]
+        assert coordinator.diagnostics()["disabled_inverter_controls"] == listed
+
 
 class TestAnUnjustifiedHoldNeverReachesTheInverter:
     """A hold shuts the battery. It has to be able to say why, at the write.

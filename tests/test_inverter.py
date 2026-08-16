@@ -372,6 +372,22 @@ class TestDiscovery:
         assert len(listed) == 61
         assert "more not shown" in listed[-1]
 
+    def test_a_wrong_prefix_is_shown_rather_than_hidden(self):
+        """The prefix is one of the two reasons a control goes unbound, and
+        filtering the candidate list by that same prefix guarantees the list
+        cannot say so. On a real install the grid-charge control was absent from
+        every list the controller could produce, and was therefore reported as a
+        control the inverter did not have.
+        """
+        from custom_components.ess_controller.inverter.roles import unmatched_candidates
+
+        hass = build_solax_hass()
+        hass.states.set("select.solax1_inverter_selfuse_night_charge", "Disabled")
+        listed = unmatched_candidates(hass, {}, prefix="solax9")
+        named = [entry for entry in listed if "night_charge" in entry]
+        assert named
+        assert "does not match the prefix 'solax9'" in named[0]
+
     def test_a_short_candidate_list_says_nothing_extra(self):
         from custom_components.ess_controller.inverter.roles import unmatched_candidates
 
