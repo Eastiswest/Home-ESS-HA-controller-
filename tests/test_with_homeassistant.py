@@ -2626,6 +2626,41 @@ class TestProblemsReachTheRepairsPanel:
         await coordinator.async_refresh()
         assert coordinator.last_exception is None
 
+    async def test_a_fault_true_only_at_startup_never_reaches_the_panel(self, hass):
+        """A restart brings the integration up before the entities it reads.
+
+        For the first half-minute there is no state of charge and no forecast
+        sensor, and the rules are right about both -- so the panel filled with
+        errors nobody had caused and emptied again unprompted. Alarms that clear
+        themselves are how people learn to ignore an alarm.
+        """
+        from custom_components.ess_controller import problems
+
+        coordinator = await self._coordinator(hass)
+        broken = problems.Snapshot(controlling=True, soc_readable=False)
+        coordinator.problem_snapshot = lambda: broken
+
+        for _ in range(problems.PERSIST_CYCLES - 1):
+            coordinator._sync_problems()
+        assert self._issues(hass) == set(), "raised before it had persisted"
+
+        # Everything populates, as it does once the sensors arrive.
+        coordinator.problem_snapshot = lambda: problems.Snapshot(controlling=True)
+        coordinator._sync_problems()
+        assert self._issues(hass) == set()
+
+    async def test_a_fault_that_lasts_is_still_raised(self, hass):
+        """The damping must not become a way of never saying anything."""
+        from custom_components.ess_controller import problems
+
+        coordinator = await self._coordinator(hass)
+        broken = problems.Snapshot(controlling=True, soc_readable=False)
+        coordinator.problem_snapshot = lambda: broken
+
+        for _ in range(problems.PERSIST_CYCLES):
+            coordinator._sync_problems()
+        assert "soc_unreadable" in self._issues(hass)
+
     async def test_a_broken_rule_does_not_stop_the_battery_being_run(self, hass):
         """The lesson of the outage, rather than the bug that caused it.
 
@@ -2657,7 +2692,13 @@ class TestProblemsReachTheRepairsPanel:
         coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
             soc=None, soc_source="sensor.gone", capacity_kwh=22.0
         )
-        await coordinator.async_refresh()
+        # Several cycles, because nothing is reported until it has lasted: at
+        # boot the sensors arrive after the integration does, and a fault that
+        # is true for thirty seconds is not one.
+        from custom_components.ess_controller.problems import PERSIST_CYCLES
+
+        for _ in range(PERSIST_CYCLES):
+            await coordinator.async_refresh()
         assert "soc_unreadable" in self._issues(hass)
 
         # ...and gone again once the sensor comes back. A fault that lingers
@@ -2716,7 +2757,6 @@ class TestProblemsReachTheRepairsPanel:
             missing_forecast_entities=["sensor.gone"],
             unexplained_charge_kwh=1.0,
             quiet_load_slots=99,
-            failing_cycles=99,
         )
         for problem in detect(every):
             entry = strings["issues"][problem.key]

@@ -13,8 +13,15 @@ Two rules shape what gets in:
 * **Only what a person can act on.** "The forecast is uncertain" is not a fault,
   it is Tuesday. "The entity you configured no longer exists" is.
 * **Only what persists.** A Modbus write that fails once and succeeds on the
-  retry is noise; the same write failing for half an hour is a fault. Detectors
-  that watch flaky things take a run length rather than a single reading.
+  retry is noise; the same write failing for half an hour is a fault. Persistence
+  is applied *once, to everything*, by the caller: a rule says only what is wrong
+  right now, and a fault has to be wrong for ``PERSIST_CYCLES`` cycles running
+  before anybody is told. That used to be a counter threaded through a single
+  rule, which left every other rule firing on its first look -- so a restart
+  raised "the state of charge cannot be read" and "your forecast entity is
+  missing" in the half-minute before those sensors had published anything, and
+  cleared them again unprompted. Transient by construction, alarming by
+  accident.
 
 Home Assistant-free on purpose: this takes a plain snapshot of facts and returns
 plain descriptions, so every rule can be tested against a hand-written case
@@ -26,11 +33,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# How many consecutive cycles a flaky symptom must persist before it is a fault.
+# How many consecutive cycles a symptom must persist before it is a fault.
 # The coordinator plans every five minutes, so three is a quarter of an hour --
-# long enough to ride out a Modbus timeout or a restarting integration, short
-# enough that a real fault is named while the person who caused it is still near
-# the inverter.
+# long enough to ride out a Modbus timeout, a restarting integration, or a whole
+# startup's worth of entities arriving one by one, and short enough that a real
+# fault is named while the person who caused it is still near the inverter.
+#
+# Applied by the caller to every rule alike, so a rule never has to count for
+# itself and cannot be forgotten when the next one is written.
 PERSIST_CYCLES = 3
 
 # How long a load sensor may report nothing before the silence is the fault
@@ -77,8 +87,6 @@ class Snapshot:
     unexplained_charge_kwh: float = 0.0
     unexplained_charge_cost: float = 0.0
     quiet_load_slots: int = 0
-    failing_cycles: int = 0
-    """How many consecutive cycles the inverter has looked wrong for."""
 
 
 def _plural(count: int, one: str, many: str) -> str:
@@ -90,11 +98,7 @@ def detect(state: Snapshot) -> list[Problem]:
     found: list[Problem] = []
 
     # -- it has stopped controlling -------------------------------------
-    if (
-        state.controlling
-        and not state.inverter_available
-        and state.failing_cycles >= PERSIST_CYCLES
-    ):
+    if state.controlling and not state.inverter_available:
         found.append(Problem("inverter_unreachable", "error"))
 
     if state.controlling and not state.soc_readable:

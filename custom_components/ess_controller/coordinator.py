@@ -261,10 +261,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._apply_history: deque[dict[str, Any]] = deque(maxlen=APPLY_HISTORY)
         self._raised_problems: set[str] = set()
         self._last_site: SiteState | None = None
-        # Consecutive cycles the inverter has looked wrong for. A single
-        # Modbus timeout is not a fault; the same one for a quarter of an
-        # hour is.
-        self._failing_cycles = 0
+        # Consecutive cycles each fault has been true for. A single Modbus
+        # timeout is not a fault; the same one for a quarter of an hour is, and
+        # so is anything else that outlasts the entities arriving at boot.
+        self._problem_runs: dict[str, int] = {}
         self.last_command: ControlCommand | None = None
         self.inverter_state = InverterState()
         self.battery: BatteryReading = BatteryReading()
@@ -605,12 +605,6 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.last_apply.writes:
                 _LOGGER.info("%s: %s", command.action.value, self.last_apply.summary())
 
-        # Counted here rather than in the rules, because "how many cycles has
-        # this looked wrong for" is state and the rules are meant to be pure.
-        if self.inverter_state.available:
-            self._failing_cycles = 0
-        else:
-            self._failing_cycles += 1
         self._sync_problems()
 
         self._last_site = site
@@ -931,7 +925,6 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             unexplained_charge_kwh=sum(row["unexplained_kwh"] for row in unexplained),
             unexplained_charge_cost=sum(row["cost_estimate"] for row in unexplained),
             quiet_load_slots=sum(1 for r in recent if not r.load_measured),
-            failing_cycles=self._failing_cycles,
         )
 
     @callback
@@ -963,6 +956,24 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:  # a warning must never stop the control loop
             _LOGGER.exception("Fault detection failed; continuing without it")
             return
+
+        # Nothing is reported until it has been true for several cycles running.
+        # A restart brings the integration up before the entities it reads, so
+        # the first look round finds no state of charge and no forecast sensor
+        # and is right about both, for about half a minute. Raising on that puts
+        # errors in front of someone who has done nothing wrong and clears them
+        # again unprompted, which teaches people to ignore the panel -- the one
+        # thing it cannot afford.
+        self._problem_runs = {
+            problem.key: self._problem_runs.get(problem.key, 0) + 1
+            for problem in found
+        }
+        found = [
+            problem
+            for problem in found
+            if self._problem_runs[problem.key] >= problems.PERSIST_CYCLES
+        ]
+
         wanted = {problem.key for problem in found}
         for problem in found:
             ir.async_create_issue(

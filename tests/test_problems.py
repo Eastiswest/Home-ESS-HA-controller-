@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from custom_components.ess_controller.problems import (
-    PERSIST_CYCLES,
     QUIET_LOAD_SLOTS,
     Snapshot,
     detect,
@@ -26,25 +25,17 @@ class TestNothingIsWrong:
             soc_readable=False,
             rejected_roles={"min_soc": "rejected"},
             unverified_writes=["use_mode"],
-            failing_cycles=99,
         )
         assert detect(state) == []
 
 
 class TestItHasStoppedControlling:
-    def test_a_lost_inverter_is_an_error_once_it_persists(self):
-        state = Snapshot(
-            controlling=True, inverter_available=False, failing_cycles=PERSIST_CYCLES
-        )
+    def test_a_lost_inverter_is_an_error(self):
+        """Whether it has lasted long enough to mention is the caller's business:
+        a rule says what is wrong now, and every rule is damped the same way."""
+        state = Snapshot(controlling=True, inverter_available=False)
         assert "inverter_unreachable" in keys(state)
         assert detect(state)[0].severity == "error"
-
-    def test_a_blip_is_not_a_fault(self):
-        """A Modbus timeout that clears on the retry is Tuesday, not a repair."""
-        state = Snapshot(
-            controlling=True, inverter_available=False, failing_cycles=PERSIST_CYCLES - 1
-        )
-        assert "inverter_unreachable" not in keys(state)
 
     def test_an_unreadable_battery_is_named(self):
         """The controller refuses to write on a guess, and says nothing about it.
@@ -138,7 +129,6 @@ class TestTheKeysAreStable:
             missing_forecast_entities=["sensor.gone"],
             unexplained_charge_kwh=1.0,
             quiet_load_slots=QUIET_LOAD_SLOTS,
-            failing_cycles=PERSIST_CYCLES,
         )
         problems = detect(state)
         assert len(problems) == 8
