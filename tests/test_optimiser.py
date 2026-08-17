@@ -1613,3 +1613,72 @@ class TestASliverFromTheGridIsNotWorthAModeChange:
         plan = self.plan(0.001)
         assert plan.slots
         assert not plan.infeasible
+
+
+class TestItBuysCheapBeforeDear:
+    """Ordering, not merely quantity: the two are decided by different things.
+
+    *Whether* to buy is a price-versus-value question the sweep answers well at
+    almost any resolution. *Which* half-hour to buy in turns on differences of a
+    fraction of a penny between neighbouring levels -- so the level grid, not the
+    economics, governs it, and too coarse a grid gets it wrong in a way that is
+    plainly visible on the dashboard.
+
+    A real horizon: the plan bought 1.18 kWh in half-hours dearer than 22p while
+    leaving room unused in half-hours at 20.9p and 21.3p an hour later, and
+    published "grid charge at 23.9p" above a whole morning of cheaper slots. On
+    that horizon 400 levels cost 225.4p; a finer grid cost 214.3p and bought
+    nothing dear. The prices and the small, uneven solar and load below are that
+    morning, which is what makes this reproduce it -- a tidy horizon of flat load
+    and two clean price bands does not.
+    """
+
+    PRICES = [23.9, 23.7, 22.3, 21.2, 20.7, 21.3, 21.6, 20.9, 20.8, 20.5, 21.3,
+              20.9, 21.7, 22.4] + [45.0] * 22
+    PV = [0.31, 0.31, 0.38, 0.42, 0.45, 0.44, 0.43, 0.37, 0.47, 0.58, 0.52, 0.52,
+          0.56, 0.46] + [0.2] * 22
+    LOAD = [0.27, 0.26, 0.57, 0.38, 0.24, 0.65, 0.28, 0.26, 0.32, 0.31, 0.37,
+            0.48, 0.31, 0.30] + [0.5] * 22
+
+    def plan(self):
+        slots = []
+        for index, price in enumerate(self.PRICES):
+            start = START + timedelta(minutes=30 * index)
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=self.PV[index],
+                    load_kwh=self.LOAD[index],
+                )
+            )
+        battery = make_battery(
+            min_soc=20.0, max_charge_kw=6.0, max_discharge_kw=6.0,
+            cycle_cost_per_kwh=1.147,
+        )
+        return optimise(slots, 32.6, battery, make_grid(allow_export=False))
+
+    def test_the_battery_is_not_filled_dear_while_cheap_slots_have_room(self):
+        plan = self.plan()
+        dear = sum(
+            s.grid_import_kwh
+            for s in plan.slots
+            if s.action is SlotAction.CHARGE and s.import_price > 22.0
+        )
+        cheap = sum(
+            s.grid_import_kwh
+            for s in plan.slots
+            if s.action is SlotAction.CHARGE and s.import_price < 22.0
+        )
+        assert cheap > 1.0, "nothing was bought in the cheap window at all"
+        # Room to spare in the cheap window, so buying dear was never forced.
+        assert max(s.soc_end for s in plan.slots) < 90.0
+        assert dear == 0.0, f"bought {dear:.3f} kWh above 22p"
+
+    def test_the_grid_is_fine_enough_to_order_a_half_hour_of_load(self):
+        """The step has to be smaller than the decision it is asked to express."""
+        from custom_components.ess_controller.optimiser.dp import MAX_REFINED_LEVELS
+
+        assert make_battery().usable_kwh / MAX_REFINED_LEVELS < 0.02

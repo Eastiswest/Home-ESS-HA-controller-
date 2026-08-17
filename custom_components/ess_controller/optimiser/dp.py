@@ -264,18 +264,36 @@ def _price_delta(
 # five of those slots into solar charges and took 6p off a two-day horizon -- small
 # money, but it happens every sunny day, and "why is it buying when the sun is
 # out" is not a question a correct plan should provoke.
-MAX_REFINED_LEVELS = 400
+#
+# 400 was still too coarse, and the same install showed it again in a way that is
+# harder to dismiss. At 400 levels a step is 41 Wh, worth about a penny, and the
+# *ordering* of purchases is decided by differences smaller than that: the plan
+# bought 1.18 kWh in half-hours dearer than 22p while leaving room unused in
+# half-hours at 20.9p and 21.3p an hour later. Buying dear while cheap sits idle
+# is not a rounding artefact, it is the wrong answer, and it survives to the
+# dashboard as "grid charge at 23.9p" with a full morning of cheaper slots below
+# it. Re-run on that horizon: 400 levels cost 225.4p and bought 1.18 kWh dear;
+# 1200 cost 214.3p and bought none. The remaining gain past 1200 is 1.8p for four
+# times the work, so this is where it stops.
+MAX_REFINED_LEVELS = 1200
 
 # ...and a ceiling on the sweep's total work, because the level count alone does
 # not bound it. Every level is priced against every transition reachable within a
 # slot, and how many that is *also* scales with the resolution -- so the cost is
 # quadratic, not linear. A small pack behind a large inverter can cross most of
-# its own window in one half-hour, and there the two multiply: the same 400 levels
-# that cost a fifth of a second on a 22 kWh pack cost nearly a second on a 5 kWh
-# one. Twelve million transitions is a comfortable fraction of a second and far
-# inside the planning cadence; the sweep runs in an executor, so it is the budget
-# rather than the event loop that governs.
-MAX_SWEEP_TRANSITIONS = 12_000_000
+# its own window in one half-hour, and there the two multiply: the same levels that
+# are cheap on a 22 kWh pack are far dearer on a 5 kWh one, because each level is
+# priced against nearly the whole window rather than a slice of it. So the budget,
+# not the level ceiling, is what actually governs; the ceiling only stops a tiny
+# household load asking for a resolution nobody needs.
+#
+# Sixty million transitions is what the ceiling above costs on a 22 kWh pack over
+# a two-day horizon: measured at 1.9 seconds. The sweep runs in an executor on a
+# five-minute cadence, so seconds are affordable and minutes are not -- a slow
+# host can take several times that and still be nowhere near the next cycle. A
+# 5 kWh pack behind the same inverter is held to about 600 levels by this budget,
+# which is a finer grid in kWh than the 22 kWh pack gets.
+MAX_SWEEP_TRANSITIONS = 60_000_000
 
 
 def _refined_levels(
