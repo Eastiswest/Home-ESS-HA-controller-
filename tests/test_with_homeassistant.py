@@ -2572,6 +2572,55 @@ class TestTheInvertersOwnReserveIsCompared:
         assert coordinator.diagnostics()["reserve_conflict"]
 
 
+class TestTheEveningHedgeAnswersToTheEvenings:
+    """The plan pads the evening load while the load model is young, because a
+    battery that runs out at 20:00 buys the rest of the evening at 46-58p. The
+    padding shrank with maturity, and maturity counts observations rather than
+    asking whether they were right -- so nothing fed the outcome back, and a
+    house whose evenings the model had already learned went on being provisioned
+    for kilowatt-hours it did not use.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_evenings_that_came_in_light_retire_the_hedge(self, hass):
+        """The plan pads the evening while the model is young. Nothing was
+        feeding the outcome back, so the padding outlived its reason."""
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        assert coordinator.evening_forecast_error_kwh() == 0.0, "nothing measured yet"
+
+        # Three evenings that used a good deal less than the plan provided for.
+        now = dt_util.utcnow()
+        for day in range(1, 4):
+            for half_hour in range(6):
+                start = dt_util.as_local(now).replace(
+                    hour=18, minute=0, second=0, microsecond=0
+                ) - timedelta(days=day)
+                start += timedelta(minutes=30 * half_hour)
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=dt_util.as_utc(start),
+                        load_kwh=0.4,
+                        load_forecast_kwh=0.6,
+                        load_measured=True,
+                    )
+                )
+
+        # 0.2 kWh a slot over six slots is 1.2 kWh an evening, over-forecast.
+        assert coordinator.evening_forecast_error_kwh() == pytest.approx(1.2, abs=0.01)
+
+
 class TestProblemsReachTheRepairsPanel:
     """Detection is worthless if nothing surfaces it where people look."""
 

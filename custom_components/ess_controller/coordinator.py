@@ -125,7 +125,7 @@ from .const import (
 )
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import describe as describe_confidence
-from .forecast.confidence import evening_uplift
+from .forecast.confidence import evening_uplift, is_evening
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster, describe_climate_uplift
 from .forecast.solar import (
@@ -545,6 +545,37 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             float(progress.get("load_maturity", 0.0) or 0.0),
             float(progress.get("solar_maturity", 0.0) or 0.0),
         )
+
+    def evening_forecast_error_kwh(self, days: float = 7.0) -> float:
+        """How wrong the evening load forecast has been, per evening, in kWh.
+
+        Positive means the forecast has been running *high*. Measured against
+        what the plan actually used, so the young-model allowance is included in
+        it -- which is the point: what wants answering is "did the evening turn
+        out heavier than we planned for", and the allowance is part of what we
+        planned for.
+
+        Maturity says how much the model has seen, never whether it was right.
+        A house whose evenings it had already learned went on being provisioned
+        for three kilowatt-hours it did not use, because nothing fed the outcome
+        back into the guess.
+        """
+        records = self.performance_store.log.window(days)
+        errors: list[float] = []
+        evenings: set[Any] = set()
+        for record in records:
+            local = dt_util.as_local(record.start)
+            if not is_evening(local.hour) or not record.load_measured:
+                continue
+            error = record.load_error
+            if error is None:
+                continue
+            errors.append(error)
+            evenings.add(local.date())
+        if not errors or not evenings:
+            return 0.0
+        # Per evening rather than per slot: the allowance is a nightly figure.
+        return sum(errors) / len(evenings)
 
     @property
     def horizon_hours(self) -> int:
@@ -1547,11 +1578,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # A young load model under-calls the evening, and the evening is where the
         # dear half-hours are. Provision for more of it until the house has taught
         # the model otherwise -- only the evening, because that is where the error
-        # measured on a real install actually was.
+        # measured on a real install actually was, and only until the evenings
+        # themselves say it is no longer needed.
         uplift = evening_uplift(
             [dt_util.as_local(start).hour for start, _ in boundaries],
             [demand.kwh for demand in load_predictions],
             self.forecast_confidence(),
+            self.evening_forecast_error_kwh(),
         )
 
         slots: list[HorizonSlot] = []
@@ -2453,7 +2486,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def confidence_note(self) -> str:
         """One line on how much the forecasts are being trusted right now."""
-        return describe_confidence(self.forecast_confidence())
+        return describe_confidence(
+            self.forecast_confidence(), self.evening_forecast_error_kwh()
+        )
 
     def solar_learning(self) -> dict[str, Any]:
         """How the learned correction is treating the solar forecast right now.

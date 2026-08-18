@@ -40,9 +40,28 @@ def doubt(confidence: float) -> float:
     return 1.0 - min(max(confidence, 0.0), 1.0)
 
 
-def evening_allowance_kwh(confidence: float) -> float:
-    """Extra evening load to provision for, at this level of confidence."""
-    return UNTRAINED_EVENING_KWH * doubt(confidence)
+def evening_allowance_kwh(confidence: float, measured_error_kwh: float = 0.0) -> float:
+    """Extra evening load to provision for, given maturity and what happened.
+
+    ``measured_error_kwh`` is the average signed error of the evening forecast on
+    this house, in kWh per evening, positive when the forecast has been running
+    *high*. It is subtracted from the allowance because the two are the same
+    quantity measured two ways: the allowance is a guess at how much evening
+    arrives unannounced, and the measured error is the answer.
+
+    Maturity alone was not enough. It rises with the number of observations, not
+    with whether they agreed, so a house whose evenings the model had already
+    learned went on being provisioned for three kilowatt-hours it did not use.
+    On a real install at 41% maturity the load forecast was running 0.07 kWh a
+    slot high and the hedge was still adding 1.8 kWh a night on top -- insurance
+    against a risk the evidence said had gone, paid for in grid purchases.
+
+    Floored at zero, and a negative error is ignored. A forecast running light is
+    the case the hedge exists for; it is not a reason to pad it further, because
+    the allowance is already sized for exactly that.
+    """
+    allowance = UNTRAINED_EVENING_KWH * doubt(confidence)
+    return max(allowance - max(measured_error_kwh, 0.0), 0.0)
 
 
 def is_evening(hour: int) -> bool:
@@ -50,7 +69,10 @@ def is_evening(hour: int) -> bool:
 
 
 def evening_uplift(
-    hours: list[int], loads: list[float], confidence: float
+    hours: list[int],
+    loads: list[float],
+    confidence: float,
+    measured_error_kwh: float = 0.0,
 ) -> list[float]:
     """Extra kWh to add to each slot's forecast load, same length as the inputs.
 
@@ -70,7 +92,7 @@ def evening_uplift(
     cooking in. If the forecast puts nothing in the evening at all, it is spread flat
     rather than discarded.
     """
-    allowance = evening_allowance_kwh(confidence)
+    allowance = evening_allowance_kwh(confidence, measured_error_kwh)
     if allowance <= 0.0:
         return [0.0] * len(loads)
     evening = [i for i, hour in enumerate(hours) if is_evening(hour)]
@@ -84,9 +106,9 @@ def evening_uplift(
     return uplift
 
 
-def describe(confidence: float) -> str:
+def describe(confidence: float, measured_error_kwh: float = 0.0) -> str:
     """One line for the diagnostics and the dashboard."""
-    allowance = evening_allowance_kwh(confidence)
+    allowance = evening_allowance_kwh(confidence, measured_error_kwh)
     if allowance <= 0.01:
         return "forecasts trusted as they stand"
     return (

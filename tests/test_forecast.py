@@ -1602,3 +1602,49 @@ class TestAnUnmeasuredHalfHourIsNotAZeroOne:
         assert done[0].load_kwh == pytest.approx(0.2, abs=0.02)
         # Fifteen minutes at 1 kW, scaled to the half-hour it represents.
         assert done[0].pv_kwh == pytest.approx(0.5, abs=0.05)
+
+
+class TestTheEveningHedgeRetiresOnEvidence:
+    """Maturity counts observations. It never asks whether they were right.
+
+    So a house whose evenings the model had already learned went on being
+    provisioned for kilowatt-hours it did not use: at 41% maturity a real
+    install's load forecast was running 0.07 kWh a slot *high* and the hedge was
+    still adding 1.8 kWh a night on top. Insurance against a risk the evidence
+    said had gone, paid for in grid purchases -- 2.1 kWh of them over two days.
+    """
+
+    def _allowance(self, confidence, measured=0.0):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
+        )
+
+        return evening_allowance_kwh(confidence, measured)
+
+    def test_a_young_model_with_no_history_still_gets_the_full_hedge(self):
+        """Nothing measured yet is exactly when the guess has to stand."""
+        from custom_components.ess_controller.forecast.confidence import (
+            UNTRAINED_EVENING_KWH,
+        )
+
+        assert self._allowance(0.0) == pytest.approx(UNTRAINED_EVENING_KWH)
+
+    def test_an_over_forecasting_model_loses_the_hedge(self):
+        """Half of it measured away, and all of it once the error covers it."""
+        half = self._allowance(0.0) / 2
+        assert self._allowance(0.0, half) == pytest.approx(half)
+        assert self._allowance(0.0, self._allowance(0.0) * 2) == 0.0
+
+    def test_an_under_forecasting_model_keeps_the_whole_hedge(self):
+        """A forecast running light is the case the hedge exists for, so a
+        negative error must not be read as a reason to pad it further either."""
+        full = self._allowance(0.3)
+        assert self._allowance(0.3, -2.0) == pytest.approx(full)
+
+    def test_the_uplift_follows_the_allowance_to_nothing(self):
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        hours = [16, 17, 18, 19, 20, 21]
+        loads = [0.5] * 6
+        assert sum(evening_uplift(hours, loads, 0.0)) > 0.0
+        assert sum(evening_uplift(hours, loads, 0.0, measured_error_kwh=99.0)) == 0.0
