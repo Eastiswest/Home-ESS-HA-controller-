@@ -373,7 +373,7 @@ def unmatched_candidates(
     hass: Any,
     bound: dict[str, str],
     prefix: str | None = None,
-    limit: int = 60,
+    limit: int = 250,
 ) -> list[str]:
     """Inverter entities that look relevant but are not bound to any role.
 
@@ -381,6 +381,13 @@ def unmatched_candidates(
     switch, so this exists to stop the guessing: when a control is plainly there on
     the inverter's own screen and no role found it, the answer is in this list.
     Diagnostics only -- nothing reads it to make a decision.
+
+    The cap was sixty, and a SolaX behind the full Modbus integration publishes
+    well past that in ``number`` alone -- forty of them named ``remotecontrol_*``.
+    Sorted alphabetically, the overflow fell exactly where ``selfuse_*`` sits, so
+    the one control this list was written to find was in the six it did not show,
+    on every file, for days. A diagnostics list that omits the answer is worse
+    than no list: it reads as proof the entity is absent.
     """
     taken = set(bound.values())
     wanted_prefix = _clean(prefix) if prefix else None

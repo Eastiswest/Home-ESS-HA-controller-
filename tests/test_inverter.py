@@ -1649,3 +1649,25 @@ class TestARefusedWriteIsNotRetriedForEver:
         apply(adapter, command(SlotAction.SELF_USE, min_soc=20.0))
         adapter.reset_last_applied()
         assert adapter.rejected_roles() == {}
+
+
+class TestTheCandidateListReachesPastTheNoisyNames:
+    """A SolaX behind the full Modbus integration publishes forty ``number``
+    entities named ``remotecontrol_*`` before it gets anywhere near the ones a
+    person would recognise. Sorted alphabetically and cut at sixty, the overflow
+    fell exactly where ``selfuse_*`` sits -- so the single control this list
+    exists to find sat in the entries it did not show, on every diagnostics file,
+    for days, while the list was read as proof the entity was absent.
+    """
+
+    def test_the_noise_does_not_crowd_out_the_answer(self):
+        from custom_components.ess_controller.inverter.roles import unmatched_candidates
+
+        hass = build_solax_hass()
+        for index in range(120):
+            hass.states.set(f"number.solax_remotecontrol_charge_{index:03d}", 1.0)
+        # Alphabetically last, exactly like the real one.
+        hass.states.set("switch.solax_selfuse_night_charge_spare", "off")
+
+        listed = unmatched_candidates(hass, {}, prefix="solax")
+        assert any("selfuse_night_charge_spare" in entry for entry in listed)
