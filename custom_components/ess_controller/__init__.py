@@ -13,6 +13,7 @@ from homeassistant.core import (
     ServiceCall,
     ServiceResponse,
     SupportsResponse,
+    callback,
 )
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
@@ -121,7 +122,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(coordinator.async_start_live_polling())
     _async_register_services(hass)
     _async_schedule_dashboard(hass, entry, coordinator)
+    _async_schedule_tariff_comparison(hass, entry, coordinator)
     return True
+
+
+# Long enough after startup that the tariff APIs are not competing with every
+# other integration coming up, short enough that the answer is there before
+# anybody goes looking for it.
+TARIFF_COMPARISON_DELAY = 300
+
+
+def _async_schedule_tariff_comparison(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: EssCoordinator
+) -> None:
+    """Run the tariff comparison once, a few minutes after startup.
+
+    It is otherwise only run on demand and is not persisted, so it read
+    "Unknown" from every restart until somebody pressed the button -- and
+    pressing the button then losing the answer on the next restart is
+    indistinguishable from a feature that does not work. Running it once,
+    unprompted, means the answer is simply there.
+
+    Failure is silent by design: a tariff comparison is a convenience, and the
+    APIs behind it are somebody else's. Nothing here may disturb a setup that
+    has otherwise succeeded.
+    """
+
+    async def _compare(_now: Any) -> None:
+        try:
+            await coordinator.async_recommend_tariffs()
+        except Exception:  # a convenience must not raise into startup
+            _LOGGER.debug("Tariff comparison at startup failed", exc_info=True)
+
+    @callback
+    def _schedule(_event: Any) -> None:
+        entry.async_on_unload(
+            async_call_later(hass, TARIFF_COMPARISON_DELAY, _compare)
+        )
+
+    entry.async_on_unload(async_at_started(hass, _schedule))
 
 
 def _async_schedule_dashboard(

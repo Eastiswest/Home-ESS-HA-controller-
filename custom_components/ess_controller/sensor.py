@@ -528,10 +528,14 @@ def _performance_state(coordinator: EssCoordinator) -> float | None:
 
 
 def _recommendation_state(coordinator: EssCoordinator) -> str | None:
+    """Never ``None``. "Unknown" is what Home Assistant shows for a sensor with
+    no state, and it reads as a broken feature rather than as one that has not
+    been asked a question yet -- which is what it is, because the comparison is
+    only run on demand and does not survive a restart."""
     from . import recommend as recommend_mod
 
     if coordinator.recommendation is None:
-        return None
+        return "not compared yet"
     return recommend_mod.summarise(coordinator.recommendation)
 
 

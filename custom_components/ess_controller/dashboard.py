@@ -1073,7 +1073,14 @@ def _performance_report(saving_entity: str) -> str:
         "| Saving vs self-use | "
         "{{ (money.saving_vs_self_use ~ 'p') if money.saving_vs_self_use is not none "
         "else 'not yet' }} |\n"
-        "| Wear charged | {{ money.wear_cost }}p |\n"
+        "| Wear charged | -{{ money.wear_cost }}p |\n"
+        # The row that was missing. Without it the three lines above cannot
+        # reach the bold total below them -- a real week showed -159.77p and
+        # -58.77p adding up to +64.78p, which reads as a broken sum. The credit
+        # is the largest term of the three and it was the one left out.
+        "| Charge left in the battery | "
+        "{{ ('+' ~ money.stored_energy_value ~ 'p') "
+        "if money.stored_energy_value is not none else 'not yet' }} |\n"
         "| **Net saving** | **"
         "{{ (money.net_saving_vs_self_use ~ 'p') if money.net_saving_vs_self_use "
         "is not none else 'not yet' }}** |\n"

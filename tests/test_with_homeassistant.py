@@ -2572,6 +2572,51 @@ class TestTheInvertersOwnReserveIsCompared:
         assert coordinator.diagnostics()["reserve_conflict"]
 
 
+class TestTheTariffComparisonIsThereWithoutBeingAsked:
+    """It is run on demand and not persisted, so it read "Unknown" from every
+    restart until somebody pressed the button -- and pressing the button, then
+    losing the answer on the next restart, is indistinguishable from a feature
+    that does not work.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_never_compared_still_says_something(self, hass):
+        from custom_components.ess_controller.sensor import _recommendation_state
+
+        coordinator = await self._coordinator(hass)
+        assert coordinator.recommendation is None
+        assert _recommendation_state(coordinator) == "not compared yet"
+
+    async def test_the_sensor_is_never_unknown(self, hass):
+        """Whatever the state of the comparison, the entity has a state."""
+        await self._coordinator(hass)
+        state = hass.states.get("sensor.ai_ess_controller_tariff_recommendation")
+        assert state is not None
+        assert state.state not in ("unknown", "unavailable", "None")
+
+    async def test_it_is_scheduled_to_run_by_itself(self, hass):
+        """Registered against startup rather than left for the button."""
+        from custom_components.ess_controller import (
+            TARIFF_COMPARISON_DELAY,
+            _async_schedule_tariff_comparison,
+        )
+
+        assert TARIFF_COMPARISON_DELAY > 0
+        coordinator = await self._coordinator(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        # Must not raise, and must not run the comparison inline.
+        _async_schedule_tariff_comparison(hass, entry, coordinator)
+        await hass.async_block_till_done()
+
+
 class TestTheEveningHedgeAnswersToTheEvenings:
     """The plan pads the evening load while the load model is young, because a
     battery that runs out at 20:00 buys the rest of the evening at 46-58p. The

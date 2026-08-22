@@ -641,17 +641,42 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
             f"armed for {summary.controlled_slots} of {summary.slots} slots"
         )
     if abs(summary.stored_energy_kwh) > 0.2:
-        summary.notes.append(
-            f"ended {summary.stored_energy_kwh:+.1f} kWh against the self-use "
-            f"counterfactual, valued at {summary.stored_energy_rate:.1f} and "
-            "already counted in the net saving"
+        # Says where the credit comes from and, when it is doing the heavy
+        # lifting, says that too. A week that spent more than self-use and still
+        # showed a positive net saving is not wrong, but the reader deserves to
+        # be told which of the two facts is carrying it rather than left to
+        # reconcile a minus and a plus on their own.
+        held = (
+            "more" if summary.stored_energy_kwh > 0 else "less"
         )
+        note = (
+            f"ended the week with {abs(summary.stored_energy_kwh):.1f} kWh {held} "
+            "in the battery than plain self-use would have -- measured against "
+            "the self-use counterfactual, and valued at "
+            f"{summary.stored_energy_rate:.1f}p/kWh -- the cheap end of this "
+            "week's prices, which is what it would cost to put back"
+        )
+        if (
+            summary.saving_vs_self_use is not None
+            and summary.saving_vs_self_use < 0
+            and summary.net_saving_vs_self_use is not None
+            and summary.net_saving_vs_self_use > 0
+        ):
+            note += (
+                ". That credit is the whole of this week's net saving: the "
+                "electricity itself cost more than self-use would have"
+            )
+        summary.notes.append(note)
     soc_first = next((r.soc_start for r in records if r.soc_start is not None), None)
     soc_last = next((r.soc_end for r in reversed(records) if r.soc_end is not None), None)
     if soc_first is not None and soc_last is not None:
         drift = soc_last - soc_first
         if abs(drift) > 5:
+            # A different quantity from the credit above, and both are worth
+            # saying. That one asks whether the *comparison* is fair; this one
+            # asks whether "Spent" is, because a week that ends fuller than it
+            # started has bought electricity it has not used yet.
             summary.notes.append(
-                f"battery ended {drift:+.0f}% from where it started, which flatters "
-                "or penalises the cost by roughly that much stored energy"
+                f"the battery ended {drift:+.0f}% from where it started, so "
+                "\"Spent\" includes electricity bought and not yet used"
             )

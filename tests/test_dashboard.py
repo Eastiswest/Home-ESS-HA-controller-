@@ -680,6 +680,66 @@ class TestTemplatesRender:
     def test_no_plan_yet_says_so_rather_than_showing_nothing(self):
         assert "waiting for prices" in self._soc_line({entity_id("plan_cost"): {}})
 
+    def test_the_weekly_table_adds_up(self):
+        """A real week showed "Saving vs self-use -159.77p" and "Wear charged
+        58.77p" above a bold "Net saving 64.78p". Two negatives making a
+        positive, because the largest term of the three -- the charge left in
+        the battery, +283p -- had no row. The reader could not get from the
+        numbers shown to the number in bold.
+        """
+        from custom_components.ess_controller.dashboard import _performance_report
+
+        saving = entity_id("weekly_saving")
+        attributes = {
+            saving: {
+                "money": {
+                    "actual": 1136.03,
+                    "if_no_battery": 1692.6,
+                    "if_self_use_only": 976.26,
+                    "saving_vs_self_use": -159.77,
+                    "wear_cost": 58.77,
+                    "stored_energy_value": 283.32,
+                    "net_saving_vs_self_use": 64.78,
+                },
+                "control": {"plan_fidelity": 0.98, "round_trip_efficiency": 0.91},
+                "forecast_error_kwh_per_slot": {"solar_mae": 0.07, "load_mae": 0.15},
+                "window": {"slots": 332, "days": 7.02},
+                "notes": [],
+            }
+        }
+        table = self._render(_performance_report(saving), attributes)
+        assert "| Charge left in the battery | +283.32p |" in table
+        # And the two deductions read as deductions.
+        assert "-159.77p" in table
+        assert "| Wear charged | -58.77p |" in table
+        # -159.77 - 58.77 + 283.32 = 64.78, which is now visibly the case.
+        assert "**64.78p**" in table
+
+    def test_a_week_with_nothing_stored_still_renders(self):
+        from custom_components.ess_controller.dashboard import _performance_report
+
+        saving = entity_id("weekly_saving")
+        attributes = {
+            saving: {
+                "money": {
+                    "actual": 100.0,
+                    "if_no_battery": 200.0,
+                    "if_self_use_only": None,
+                    "saving_vs_self_use": None,
+                    "wear_cost": 1.0,
+                    "stored_energy_value": None,
+                    "net_saving_vs_self_use": None,
+                },
+                "control": {"plan_fidelity": None, "round_trip_efficiency": None},
+                "forecast_error_kwh_per_slot": {"solar_mae": None, "load_mae": None},
+                "window": {"slots": 4, "days": 0.1},
+                "notes": [],
+            }
+        }
+        table = self._render(_performance_report(saving), attributes)
+        assert "not yet" in table
+        assert "None" not in table
+
     def test_a_hold_with_no_import_figure_at_all_still_reads_sensibly(self):
         """Older plans, and diagnostics captures, carry no import column."""
         plan = entity_id("plan_cost")
