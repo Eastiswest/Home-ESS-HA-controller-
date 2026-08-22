@@ -26,14 +26,17 @@ tested without a network.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
+from .const import TERMINAL_MODE_FIXED, TERMINAL_MODE_ZERO
 from .models import BatterySpec, GridSpec, HorizonSlot
 from .optimiser.dp import (
+    TERMINAL_REPLACEMENT_FRACTION,
     OptimiserSettings,
     optimise,
+    percentile,
     simulate_self_use,
     terminal_value,
 )
@@ -203,6 +206,15 @@ def score_tariff(
     answer this feature must not give. The same reasoning is why
     ``Plan.net_cost`` exists at all, and why ``optimise`` judges its own plan
     against self-use that way.
+
+    ``settings`` must therefore price that leftover charge at a *fixed* rate, the
+    same one for every candidate. Left on the default it is derived from each
+    candidate's own prices, so a tariff with a deep trough credits its own
+    leftover kWh more generously than a flat one does -- every tariff marking its
+    own homework, and the credit is larger than the difference being measured. On
+    a real comparison that put Go and Agile 0.22p apart across a day whose
+    troughs differ by 10.6p a kWh, and made every total come out negative.
+    :func:`common_terminal_settings` builds the right object.
     """
     slots: list[HorizonSlot] = []
     for slot in template:
@@ -262,6 +274,25 @@ def score_tariff(
     )
 
 
+def common_terminal_settings(
+    settings: OptimiserSettings, prices: list[float]
+) -> OptimiserSettings:
+    """``settings`` with leftover charge priced once, for every candidate alike.
+
+    The rate is the cheap end of the tariff the house is actually on, because
+    what a stored kWh is worth is what it costs to put back -- and until a switch
+    happens, it goes back at today's prices. Any single rate would remove the
+    bias; this one also keeps the figure meaning something.
+    """
+    if not prices:
+        return replace(settings, terminal_mode=TERMINAL_MODE_ZERO)
+    return replace(
+        settings,
+        terminal_mode=TERMINAL_MODE_FIXED,
+        terminal_rate=percentile(sorted(prices), TERMINAL_REPLACEMENT_FRACTION),
+    )
+
+
 def build_comparison_template(
     slots: list[HorizonSlot], hours: float | None = None
 ) -> list[HorizonSlot]:
@@ -284,6 +315,27 @@ def build_comparison_template(
 
 # Products worth comparing for a battery owner. Agile and Go have the deep
 # troughs storage exploits; the flat trackers are the sensible baseline.
+# Product codes are what the API speaks and nobody else does. A recommendation
+# that reads "GO-VAR-22-10-14 saves ~0.01/day" asks the reader to know the
+# catalogue, do the currency in their head, and decide whether a hundredth of
+# something is worth a switch.
+PRODUCT_NAMES: dict[str, str] = {
+    "AGILE-24-10-01": "Octopus Agile",
+    "GO-VAR-22-10-14": "Octopus Go",
+    "COSY-22-12-08": "Octopus Cosy",
+    "FLUX-IMPORT-23-02-14": "Octopus Flux",
+    "VAR-22-11-01": "Octopus Flexible",
+    "OUTGOING-AGILE-24-10-01": "Outgoing Agile",
+    "OUTGOING-FIX-12M-19-05-13": "Outgoing Fixed",
+    "FLUX-EXPORT-23-02-14": "Flux Export",
+}
+
+
+def friendly_name(product_code: str, fallback: str = "") -> str:
+    """The name on the tariff's own web page, where we know it."""
+    return PRODUCT_NAMES.get(product_code, fallback or product_code)
+
+
 DEFAULT_IMPORT_PRODUCTS: tuple[str, ...] = (
     "AGILE-24-10-01",
     "GO-VAR-22-10-14",
@@ -372,7 +424,7 @@ def candidates_from_codes(
         candidates.append(
             TariffCandidate(
                 product_code=code,
-                display_name=(names or {}).get(code, code),
+                display_name=(names or {}).get(code) or friendly_name(code),
                 tariff_code=tariff_code,
                 direction=direction,
             )
@@ -380,21 +432,49 @@ def candidates_from_codes(
     return candidates
 
 
+# Below this, a day's difference is not a reason to change supplier.
+#
+# The window is a day of forecast load against a day of forecast solar, and the
+# forecast is worth a few pence either way on its own. A ranking separated by
+# less than this has ordered the noise, and saying "switch to X, it saves 0.01"
+# invites somebody to spend an afternoon on a tariff change worth nothing.
+WORTH_SWITCHING_PENCE_PER_DAY = 5.0
+
+
+def _money(pence_per_day: float) -> str:
+    """A day's difference, in the units a person actually thinks in."""
+    yearly = pence_per_day * 365 / 100.0
+    if pence_per_day < 100:
+        return f"about {pence_per_day:.0f}p a day (~\u00a3{yearly:.0f} a year)"
+    return f"about \u00a3{pence_per_day / 100:.2f} a day (~\u00a3{yearly:.0f} a year)"
+
+
 def summarise(recommendation: Recommendation) -> str:
-    """A one-line summary for the sensor state."""
+    """A one-line summary for the sensor state.
+
+    Written to be read by someone who does not know the product catalogue and is
+    not going to convert pence-per-day into anything. It used to say
+    "GO-VAR-22-10-14 saves ~0.01/day", which names a code rather than a tariff,
+    gives no currency, and dresses a hundredth of a penny as a recommendation.
+    """
     best = recommendation.best
     if best is None:
         return "no comparison available"
     current = recommendation.current
     if current is not None and best is current:
         # Already on the winner: say so, rather than merely naming the tariff.
-        return f"stay on {current.candidate.display_name}"
+        return f"stay on {current.candidate.display_name} — nothing cheaper found"
 
     saving = recommendation.saving_vs_current
     if saving is None:
         # Nothing identified as the current tariff, so there is no comparison to
         # draw -- name the cheapest and leave it there.
-        return f"best: {best.candidate.display_name}"
-    if saving <= 0:
-        return f"stay on {current.candidate.display_name}"
-    return f"{best.candidate.display_name} saves ~{saving / 100:.2f}/day"
+        return f"cheapest looks like {best.candidate.display_name}"
+    if saving < WORTH_SWITCHING_PENCE_PER_DAY:
+        # Includes the negative case. Naming the near-winner anyway would read as
+        # a suggestion, which is the opposite of what the number says.
+        return (
+            f"stay on {current.candidate.display_name} — nothing else is "
+            "meaningfully cheaper"
+        )
+    return f"{best.candidate.display_name} would save {_money(saving)}"

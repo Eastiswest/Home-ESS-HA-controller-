@@ -1114,6 +1114,98 @@ class TestRecommendationRanking:
         rec = self._make([("Agile", 200.0, True), ("Flat", 400.0, False)])
         assert "stay on Agile" in summarise(rec)
 
+    def test_the_summary_says_what_the_money_is(self):
+        """It read "GO-VAR-22-10-14 saves ~0.01/day": a product code rather than
+        a tariff, no currency, and no sense of scale."""
+        from custom_components.ess_controller.recommend import summarise
+
+        line = summarise(self._make([("Flat", 400.0, True), ("Agile", 200.0, False)]))
+        assert "£2.00 a day" in line
+        assert "£730 a year" in line
+
+        # Under a pound it stays in pence, which is how a small daily saving is
+        # actually spoken about.
+        small = summarise(self._make([("Flat", 425.0, True), ("Agile", 400.0, False)]))
+        assert "25p a day" in small
+
+    def test_a_days_worth_of_noise_is_not_a_recommendation(self):
+        """A real comparison ranked Go above Agile by 0.83p a day and published
+        it as advice. The window is one forecast day: below a few pence the
+        ranking has ordered the forecast error, not the tariffs."""
+        from custom_components.ess_controller.recommend import summarise
+
+        line = summarise(self._make([("Flat", 400.83, True), ("Agile", 400.0, False)]))
+        assert "stay on Flat" in line
+        assert "Agile" not in line
+
+    def test_a_real_saving_still_gets_recommended(self):
+        from custom_components.ess_controller.recommend import summarise
+
+        line = summarise(self._make([("Flat", 430.0, True), ("Agile", 400.0, False)]))
+        assert line.startswith("Agile would save")
+
+    def test_product_codes_become_names(self):
+        from custom_components.ess_controller.recommend import (
+            candidates_from_codes,
+            friendly_name,
+        )
+
+        assert friendly_name("GO-VAR-22-10-14") == "Octopus Go"
+        # An unknown code still has to say something.
+        assert friendly_name("MYSTERY-99") == "MYSTERY-99"
+        built = candidates_from_codes(["AGILE-24-10-01"], "M")
+        assert built[0].display_name == "Octopus Agile"
+
+
+class TestEveryTariffIsMarkedByTheSameRuler:
+    """The charge left at the end of the window is credited back, or a tariff
+    that fills the pack on the way out books the purchase and none of the value.
+    But the credit was priced from *each candidate's own* prices, so a deep-trough
+    tariff valued its own leftover kWh more generously than a flat one -- every
+    tariff marking its own homework, by more than the difference being measured.
+
+    On a real comparison it put Go and Agile 0.22p apart across a day whose
+    troughs differ by 10.6p a kWh, and made every total come out negative.
+    """
+
+    def test_the_rate_is_fixed_and_taken_from_the_prices_given(self):
+        from custom_components.ess_controller.const import TERMINAL_MODE_FIXED
+        from custom_components.ess_controller.optimiser.dp import OptimiserSettings
+        from custom_components.ess_controller.recommend import (
+            common_terminal_settings,
+        )
+
+        settings = common_terminal_settings(
+            OptimiserSettings(), [10.0, 20.0, 30.0, 40.0]
+        )
+        assert settings.terminal_mode == TERMINAL_MODE_FIXED
+        # The cheap end, because what a stored kWh is worth is what it costs to
+        # put back.
+        assert settings.terminal_rate < 20.0
+
+    def test_two_tariffs_get_the_same_rate_whatever_their_own_spread(self):
+        from custom_components.ess_controller.optimiser.dp import OptimiserSettings
+        from custom_components.ess_controller.recommend import (
+            common_terminal_settings,
+        )
+
+        reference = [10.0, 20.0, 30.0, 40.0]
+        deep = common_terminal_settings(OptimiserSettings(), reference)
+        flat = common_terminal_settings(OptimiserSettings(), reference)
+        assert deep.terminal_rate == flat.terminal_rate
+
+    def test_no_prices_means_no_credit_rather_than_a_guess(self):
+        from custom_components.ess_controller.const import TERMINAL_MODE_ZERO
+        from custom_components.ess_controller.optimiser.dp import OptimiserSettings
+        from custom_components.ess_controller.recommend import (
+            common_terminal_settings,
+        )
+
+        assert (
+            common_terminal_settings(OptimiserSettings(), []).terminal_mode
+            == TERMINAL_MODE_ZERO
+        )
+
 
 class TestProductCatalogue:
     def test_import_products_filtered(self):

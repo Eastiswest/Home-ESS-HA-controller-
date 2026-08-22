@@ -2009,7 +2009,14 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         settings = self.optimiser_settings()
         start_soc = self.battery.soc if self.battery.valid else 50.0
 
+        # Fetched first, scored second, because the charge left at the end of the
+        # window has to be priced identically for every candidate. Priced from
+        # each tariff's own prices -- the default -- a deep-trough tariff credits
+        # its own leftover kWh more generously than a flat one, which is a larger
+        # effect than the difference being measured: it put Go and Agile 0.22p
+        # apart across a day whose troughs differ by 10.6p a kWh.
         scores: list[recommend.TariffScore] = []
+        fetched: list[tuple[Any, Any, float]] = []
         for candidate in candidates:
             try:
                 prices, standing = await self._async_fetch_candidate(
@@ -2031,7 +2038,24 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 )
                 continue
+            fetched.append((candidate, prices, standing))
 
+        # The rate comes from the tariff the house is on: a stored kWh is worth
+        # what it costs to put back, and until a switch happens it goes back at
+        # today's prices. Falls back to whatever was fetched if the current
+        # tariff is not among the candidates.
+        reference = next(
+            (p for c, p, _ in fetched if c.product_code == current_code),
+            next((p for _, p, _ in fetched), None),
+        )
+        window_prices = [
+            slot.price
+            for slot in (reference.slots if reference is not None else [])
+            if slot.price is not None
+        ]
+        settings = recommend.common_terminal_settings(settings, window_prices)
+
+        for candidate, prices, standing in fetched:
             score = await self.hass.async_add_executor_job(
                 recommend.score_tariff,
                 candidate,
