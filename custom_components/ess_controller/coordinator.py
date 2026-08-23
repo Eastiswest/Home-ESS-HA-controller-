@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -126,13 +127,14 @@ from .const import (
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import daytime_correction, evening_uplift, is_evening
 from .forecast.confidence import describe as describe_confidence
-from .forecast.energy import EnergySeries
+from .forecast.energy import EnergySeries, EnergySlot
 from .forecast.load import LoadForecaster, describe_climate_uplift
 from .forecast.solar import (
     SolarForecaster,
     build_forecast_series,
     daily_total_offset,
     parse_solar_forecast_attributes,
+    parse_wh_mapping,
 )
 from .forecast.weather import WeatherSeries
 from .inverter.base import (
@@ -1313,6 +1315,53 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._forecast_fetched = now
         self._weather = await self._async_fetch_weather()
         self._solar_forecast = self._fetch_solar_forecast()
+        if self._solar_forecast is None:
+            hourly = await self._async_energy_platform_forecast()
+            if hourly is not None:
+                self._solar_forecast = hourly
+
+    async def _async_energy_platform_forecast(self) -> EnergySeries | None:
+        """The hourly curve from whatever already feeds the Energy dashboard.
+
+        Forecast.Solar's sensors carry a day's total and nothing else -- the
+        hourly attributes they once had were removed from Home Assistant years
+        ago -- so a correctly configured, perfectly working forecast parses to
+        nothing here and the estimate falls back to a sun-position curve scaled
+        to that one number. It cannot know that today is clear and yesterday was
+        hazy, which is exactly the difference the plan needs.
+
+        The detail is not lost, only kept somewhere else: integrations publish it
+        through the ``energy`` platform, which is how the Energy dashboard draws
+        its solar line. Reading it there needs nothing from the user and works
+        for any provider implementing that platform, not just Forecast.Solar.
+        """
+        from homeassistant.loader import async_get_integration
+
+        found: list[EnergySlot] = []
+        for entry in self.hass.config_entries.async_entries():
+            try:
+                integration = await async_get_integration(self.hass, entry.domain)
+                platform = await integration.async_get_platform("energy")
+            except Exception:  # no energy platform, or it will not import
+                continue
+            getter = getattr(platform, "async_get_solar_forecast", None)
+            if getter is None:
+                continue
+            try:
+                payload = await getter(self.hass, entry.entry_id)
+            except Exception:  # pragma: no cover - somebody else's integration
+                _LOGGER.debug("Solar forecast from %s failed", entry.domain)
+                continue
+            hours = (payload or {}).get("wh_hours")
+            if isinstance(hours, Mapping) and hours:
+                found.extend(parse_wh_mapping(hours, as_power=False))
+                self._solar_forecast_note = (
+                    f"hourly forecast from the {entry.domain} integration, read "
+                    "the same way the Energy dashboard reads it"
+                )
+        if not found:
+            return None
+        return EnergySeries(found)
 
     async def _async_fetch_weather(self) -> WeatherSeries | None:
         entity_id = self.options.get(CONF_WEATHER_ENTITY)

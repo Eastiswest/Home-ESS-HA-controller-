@@ -17,6 +17,8 @@ Home Assistant installed.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -130,6 +132,63 @@ def _lovelace(hass) -> None:
         dashboards={None: LovelaceStorage(hass, None)},
         resources=None,
         yaml_dashboards={},
+    )
+
+
+def _install_solar_integration(hass, domain: str, base) -> None:
+    """Write a real custom integration that publishes an hourly solar curve."""
+    root = pathlib.Path(hass.config.config_dir) / "custom_components" / domain
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "domain": domain,
+                "name": domain,
+                "version": "1.0.0",
+                "documentation": "https://example.invalid",
+                "codeowners": [],
+                "requirements": [],
+                "dependencies": [],
+            }
+        )
+    )
+    (root / "__init__.py").write_text(
+        "async def async_setup(hass, config):\n    return True\n"
+    )
+    hours = {(base + timedelta(hours=n)).isoformat(): 1000.0 for n in range(4)}
+    (root / "energy.py").write_text(
+        "async def async_get_solar_forecast(hass, config_entry_id):\n"
+        f"    return {{'wh_hours': {hours!r}}}\n"
+    )
+    # Home Assistant lists the custom integrations once, at startup. Anything
+    # written afterwards is invisible until that list is dropped.
+    from homeassistant import loader
+
+    hass.data.pop(loader.DATA_CUSTOM_COMPONENTS, None)
+
+
+def _config_entry(domain: str) -> object:
+    """A minimal, real ConfigEntry for another integration.
+
+    Built rather than mocked because the code under test asks Home Assistant to
+    load that integration's ``energy`` platform by domain, and a stand-in would
+    only prove the stand-in matches what I assumed.
+    """
+    from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+
+    return ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=domain,
+        title=domain,
+        data={},
+        options={},
+        source="user",
+        unique_id=None,
+        entry_id=f"{domain}-under-test",
+        discovery_keys={},
+        subentries_data=(),
+        state=ConfigEntryState.NOT_LOADED,
     )
 
 
@@ -2615,6 +2674,72 @@ class TestTheTariffComparisonIsThereWithoutBeingAsked:
         # Must not raise, and must not run the comparison inline.
         _async_schedule_tariff_comparison(hass, entry, coordinator)
         await hass.async_block_till_done()
+
+
+class TestTheHourlyForecastIsFoundWhereItActuallyLives:
+    """Forecast.Solar's sensors carry a day's total and nothing else.
+
+    The hourly attributes they once had were removed from Home Assistant years
+    ago, so a correctly configured, perfectly working forecast parses to nothing
+    and the estimate falls back to a sun-position curve scaled to that one
+    number -- which cannot know that today is clear and yesterday was hazy. On a
+    real install the morning ran 32% ahead of forecast by nine o'clock and the
+    plan had no way to notice.
+
+    The detail is not lost, only kept somewhere else: integrations publish it
+    through the ``energy`` platform, which is how the Energy dashboard draws its
+    solar line.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_a_daily_total_sensor_alone_leaves_no_hourly_series(self, hass):
+        """The starting point: the sensor works, and carries no shape."""
+        hass.states.async_set("sensor.energy_production_today", "8.3", {})
+        coordinator = await self._coordinator(hass)
+        assert coordinator._fetch_solar_forecast() is None
+
+    async def test_the_energy_platform_curve_is_read(self, hass):
+        """Exercised through Home Assistant's real platform loader.
+
+        A purpose-built integration rather than Forecast.Solar itself, because
+        that one's ``energy`` module imports a PyPI package CI does not install
+        -- which the production code already survives, and the test below pins.
+        What matters is that the loader path and the payload shape are the real
+        ones, and both are.
+        """
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        _install_solar_integration(hass, "curvy_solar", base)
+        await hass.config_entries.async_add(_config_entry("curvy_solar"))
+
+        series = await coordinator._async_energy_platform_forecast()
+        assert series is not None
+        # Four hours at 1 kWh each, read as energy per period rather than power.
+        assert series.energy_between(base, base + timedelta(hours=4)) == pytest.approx(
+            4.0, abs=0.01
+        )
+        assert "curvy_solar" in coordinator._solar_forecast_note
+
+    async def test_an_integration_that_will_not_import_is_skipped(self, hass):
+        """Forecast.Solar's own energy module imports a package that is not
+        always installed. That must cost a debug line, not the forecast."""
+        coordinator = await self._coordinator(hass)
+        await hass.config_entries.async_add(_config_entry("forecast_solar"))
+        assert await coordinator._async_energy_platform_forecast() is None
+
+    async def test_nothing_configured_is_not_an_error(self, hass):
+        coordinator = await self._coordinator(hass)
+        assert await coordinator._async_energy_platform_forecast() is None
 
 
 class TestTheSolarHeadroomReserveIsSizedFromMeasurement:
