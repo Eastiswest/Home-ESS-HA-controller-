@@ -740,6 +740,40 @@ class TestTemplatesRender:
         assert "not yet" in table
         assert "None" not in table
 
+    def test_the_spare_solar_line_separates_the_sun_from_the_surplus(self):
+        """"Solar left today 5.8 kWh" beside a plan buying from the grid reads
+        as a contradiction and is the question this dashboard has been asked
+        most. It is not one: on a real August day 5.8 kWh of sun met 7.5 kWh of
+        demand, so the sun did not cover the house, let alone have anything
+        spare for a 22 kWh battery. The surplus was the one figure not shown.
+        """
+        from custom_components.ess_controller.dashboard import _spare_solar
+
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "slots": [
+                    # Two sunny half-hours with a surplus, one where the house
+                    # wins, and one belonging to tomorrow which must be ignored.
+                    {"start": "2026-08-23T11:00:00+00:00", "pv_kwh": 1.0, "load_kwh": 0.4},
+                    {"start": "2026-08-23T11:30:00+00:00", "pv_kwh": 1.0, "load_kwh": 0.6},
+                    {"start": "2026-08-23T18:00:00+00:00", "pv_kwh": 0.2, "load_kwh": 0.9},
+                    {"start": "2026-08-24T11:00:00+00:00", "pv_kwh": 5.0, "load_kwh": 0.1},
+                ]
+            }
+        }
+        line = self._render(_spare_solar(plan), attributes)
+        assert "2.2 kWh** of sun left today" in line
+        # 0.6 + 0.4 spare; the evening deficit does not net off against it.
+        assert "1.0 kWh** is spare for the battery" in line
+        assert "1.2 kWh** as it arrives" in line
+
+    def test_the_spare_solar_line_copes_with_no_plan(self):
+        from custom_components.ess_controller.dashboard import _spare_solar
+
+        plan = entity_id("plan_cost")
+        assert "waiting for prices" in self._render(_spare_solar(plan), {plan: {}})
+
     def test_a_hold_with_no_import_figure_at_all_still_reads_sensibly(self):
         """Older plans, and diagnostics captures, carry no import column."""
         plan = entity_id("plan_cost")

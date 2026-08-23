@@ -816,6 +816,44 @@ def _soc_summary(plan_entity: str, soc_entity: str | None) -> str:
     )
 
 
+def _spare_solar(plan_entity: str) -> str:
+    """How much of the sun left today the battery can actually have.
+
+    "Solar left today 5.8 kWh" beside a plan buying from the grid reads as a
+    contradiction, and it is the single question this dashboard has been asked
+    most. It is not a contradiction: the house takes its share as the sun
+    arrives, and on a real August day 5.8 kWh of sun met 7.5 kWh of demand --
+    the sun did not cover the house, let alone have anything left for a 22 kWh
+    battery. The figure that answers the question is the surplus, and it was the
+    one figure not shown.
+
+    Summed from the plan's own slots, so it cannot disagree with the table.
+    """
+    return (
+        "{% set slots = state_attr('" + plan_entity + "', 'slots') %}"
+        "{% if not slots %}No plan yet — waiting for prices."
+        "{% else %}"
+        "{% set today = as_timestamp(slots[0].get('start')) "
+        "| timestamp_custom('%j', true) %}"
+        "{% set ns = namespace(pv=0.0, spare=0.0) %}"
+        "{% for s in slots %}"
+        "{% if as_timestamp(s.get('start')) | timestamp_custom('%j', true) == today %}"
+        # ``.get`` rather than attribute access: the ``float`` filter cannot
+        # rescue a missing key, because Undefined raises on conversion before the
+        # default is ever reached.
+        "{% set pv = s.get('pv_kwh') | float(0) %}"
+        "{% set ld = s.get('load_kwh') | float(0) %}"
+        "{% set ns.pv = ns.pv + pv %}"
+        "{% set ns.spare = ns.spare + [pv - ld, 0] | max %}"
+        "{% endif %}{% endfor %}"
+        "Of the **{{ '%.1f' | format(ns.pv) }} kWh** of sun left today, the house "
+        "takes **{{ '%.1f' | format(ns.pv - ns.spare) }} kWh** as it arrives. "
+        "**{{ '%.1f' | format(ns.spare) }} kWh** is spare for the battery — "
+        "anything more has to come from the grid or not at all."
+        "{% endif %}"
+    )
+
+
 def _plan_sparkline(plan_entity: str) -> str:
     """The whole horizon as one line of block characters.
 
@@ -1184,7 +1222,8 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
                             "load_forecast_tomorrow",
                         ],
                         resolved,
-                    )
+                    ),
+                    _markdown(_spare_solar(plan)) if plan else None,
                 ],
             ),
             _section(
