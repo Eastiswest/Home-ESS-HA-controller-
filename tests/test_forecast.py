@@ -1648,3 +1648,51 @@ class TestTheEveningHedgeRetiresOnEvidence:
         loads = [0.5] * 6
         assert sum(evening_uplift(hours, loads, 0.0)) > 0.0
         assert sum(evening_uplift(hours, loads, 0.0, measured_error_kwh=99.0)) == 0.0
+
+
+class TestADaytimeOverCallIsCorrected:
+    """An over-called load under-states the *solar surplus*, kWh for kWh.
+
+    That is what makes it worth correcting rather than riding out. A real
+    install's load model ran 0.064 kWh a slot high across 534 slots -- a
+    property of the model, not the weather -- and on an August afternoon it
+    turned 2.3 kWh of genuine spare sun into a forecast 1.4 kWh. The plan filled
+    the last of the headroom from the grid at 19.7p and left the afternoon's own
+    generation nowhere to go. Both halves of that are losses.
+    """
+
+    HOURS = [12, 13, 14, 15, 18, 20]
+    LOADS = [0.4, 0.4, 0.4, 0.4, 0.8, 0.8]
+
+    def _trim(self, bias, slots=500):
+        from custom_components.ess_controller.forecast.confidence import (
+            daytime_correction,
+        )
+
+        return daytime_correction(self.HOURS, self.LOADS, bias, slots)
+
+    def test_a_measured_over_call_comes_off_the_daytime_slots(self):
+        trim = self._trim(0.064)
+        assert trim[:4] == [pytest.approx(0.064)] * 4
+
+    def test_the_evening_is_left_to_its_own_allowance(self):
+        """Correcting here too would apply the same adjustment twice, in the one
+        window where under-calling costs 45p a kWh."""
+        assert self._trim(0.064)[4:] == [0.0, 0.0]
+
+    def test_an_under_calling_model_is_not_corrected_upwards(self):
+        assert self._trim(-0.1) == [0.0] * 6
+
+    def test_too_little_measured_is_not_a_bias_yet(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            MIN_BIAS_SLOTS,
+        )
+
+        assert self._trim(0.064, slots=MIN_BIAS_SLOTS - 1) == [0.0] * 6
+        assert any(self._trim(0.064, slots=MIN_BIAS_SLOTS))
+
+    def test_it_cannot_empty_a_small_slot(self):
+        """The bias is an average. Subtracting it whole from a slot that happens
+        to be small would invent a house using nothing."""
+        trim = self._trim(5.0)
+        assert trim[0] == pytest.approx(0.2)  # half of 0.4, no more

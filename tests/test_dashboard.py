@@ -741,7 +741,7 @@ class TestTemplatesRender:
         assert "None" not in table
 
     def test_the_spare_solar_line_separates_the_sun_from_the_surplus(self):
-        """"Solar left today 5.8 kWh" beside a plan buying from the grid reads
+        """ "Solar left today 5.8 kWh" beside a plan buying from the grid reads
         as a contradiction and is the question this dashboard has been asked
         most. It is not one: on a real August day 5.8 kWh of sun met 7.5 kWh of
         demand, so the sun did not cover the house, let alone have anything
@@ -755,10 +755,26 @@ class TestTemplatesRender:
                 "slots": [
                     # Two sunny half-hours with a surplus, one where the house
                     # wins, and one belonging to tomorrow which must be ignored.
-                    {"start": "2026-08-23T11:00:00+00:00", "pv_kwh": 1.0, "load_kwh": 0.4},
-                    {"start": "2026-08-23T11:30:00+00:00", "pv_kwh": 1.0, "load_kwh": 0.6},
-                    {"start": "2026-08-23T18:00:00+00:00", "pv_kwh": 0.2, "load_kwh": 0.9},
-                    {"start": "2026-08-24T11:00:00+00:00", "pv_kwh": 5.0, "load_kwh": 0.1},
+                    {
+                        "start": "2026-08-23T11:00:00+00:00",
+                        "pv_kwh": 1.0,
+                        "load_kwh": 0.4,
+                    },
+                    {
+                        "start": "2026-08-23T11:30:00+00:00",
+                        "pv_kwh": 1.0,
+                        "load_kwh": 0.6,
+                    },
+                    {
+                        "start": "2026-08-23T18:00:00+00:00",
+                        "pv_kwh": 0.2,
+                        "load_kwh": 0.9,
+                    },
+                    {
+                        "start": "2026-08-24T11:00:00+00:00",
+                        "pv_kwh": 5.0,
+                        "load_kwh": 0.1,
+                    },
                 ]
             }
         }

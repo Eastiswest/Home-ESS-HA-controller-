@@ -124,8 +124,8 @@ from .const import (
     TERMINAL_MODE_HORIZON_MEDIAN,
 )
 from .dashboard import OUTAGE_HOLD_MARK
+from .forecast.confidence import daytime_correction, evening_uplift, is_evening
 from .forecast.confidence import describe as describe_confidence
-from .forecast.confidence import evening_uplift, is_evening
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster, describe_climate_uplift
 from .forecast.solar import (
@@ -545,6 +545,25 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             float(progress.get("load_maturity", 0.0) or 0.0),
             float(progress.get("solar_maturity", 0.0) or 0.0),
         )
+
+    def daytime_load_bias_kwh(self, days: float = 7.0) -> tuple[float, int]:
+        """Mean signed load-forecast error per daytime slot, and the count.
+
+        Positive means the forecast has been running high. Daytime only, because
+        the evening has its own allowance and correcting it here as well would
+        apply the same adjustment twice.
+        """
+        errors: list[float] = []
+        for record in self.performance_store.log.window(days):
+            local = dt_util.as_local(record.start)
+            if is_evening(local.hour) or not record.load_measured:
+                continue
+            error = record.load_error
+            if error is not None:
+                errors.append(error)
+        if not errors:
+            return 0.0, 0
+        return sum(errors) / len(errors), len(errors)
 
     def evening_forecast_error_kwh(self, days: float = 7.0) -> float:
         """How wrong the evening load forecast has been, per evening, in kWh.
@@ -996,8 +1015,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # again unprompted, which teaches people to ignore the panel -- the one
         # thing it cannot afford.
         self._problem_runs = {
-            problem.key: self._problem_runs.get(problem.key, 0) + 1
-            for problem in found
+            problem.key: self._problem_runs.get(problem.key, 0) + 1 for problem in found
         }
         found = [
             problem
@@ -1580,11 +1598,21 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # the model otherwise -- only the evening, because that is where the error
         # measured on a real install actually was, and only until the evenings
         # themselves say it is no longer needed.
+        hours = [dt_util.as_local(start).hour for start, _ in boundaries]
         uplift = evening_uplift(
-            [dt_util.as_local(start).hour for start, _ in boundaries],
+            hours,
             [demand.kwh for demand in load_predictions],
             self.forecast_confidence(),
             self.evening_forecast_error_kwh(),
+        )
+        # ...and the other direction, outside the evening. A load forecast that
+        # runs high under-states the solar surplus kWh for kWh, so the plan buys
+        # from the grid to fill headroom the afternoon's own sun was going to
+        # fill -- paying for the electricity and spilling the generation, which
+        # is why this one is worth correcting rather than riding out.
+        bias, measured = self.daytime_load_bias_kwh()
+        trim = daytime_correction(
+            hours, [demand.kwh for demand in load_predictions], bias, measured
         )
 
         slots: list[HorizonSlot] = []
@@ -1603,7 +1631,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     import_price=import_price,
                     export_price=export_price,
                     pv_kwh=sun.kwh,
-                    load_kwh=demand.kwh + uplift[index],
+                    load_kwh=max(demand.kwh + uplift[index] - trim[index], 0.0),
                     # Declared on HorizonSlot from the start and never populated,
                     # which only mattered once there was a forecast worth telling
                     # apart from an announced price.

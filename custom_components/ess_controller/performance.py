@@ -646,9 +646,7 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
         # showed a positive net saving is not wrong, but the reader deserves to
         # be told which of the two facts is carrying it rather than left to
         # reconcile a minus and a plus on their own.
-        held = (
-            "more" if summary.stored_energy_kwh > 0 else "less"
-        )
+        held = "more" if summary.stored_energy_kwh > 0 else "less"
         note = (
             f"ended the week with {abs(summary.stored_energy_kwh):.1f} kWh {held} "
             "in the battery than plain self-use would have -- measured against "
@@ -678,5 +676,5 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
             # started has bought electricity it has not used yet.
             summary.notes.append(
                 f"the battery ended {drift:+.0f}% from where it started, so "
-                "\"Spent\" includes electricity bought and not yet used"
+                '"Spent" includes electricity bought and not yet used'
             )

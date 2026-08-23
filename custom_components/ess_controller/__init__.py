@@ -156,9 +156,7 @@ def _async_schedule_tariff_comparison(
 
     @callback
     def _schedule(_event: Any) -> None:
-        entry.async_on_unload(
-            async_call_later(hass, TARIFF_COMPARISON_DELAY, _compare)
-        )
+        entry.async_on_unload(async_call_later(hass, TARIFF_COMPARISON_DELAY, _compare))
 
     entry.async_on_unload(async_at_started(hass, _schedule))
 

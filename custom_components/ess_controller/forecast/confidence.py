@@ -115,3 +115,43 @@ def describe(confidence: float, measured_error_kwh: float = 0.0) -> str:
         f"still learning ({confidence * 100:.0f}% of the way): planning for "
         f"{allowance:.1f} kWh more evening load than forecast"
     )
+
+
+# How many measured slots before a bias is a bias rather than a run of weather.
+MIN_BIAS_SLOTS = 48
+
+# The most of a slot's forecast the correction may remove.
+#
+# A bias measured across hundreds of slots is a real property of the model, but
+# it is an *average*, and subtracting an average from a slot that happens to be
+# small can drive it to nothing. Half is enough to fix a systematic over-call
+# and not enough to invent an empty house.
+MAX_BIAS_FRACTION = 0.5
+
+
+def daytime_correction(
+    hours: list[int], loads: list[float], bias_kwh: float, slots_measured: int
+) -> list[float]:
+    """kWh to take off each slot's forecast load, same length as the inputs.
+
+    The load model over-called this house by 0.064 kWh a slot across 534 of
+    them -- systematic, not weather. That matters more than it sounds, because
+    an over-called load under-states the *solar surplus* kWh for kWh: on a real
+    August afternoon it turned a genuine 2.3 kWh of spare sun into a forecast
+    1.4 kWh, so the plan filled the last of the headroom from the grid at 19.7p
+    and left the afternoon's own generation nowhere to go. Both halves of that
+    are losses, which is what makes the error asymmetric and worth correcting.
+
+    Evening slots are left alone. They have their own machinery -- an allowance
+    that is added while the model is young and retired as the evenings
+    themselves disprove it -- and correcting them here as well would be the same
+    adjustment applied twice, in a window where under-calling costs 45p a kWh.
+    """
+    if bias_kwh <= 0.0 or slots_measured < MIN_BIAS_SLOTS:
+        # Under-calling is the evening allowance's business, and too little
+        # measured is no business of anybody's yet.
+        return [0.0] * len(loads)
+    return [
+        0.0 if is_evening(hour) else min(bias_kwh, load * MAX_BIAS_FRACTION)
+        for hour, load in zip(hours, loads, strict=True)
+    ]

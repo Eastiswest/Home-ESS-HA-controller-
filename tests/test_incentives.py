@@ -1175,9 +1175,7 @@ class TestEveryTariffIsMarkedByTheSameRuler:
             common_terminal_settings,
         )
 
-        settings = common_terminal_settings(
-            OptimiserSettings(), [10.0, 20.0, 30.0, 40.0]
-        )
+        settings = common_terminal_settings(OptimiserSettings(), [10.0, 20.0, 30.0, 40.0])
         assert settings.terminal_mode == TERMINAL_MODE_FIXED
         # The cheap end, because what a stored kWh is worth is what it costs to
         # put back.
