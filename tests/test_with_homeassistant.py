@@ -2570,7 +2570,10 @@ class TestUnusableForecastSensorsAreNamed:
         coordinator = await self._coordinator(hass, ["sensor.energy_production_tomorrow"])
         assert "no usable forecast" in coordinator.diagnostics()["solar_forecast_note"]
 
-    async def test_an_hourly_forecast_needs_no_note(self, hass):
+    async def test_an_hourly_forecast_names_itself(self, hass):
+        """Naming the live source is the confirmation people are told to look
+        for after wiring a forecast up, so a healthy hourly setup says which
+        sensor is driving rather than saying nothing."""
         hass.states.async_set(
             "sensor.solcast_forecast_today",
             "9.4",
@@ -2582,7 +2585,33 @@ class TestUnusableForecastSensorsAreNamed:
             },
         )
         coordinator = await self._coordinator(hass, ["sensor.solcast_forecast_today"])
-        assert coordinator.diagnostics()["solar_forecast_note"] == ""
+        note = coordinator.diagnostics()["solar_forecast_note"]
+        assert "hourly forecast from sensor.solcast_forecast_today" in note
+
+    async def test_a_dead_fallback_does_not_drown_out_the_live_source(self, hass):
+        """A real install added Solcast, whose curve parsed 96 windows and drove
+        the plan -- and the note read "no usable forecast ... estimating from the
+        sun's position instead", because two disabled Forecast.Solar sensors sat
+        beside it and the note only ever reported failures. The one line people
+        are told to check claimed the feature was down while it was working.
+        """
+        hass.states.async_set(
+            "sensor.solcast_forecast_today",
+            "9.4",
+            {
+                "detailedHourly": [
+                    {"period_start": "2026-08-13T10:00:00+00:00", "pv_estimate": 1.2},
+                    {"period_start": "2026-08-13T11:00:00+00:00", "pv_estimate": 1.4},
+                ]
+            },
+        )
+        coordinator = await self._coordinator(
+            hass, ["sensor.energy_production_today", "sensor.solcast_forecast_today"]
+        )
+        note = coordinator.diagnostics()["solar_forecast_note"]
+        assert note.startswith("hourly forecast from sensor.solcast_forecast_today")
+        assert "ignoring sensor.energy_production_today" in note
+        assert "sun's position" not in note
 
     async def test_configuring_nothing_says_nothing(self, hass):
         coordinator = await self._coordinator(hass, [])

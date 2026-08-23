@@ -1445,15 +1445,29 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 unusable.append(entity_id)
 
-        if unusable:
+        # Ordered by what is actually driving the estimate, because this line is
+        # the confirmation people are told to look for after wiring a forecast
+        # up. With Solcast parsing 96 half-hour windows and two dead sensors
+        # beside it, the old logic led with the dead sensors and finished
+        # "estimating from the sun's position instead" -- reporting the failure
+        # of the fallback while saying nothing about the source in use.
+        if hourly:
+            note = f"hourly forecast from {', '.join(hourly)}"
+            if unusable:
+                note += f"; ignoring {', '.join(unusable)}"
+            self._solar_forecast_note = note
+        elif totals:
+            note = (
+                f"using daily totals from {', '.join(totals)} to scale an estimate "
+                f"from the sun's position; an hourly forecast would be better"
+            )
+            if unusable:
+                note += f"; ignoring {', '.join(unusable)}"
+            self._solar_forecast_note = note
+        elif unusable:
             self._solar_forecast_note = (
                 f"no usable forecast from {', '.join(unusable)}; "
                 f"estimating from the sun's position instead"
-            )
-        elif totals and not hourly:
-            self._solar_forecast_note = (
-                f"using daily totals from {', '.join(totals)} to scale an estimate "
-                f"from the sun's position; an hourly forecast would be better"
             )
 
         if not attribute_sets:
