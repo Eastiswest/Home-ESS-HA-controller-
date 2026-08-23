@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the release notes are written from the commits since
+          # the previous tag, and a shallow checkout has neither.
+          fetch-depth: 0
 
       # The version HACS reports comes from the tag, and the version Home
       # Assistant reports comes from the manifest. If they disagree, the update
@@ -47,10 +51,36 @@ jobs:
           ruff format --check custom_components tests
           python -m pytest tests/ -q
 
+      # --generate-notes builds the body from merged pull requests, and this
+      # repository ships direct commits -- so every release published with it
+      # had an empty changelog, and the update dialog in Home Assistant showed
+      # a bare version number. The commit subjects are written to carry exactly
+      # this information, so the notes are built from them instead.
+      - name: Write the release notes from the commits
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME"^ 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$GITHUB_REF_NAME"
+            echo "Notes cover $RANGE"
+          else
+            RANGE="$GITHUB_REF_NAME"
+            echo "No previous tag; covering the whole history"
+          fi
+          {
+            echo "## What changed"
+            echo
+            git log --no-merges --reverse --pretty='- %s' "$RANGE"
+            if [ -n "$PREV" ]; then
+              echo
+              echo "**Full changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${GITHUB_REF_NAME}"
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file release-notes.md
