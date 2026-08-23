@@ -71,6 +71,16 @@ CRAMPED_WINDOW_SHARE = 0.15
 # by tomorrow the plan will have been rebuilt a hundred times.
 SOLAR_RESERVE_LOOKAHEAD_HOURS = 12.0
 
+# The most of the usable window the reserve may withhold from grid charging.
+#
+# The reserve is sized from measured forecast error, and on a small pack a bad
+# forecast week could otherwise hold most of the battery hostage to sun that
+# might arrive: a 10 kWh pack behind a 5 kW array with a 0.25 kWh/slot measured
+# miss would reserve over half its capacity. Above this share, being wrong about
+# the sun costs less than being forbidden to buy -- the trade the reserve exists
+# to make has inverted, so it is capped rather than trusted.
+SOLAR_RESERVE_MAX_SHARE = 0.4
+
 
 @dataclass(slots=True)
 class OptimiserSettings:
@@ -619,7 +629,10 @@ def _solar_headroom_levels(
             peak = max(peak, run)
             if slot.pv_kwh > 0.0:
                 daylight += 1
-        reserve = peak + error * daylight
+        reserve = min(
+            peak + error * daylight,
+            battery.usable_kwh * SOLAR_RESERVE_MAX_SHARE,
+        )
         if reserve <= 0.0:
             ceilings.append(levels)
             continue

@@ -138,7 +138,11 @@ def _lovelace(hass) -> None:
 
 
 def _install_solar_integration(hass, domain: str, base) -> None:
-    """Write a real custom integration that publishes an hourly solar curve."""
+    """Write a real custom integration that publishes an hourly solar curve.
+
+    ``base`` of None publishes timezone-naive timestamps, which is the malformed
+    payload a third-party integration can hand over.
+    """
     root = pathlib.Path(hass.config.config_dir) / "custom_components" / domain
     root.mkdir(parents=True, exist_ok=True)
     (root / "manifest.json").write_text(
@@ -157,7 +161,10 @@ def _install_solar_integration(hass, domain: str, base) -> None:
     (root / "__init__.py").write_text(
         "async def async_setup(hass, config):\n    return True\n"
     )
-    hours = {(base + timedelta(hours=n)).isoformat(): 1000.0 for n in range(4)}
+    if base is None:
+        hours = {f"2026-08-23T{10 + n}:00:00": 1000.0 for n in range(4)}
+    else:
+        hours = {(base + timedelta(hours=n)).isoformat(): 1000.0 for n in range(4)}
     (root / "energy.py").write_text(
         "async def async_get_solar_forecast(hass, config_entry_id):\n"
         f"    return {{'wh_hours': {hours!r}}}\n"
@@ -187,7 +194,7 @@ def caplog_at(level: int):
         root.removeHandler(handler)
 
 
-def _config_entry(domain: str) -> object:
+def _config_entry(domain: str, suffix: str = "") -> object:
     """A minimal, real ConfigEntry for another integration.
 
     Built rather than mocked because the code under test asks Home Assistant to
@@ -205,7 +212,7 @@ def _config_entry(domain: str) -> object:
         options={},
         source="user",
         unique_id=None,
-        entry_id=f"{domain}-under-test",
+        entry_id=f"{domain}-under-test{suffix}",
         discovery_keys={},
         subentries_data=(),
         state=ConfigEntryState.NOT_LOADED,
@@ -2823,6 +2830,67 @@ class TestTheHourlyForecastIsFoundWhereItActuallyLives:
         assert series.energy_between(base, base + timedelta(hours=4)) == pytest.approx(
             4.0, abs=0.01
         )
+
+    async def test_two_planes_of_one_provider_are_summed(self, hass):
+        """A split array is one Forecast.Solar entry per roof plane, and the
+        Energy dashboard sums the planes. First-entry-wins silently halved the
+        sun for exactly the install this fallback was written for."""
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        _install_solar_integration(hass, "curvy_solar", base)
+        await hass.config_entries.async_add(_config_entry("curvy_solar"))
+        await hass.config_entries.async_add(_config_entry("curvy_solar", "-plane2"))
+
+        series = await coordinator._async_energy_platform_forecast()
+        assert series is not None
+        # Two planes at 1 kWh per hour each: summed, not first-wins (4.0) and
+        # not double-counted across providers.
+        assert series.energy_between(base, base + timedelta(hours=4)) == pytest.approx(
+            8.0, abs=0.01
+        )
+
+    async def test_a_naive_timestamp_payload_cannot_kill_the_refresh(self, hass):
+        """The payload is somebody else's code's output. Timezone-naive keys
+        parse into slots that raise on every comparison with the plan's aware
+        timestamps -- not here, but on every energy_between() for the rest of
+        the horizon, which fails every refresh from then on."""
+        coordinator = await self._coordinator(hass)
+        _install_solar_integration(hass, "naive_solar", None)
+        await hass.config_entries.async_add(_config_entry("naive_solar"))
+
+        assert await coordinator._async_energy_platform_forecast() is None
+
+    async def test_the_fallback_still_names_the_dead_configured_sensors(self, hass):
+        """The note is the line people are told to check. Replacing the failure
+        report with the fallback's success hid a dead configured sensor for as
+        long as any other integration answered."""
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.const import CONF_SOLAR_FORECAST_ENTITIES
+
+        coordinator = await self._coordinator(hass)
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        _install_solar_integration(hass, "curvy_solar", base)
+        await hass.config_entries.async_add(_config_entry("curvy_solar"))
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                CONF_SOLAR_FORECAST_ENTITIES: ["sensor.dead_solcast"],
+            },
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+
+        assert coordinator._fetch_solar_forecast() is None
+        series = await coordinator._async_energy_platform_forecast()
+        assert series is not None
+        note = coordinator._solar_forecast_note
+        assert note.startswith("hourly forecast from the curvy_solar integration")
+        assert "sensor.dead_solcast" in note
 
     async def test_an_integration_that_will_not_import_is_skipped(self, hass):
         """Forecast.Solar's own energy module imports a package that is not

@@ -204,13 +204,13 @@ CONTROL_ROLES = frozenset(
     {"use_mode", "manual_mode", "charge_limit", "discharge_limit", "grid_charge"}
 )
 
-# How much of a half-hour's battery gain the sun must fail to explain before the
-# slot is worth reporting. A whole-percent state of charge on a 22 kWh pack
-# quantises to 0.22 kWh, so this is comfortably clear of the rounding.
 # Daylight half-hours needed before the solar forecast error is worth sizing a
 # reserve from. Two days of sun; below that a single overcast afternoon sets it.
 MIN_SOLAR_ERROR_SLOTS = 40
 
+# How much of a half-hour's battery gain the sun must fail to explain before the
+# slot is worth reporting. A whole-percent state of charge on a 22 kWh pack
+# quantises to 0.22 kWh, so this is comfortably clear of the rounding.
 UNEXPLAINED_CHARGE_KWH = 0.15
 
 # Solar reaching the cells rather than the meter. The real figure is a setting;
@@ -283,6 +283,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._solar_forecast: EnergySeries | None = None
         self._solar_daily_totals: dict[Any, float] = {}
         self._solar_forecast_note: str = ""
+        # Configured forecast sensors that yielded nothing, kept so the note can
+        # still name them when the energy-platform fallback takes over.
+        self._solar_unusable: list[str] = []
         self._forecast_fetched: datetime | None = None
         self._import_prices = PriceSeries()
         self._export_prices = PriceSeries()
@@ -540,22 +543,47 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def solar_forecast_error_kwh(self, days: float = 7.0) -> float:
-        """How far out the solar forecast has been per slot, in kWh.
+        """Per-daylight-slot solar forecast error, calibrated at the day level.
 
-        Absolute error, not signed: what the headroom reserve needs to know is
-        how much the sun *could* differ from its forecast, and a day that beats
-        it and a day that misses it are equally informative about that. Returns
-        zero until there is enough measured to be worth acting on, which leaves
-        the reserve switched off on a fresh install rather than sized by a guess.
+        The reserve multiplies this by the daylight slots still ahead, so what
+        the figure has to describe is how far a *day's worth* of forecast strays
+        -- not how far single slots do. Per-slot absolute error double-counts:
+        within one day a cloudy-morning miss and a clear-afternoon beat partly
+        cancel, and summing their absolute values reserved for both. Measured
+        per slot on a real 5 kW install the naive figure could hold half the
+        pack empty against an error a whole day never actually produces.
+
+        So the error is summed *signed* within each measured day, the absolute
+        value taken per day, and the average day miss spread back over the
+        average day's daylight. Multiplied out by the reserve this reproduces
+        the measured day-level miss, cancellation included.
+
+        Absolute at the day level, not signed: a day that beats its forecast and
+        a day that misses are equally informative about how far the sun strays.
+        Returns zero until there is enough measured to act on, which leaves the
+        reserve off on a fresh install rather than sized by a guess.
         """
-        errors = [
-            abs(record.pv_error)
-            for record in self.performance_store.log.window(days)
-            if record.pv_error is not None and record.pv_kwh > 0.0
-        ]
-        if len(errors) < MIN_SOLAR_ERROR_SLOTS:
+        by_day: dict[Any, tuple[float, int]] = {}
+        measured = 0
+        for record in self.performance_store.log.window(days):
+            if record.pv_error is None:
+                continue
+            if record.pv_kwh <= 0.0 and (record.pv_forecast_kwh or 0.0) <= 0.0:
+                # A dark half-hour agrees with its forecast trivially and says
+                # nothing about sunshine.
+                continue
+            day = dt_util.as_local(record.start).date()
+            signed, count = by_day.get(day, (0.0, 0))
+            by_day[day] = (signed + record.pv_error, count + 1)
+            measured += 1
+        if measured < MIN_SOLAR_ERROR_SLOTS or not by_day:
             return 0.0
-        return sum(errors) / len(errors)
+        day_errors = [abs(signed) for signed, _ in by_day.values()]
+        daylight_counts = [count for _, count in by_day.values()]
+        mean_daylight = sum(daylight_counts) / len(daylight_counts)
+        if mean_daylight <= 0:
+            return 0.0
+        return (sum(day_errors) / len(day_errors)) / mean_daylight
 
     def forecast_confidence(self) -> float:
         """How far the load and solar models have earned the right to be believed.
@@ -1337,7 +1365,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         from homeassistant.loader import async_get_integration
 
+        chosen: str | None = None
+        collected: list[Any] = []
         for entry in self.hass.config_entries.async_entries():
+            # One *provider*, however many entries it has. A split array is
+            # configured as one Forecast.Solar entry per roof plane, and the
+            # Energy dashboard sums the planes -- taking only the first entry
+            # would silently halve the sun. But summing across *different*
+            # providers double-counts it: two forecasts of the same roof are
+            # opinions, not additive planes. So all entries of the first domain
+            # that answers are summed, and other domains are left alone.
+            if chosen is not None and entry.domain != chosen:
+                continue
             try:
                 integration = await async_get_integration(self.hass, entry.domain)
                 platform = await integration.async_get_platform("energy")
@@ -1348,26 +1387,43 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             try:
                 payload = await getter(self.hass, entry.entry_id)
+                hours = (payload or {}).get("wh_hours")
+                if not isinstance(hours, Mapping) or not hours:
+                    continue
+                # Parsed inside the guard: the payload is somebody else's code's
+                # output, and a mapping keyed by naive timestamps raises from
+                # the sort inside the parser -- which must cost this provider
+                # its contribution, never the refresh.
+                found = parse_wh_mapping(hours, as_power=False)
             except Exception:  # pragma: no cover - somebody else's integration
                 _LOGGER.debug("Solar forecast from %s failed", entry.domain)
                 continue
-            hours = (payload or {}).get("wh_hours")
-            if not isinstance(hours, Mapping) or not hours:
-                continue
-            found = parse_wh_mapping(hours, as_power=False)
+            # A timezone-naive slot cannot be compared with the plan's aware
+            # timestamps; it would not fail here, it would fail on every
+            # energy_between() for the rest of the horizon.
+            found = [
+                slot
+                for slot in found
+                if slot.start.tzinfo is not None and slot.end.tzinfo is not None
+            ]
             if not found:
                 continue
-            # The first that answers, and then stop. Running two forecast
-            # providers is common -- Forecast.Solar alongside Solcast -- and
-            # concatenating their curves does not average them: the slots overlap
-            # and the energy in them is summed, so the plan would see twice the
-            # sun and buy nothing.
-            self._solar_forecast_note = (
-                f"hourly forecast from the {entry.domain} integration, read "
-                "the same way the Energy dashboard reads it"
-            )
-            return EnergySeries(found)
-        return None
+            chosen = entry.domain
+            collected.extend(found)
+        if not collected:
+            return None
+        note = (
+            f"hourly forecast from the {chosen} integration, read "
+            "the same way the Energy dashboard reads it"
+        )
+        if self._solar_unusable:
+            # The configured sensors that gave nothing stay named. This line is
+            # the one people are told to check, and replacing the failure report
+            # with the fallback's success hid a dead Solcast sensor for as long
+            # as any other integration answered.
+            note += f"; ignoring {', '.join(self._solar_unusable)}"
+        self._solar_forecast_note = note
+        return EnergySeries(collected)
 
     async def _async_fetch_weather(self) -> WeatherSeries | None:
         entity_id = self.options.get(CONF_WEATHER_ENTITY)
@@ -1419,6 +1475,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entity_ids = _as_list(raw)
         self._solar_daily_totals = {}
         self._solar_forecast_note = ""
+        self._solar_unusable = []
         if not entity_ids:
             return None
 
@@ -1451,6 +1508,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # beside it, the old logic led with the dead sensors and finished
         # "estimating from the sun's position instead" -- reporting the failure
         # of the fallback while saying nothing about the source in use.
+        self._solar_unusable = unusable
         if hourly:
             note = f"hourly forecast from {', '.join(hourly)}"
             if unusable:
