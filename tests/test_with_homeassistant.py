@@ -2025,6 +2025,41 @@ class TestTheCurrentSlotDoesNotChurn:
         assert command.action is SlotAction.SELF_USE
         assert command.reason == "outside plan horizon"
 
+    async def test_the_rate_is_committed_with_the_action(self, hass):
+        """Every current-limit write lands in EEPROM, documented at ~100k
+        cycles -- under thirty a day for a ten-year life. The held action was
+        still writing a fresh rate every five minutes, because each rebuild
+        re-derives the slot's power over the time it has left: a measured
+        morning spent six of its eight register writes walking one charge from
+        4.0 A to 16.1 A. The rate chosen at the top of the slot delivers the
+        slot's energy by construction; the rest was tracking noise, in hardware.
+        """
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        first = coordinator._resolve_command(now)
+
+        # The rebuild hands back the same half-hour with a different rate, as it
+        # does every five minutes while the slot shrinks under it. Power is
+        # derived from the slot's energy over its duration, so the energy is
+        # what moves.
+        slot = coordinator.plan.slots[0]
+        slot.charge_ac_kwh = slot.charge_ac_kwh * 3 + 2.0
+        slot.discharge_ac_kwh = 0.0
+        again = coordinator._resolve_command(now + timedelta(minutes=6))
+        assert again.power_kw == pytest.approx(first.power_kw)
+
+    async def test_a_new_slot_gets_a_fresh_rate(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        coordinator._resolve_command(now)
+        later = coordinator.plan.slots[2]
+        later.charge_ac_kwh = 4.321 * later.duration_hours
+        later.discharge_ac_kwh = 0.0
+        command = coordinator._resolve_command(later.start + timedelta(minutes=1))
+        assert command.power_kw == pytest.approx(4.321, abs=0.01)
+
     async def test_an_override_is_never_held_off(self, hass):
         import homeassistant.util.dt as ha_dt
 
@@ -3014,6 +3049,79 @@ class TestTheEveningHedgeAnswersToTheEvenings:
         assert coordinator.evening_forecast_error_kwh() == pytest.approx(1.2, abs=0.01)
 
 
+class TestAPowerCutStopsTheSteering:
+    """During a power cut the inverter carries the house on its EPS output.
+
+    Everything the plan is built on goes with the grid: prices mean nothing,
+    importing is impossible, Manual-mode writes steer nothing, and the load
+    sensor may honestly report a house whose non-essential circuits were shed.
+    Before this the controller kept planning, writing and learning throughout.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _island(coordinator):
+        from custom_components.ess_controller.inverter.base import InverterState
+
+        async def _read():
+            return InverterState(available=True, soc=64.0, run_mode="EPS Mode")
+
+        coordinator._adapter.async_read_state = _read
+
+    async def test_no_writes_and_no_learning_while_islanded(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._island(coordinator)
+
+        applies = len(coordinator._apply_history)
+        fed = []
+        coordinator._train_from_samples = lambda *a, **k: fed.append(1)
+        await coordinator.async_refresh()
+
+        assert coordinator.last_command.action is SlotAction.SELF_USE
+        assert "backup power" in coordinator.last_command.reason
+        assert len(coordinator._apply_history) == applies, "wrote while islanded"
+        assert not fed, "learned while islanded"
+
+    async def test_the_outage_reaches_the_repairs_panel(self, hass):
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.ess_controller import problems
+
+        coordinator = await self._coordinator(hass)
+        self._island(coordinator)
+        for _ in range(problems.PERSIST_CYCLES):
+            await coordinator.async_refresh()
+        issues = {
+            issue_id
+            for (domain, issue_id) in ir.async_get(hass).issues
+            if domain == DOMAIN
+        }
+        assert "running_on_backup_power" in issues
+
+    async def test_the_grid_returning_hands_control_back(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        self._island(coordinator)
+        await coordinator.async_refresh()
+        assert "backup power" in coordinator.last_command.reason
+
+        # The stub is removed, so the next read is the harness's normal state.
+        del coordinator._adapter.async_read_state
+        await coordinator.async_refresh()
+        assert "backup power" not in (coordinator.last_command.reason or "")
+
+
 class TestProblemsReachTheRepairsPanel:
     """Detection is worthless if nothing surfaces it where people look."""
 
@@ -3190,6 +3298,7 @@ class TestProblemsReachTheRepairsPanel:
         strings = json.loads((root / DOMAIN / "strings.json").read_text())
         every = Snapshot(
             controlling=True,
+            on_backup_power=True,
             inverter_available=False,
             soc_readable=False,
             rejected_roles={"min_soc": "no"},

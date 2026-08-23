@@ -253,6 +253,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.settings: RuntimeSettings = RuntimeSettings()
         # (slot start, action) for the half-hour currently being acted on.
         self._committed: tuple[datetime, SlotAction] | None = None
+        self._committed_power: tuple[datetime, float] | None = None
+        self._writes_day: Any = None
+        self._writes_by_role: dict[str, int] = {}
         self.accumulator = SlotAccumulator()
 
         self.plan: Plan | None = None
@@ -663,6 +666,31 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rediscover_if_blind()
         self.inverter_state = await self._adapter.async_read_state()
         site = self._read_site_state(now)
+
+        if self.inverter_state.islanded:
+            # The grid is gone and the inverter is carrying the house on its
+            # backup output. Every assumption the plan is built on has gone with
+            # it: prices mean nothing, importing is impossible, Manual-mode
+            # writes steer nothing, and the load sensor may honestly be
+            # reporting a house whose non-essential circuits were shed. So the
+            # controller steps back entirely -- no writes, because register
+            # writes to an islanded inverter range from pointless to harmful;
+            # and no learning, because a shed-load evening taught as a normal
+            # one would haunt the forecast for weeks. Slots starved of samples
+            # fall below the coverage floor and drop out of both the learning
+            # and the money history on their own.
+            self.last_command = ControlCommand(
+                action=SlotAction.SELF_USE,
+                reason=(
+                    "running on backup power (EPS): the grid is down, so "
+                    "nothing is written and nothing is learned until it returns"
+                ),
+            )
+            self._sync_problems()
+            self._last_site = site
+            self._note_slot_state(now, site)
+            return self._build_data(now, site)
+
         self._train_from_samples(now, site)
 
         if self.settings.strategy == STRATEGY_OFF or not self.settings.enabled:
@@ -1014,6 +1042,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         recent = self.performance_store.log.window(0.25)
         return problems.Snapshot(
             controlling=self.settings.controlling,
+            on_backup_power=self.inverter_state.islanded,
             inverter_available=self.inverter_state.available,
             soc_readable=self.battery.valid,
             rejected_roles=dict(self._adapter.rejected_roles()),
@@ -1100,6 +1129,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entry = result.as_dict()
         entry["at"] = now.isoformat()
         self._apply_history.append(entry)
+        # Register writes land in the inverter's EEPROM, whose documented life
+        # is ~100k cycles -- under thirty a day over ten years. Counted per day
+        # so the diagnostics can answer "how hard are we working the hardware"
+        # with a number instead of an extrapolation from twenty applies.
+        today = dt_util.as_local(now).date()
+        if self._writes_day != today:
+            self._writes_day = today
+            self._writes_by_role = {}
+        for write in entry.get("writes", []):
+            role = str(write.get("role", "unknown"))
+            self._writes_by_role[role] = self._writes_by_role.get(role, 0) + 1
 
     def unexplained_charge(self, days: float = 2.0) -> list[dict[str, Any]]:
         """Half-hours where the battery gained more than the sun could have given.
@@ -2467,6 +2507,22 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if power <= 0:
             power = self._default_power(action)
 
+        # The power is committed for the half-hour along with the action, and for
+        # a harder reason than churn: every rate write lands in the inverter's
+        # EEPROM, whose life its own documentation puts at ~100k writes -- under
+        # thirty a day for a ten-year service life. The plan rebuilds every five
+        # minutes, and each rebuild re-derives this slot's rate over the time it
+        # has left, so a held *action* was still writing a fresh current limit
+        # every cycle: a measured morning spent six of its eight register writes
+        # walking the same charge from 4.0 A to 16.1 A. The rate chosen at the
+        # top of the slot delivers the slot's planned energy by construction;
+        # everything after it was tracking noise, at a hardware cost.
+        key = slot_start_for(slot.start)
+        if self._committed_power is not None and self._committed_power[0] == key:
+            power = self._committed_power[1]
+        else:
+            self._committed_power = (key, power)
+
         grid = self.grid_spec()
         return ControlCommand(
             action=action,
@@ -2564,6 +2620,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def clear_commitment(self) -> None:
         """Let the next cycle change the current slot's action again."""
         self._committed = None
+        self._committed_power = None
 
     def _default_power(self, action: SlotAction) -> float:
         if action is SlotAction.DISCHARGE:
@@ -2949,6 +3006,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "apply_history": list(self._apply_history),
             "live_power": self._live_power(),
+            "register_writes_today": {
+                **self._writes_by_role,
+                "total": sum(self._writes_by_role.values()),
+            },
             "unexplained_charge": self.unexplained_charge(),
             "slot_coverage": self.slot_coverage(),
         }

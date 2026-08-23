@@ -898,6 +898,10 @@
     "control_disabled_in_home_assistant": {
       "title": "An inverter {noun} is disabled in Home Assistant",
       "description": "The controller could not find a control for: {roles}\n\nThese entities exist but are disabled, so nothing can see them: {entities}\n\nEnable them under Settings → Devices & services → your inverter integration → Entities, then reload this integration."
+    },
+    "running_on_backup_power": {
+      "title": "Running on backup power",
+      "description": "The inverter is islanded: the grid is down and the house is being carried on the EPS output. The controller has stepped back - nothing is written to the inverter and nothing is learned from these half-hours, because prices, imports and the load shape all stop meaning what the plan assumes.\n\nThis clears on its own when the grid returns. The battery serves the house under the inverter's own logic in the meantime."
     }
   }
 }

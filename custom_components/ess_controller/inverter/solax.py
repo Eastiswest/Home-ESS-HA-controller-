@@ -42,6 +42,7 @@ from .roles import (
     ROLE_BATTERY_VOLTAGE,
     ROLE_CHARGE_LIMIT,
     ROLE_DISCHARGE_LIMIT,
+    ROLE_EPS_VOLTAGE,
     ROLE_EXPORT_LIMIT,
     ROLE_GRID_CHARGE,
     ROLE_GRID_POWER,
@@ -50,6 +51,7 @@ from .roles import (
     ROLE_MANUAL_MODE,
     ROLE_MIN_SOC,
     ROLE_PV_POWER,
+    ROLE_RUN_MODE,
     ROLE_SOC,
     ROLE_TARGET_SOC,
     ROLE_USE_MODE,
@@ -166,6 +168,8 @@ class SolaxModbusAdapter(InverterAdapter):
             load_power_kw=power_kw(self.hass, self.entity(ROLE_LOAD_POWER)),
             min_soc=state_float(self.hass, self.entity(ROLE_MIN_SOC)),
             locked=locked,
+            run_mode=state_value(self.hass, self.entity(ROLE_RUN_MODE)),
+            eps_voltage=state_float(self.hass, self.entity(ROLE_EPS_VOLTAGE)),
             raw={"entities": self._entities},
         )
 

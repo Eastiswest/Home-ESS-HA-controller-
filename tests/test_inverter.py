@@ -1651,6 +1651,53 @@ class TestARefusedWriteIsNotRetriedForEver:
         assert adapter.rejected_roles() == {}
 
 
+class TestIslandingIsRecognised:
+    """During a power cut the inverter carries the house on its EPS output, and
+    every assumption the plan is built on goes with the grid. Nothing in the
+    controller knew: it kept costing half-hours at Agile prices and writing
+    Manual-mode registers to an inverter that was no longer listening to them.
+    """
+
+    def _state(self, **kwargs):
+        from custom_components.ess_controller.inverter.base import InverterState
+
+        return InverterState(available=True, **kwargs)
+
+    def test_the_run_mode_text_is_enough(self):
+        assert self._state(run_mode="EPS Mode").islanded
+        # Transitional is still off-grid.
+        assert self._state(run_mode="EPS Check Mode").islanded
+        assert not self._state(run_mode="Normal Mode").islanded
+
+    def test_an_energised_backup_output_is_enough(self):
+        assert self._state(eps_voltage=230.1).islanded
+        # Residual millivolts and an unpowered output are not an island.
+        assert not self._state(eps_voltage=0.0).islanded
+        assert not self._state(eps_voltage=None).islanded
+
+    def test_a_grid_tied_inverter_is_not_islanded_by_default(self):
+        assert not self._state().islanded
+
+    def test_the_solax_adapter_reads_both_signals(self):
+        import asyncio
+
+        from custom_components.ess_controller.inverter.roles import discover_entities
+        from custom_components.ess_controller.inverter.solax import (
+            SOLAX_ROLE_SPECS,
+            SolaxModbusAdapter,
+        )
+
+        hass = build_solax_hass()
+        hass.states.set("sensor.solax_run_mode", "EPS Mode")
+        hass.states.set("sensor.solax_eps_voltage", 229.8)
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        adapter = SolaxModbusAdapter(hass, entities)
+        state = asyncio.run(adapter.async_read_state())
+        assert state.run_mode == "EPS Mode"
+        assert state.eps_voltage == 229.8
+        assert state.islanded
+
+
 class TestTheCandidateListReachesPastTheNoisyNames:
     """A SolaX behind the full Modbus integration publishes forty ``number``
     entities named ``remotecontrol_*`` before it gets anywhere near the ones a

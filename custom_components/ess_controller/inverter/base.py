@@ -164,7 +164,27 @@ class InverterState:
     load_power_kw: float | None = None
     min_soc: float | None = None
     locked: bool | None = None
+    run_mode: str | None = None
+    """The inverter's operating state, e.g. "Normal Mode" or "EPS Mode"."""
+    eps_voltage: float | None = None
+    """Backup output voltage: ~230 V while islanded, 0 on grid."""
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def islanded(self) -> bool:
+        """Whether the inverter is running its backup output off the battery.
+
+        The grid is gone, which changes everything the controller believes:
+        prices stop meaning anything, "import" is impossible, Manual-mode writes
+        steer nothing, and the load sensor may honestly report a house whose
+        non-essential circuits have been shed. Two independent signals, either
+        sufficient: the run-mode text (any EPS state counts, including EPS
+        Check -- transitional is still off-grid), and the backup output being
+        energised, which no grid-tied state produces.
+        """
+        if self.run_mode and "eps" in self.run_mode.lower():
+            return True
+        return self.eps_voltage is not None and self.eps_voltage > 100.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +195,9 @@ class InverterState:
             "battery_voltage": self.battery_voltage,
             "min_soc": self.min_soc,
             "locked": self.locked,
+            "run_mode": self.run_mode,
+            "eps_voltage": self.eps_voltage,
+            "islanded": self.islanded,
         }
 
     def power_summary(self) -> dict[str, Any]:

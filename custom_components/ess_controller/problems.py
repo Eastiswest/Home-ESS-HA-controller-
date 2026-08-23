@@ -77,6 +77,9 @@ class Snapshot:
     """Whether the user has asked it to write at all. Almost nothing is a fault
     on an install that was never given control."""
 
+    on_backup_power: bool = False
+    """The inverter is islanded, carrying the house on its EPS output."""
+
     inverter_available: bool = True
     soc_readable: bool = True
     rejected_roles: dict[str, str] = field(default_factory=dict)
@@ -96,6 +99,12 @@ def _plural(count: int, one: str, many: str) -> str:
 def detect(state: Snapshot) -> list[Problem]:
     """Everything currently wrong, worst first."""
     found: list[Problem] = []
+
+    # Raised whether or not the controller was given write access: a house on
+    # battery power wants to know either way, and wants to know why the
+    # dashboard's plan has stopped meaning anything.
+    if state.on_backup_power:
+        found.append(Problem("running_on_backup_power", "warning"))
 
     # -- it has stopped controlling -------------------------------------
     if state.controlling and not state.inverter_available:

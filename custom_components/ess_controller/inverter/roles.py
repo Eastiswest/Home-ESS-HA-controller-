@@ -36,6 +36,8 @@ ROLE_BATTERY_POWER = "battery_power"
 ROLE_PV_POWER = "pv_power"
 ROLE_GRID_POWER = "grid_power"
 ROLE_LOAD_POWER = "load_power"
+ROLE_RUN_MODE = "run_mode"
+ROLE_EPS_VOLTAGE = "eps_voltage"
 
 ALL_ROLES: tuple[str, ...] = (
     ROLE_USE_MODE,
@@ -53,6 +55,8 @@ ALL_ROLES: tuple[str, ...] = (
     ROLE_PV_POWER,
     ROLE_GRID_POWER,
     ROLE_LOAD_POWER,
+    ROLE_RUN_MODE,
+    ROLE_EPS_VOLTAGE,
 )
 
 
@@ -220,6 +224,18 @@ SOLAX_ROLE_SPECS: tuple[RoleSpec, ...] = (
         ("sensor",),
         ("house_load", "load_power", "inverter_load"),
         description="House load power",
+    ),
+    RoleSpec(
+        ROLE_RUN_MODE,
+        ("sensor",),
+        ("run_mode",),
+        description='Inverter operating mode; reads "EPS Mode" when islanded',
+    ),
+    RoleSpec(
+        ROLE_EPS_VOLTAGE,
+        ("sensor",),
+        ("eps_voltage",),
+        description="Backup output voltage: ~230 V islanded, 0 on grid",
     ),
 )
 

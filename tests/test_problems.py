@@ -29,6 +29,19 @@ class TestNothingIsWrong:
         assert detect(state) == []
 
 
+class TestBackupPower:
+    def test_islanding_is_raised_even_in_advisory_mode(self):
+        """A house on battery power wants to know whichever mode it is in, and
+        wants to know why the dashboard's plan has stopped meaning anything."""
+        assert "running_on_backup_power" in keys(Snapshot(on_backup_power=True))
+        assert "running_on_backup_power" in keys(
+            Snapshot(controlling=True, on_backup_power=True)
+        )
+
+    def test_on_grid_says_nothing(self):
+        assert "running_on_backup_power" not in keys(Snapshot())
+
+
 class TestItHasStoppedControlling:
     def test_a_lost_inverter_is_an_error(self):
         """Whether it has lasted long enough to mention is the caller's business:
