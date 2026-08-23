@@ -134,8 +134,14 @@ def daytime_correction(
 ) -> list[float]:
     """kWh to take off each slot's forecast load, same length as the inputs.
 
-    The load model over-called this house by 0.064 kWh a slot across 534 of
-    them -- systematic, not weather. That matters more than it sounds, because
+    The load model over-called this house by 0.042 kWh a slot across the
+    daytime -- systematic, not weather. Daytime measured on its own, not the
+    0.064 blended across the whole day: two thirds of that lives in the evening,
+    where it is the young-model allowance doing its job, and applying the blend
+    here would have deleted about 2 kWh a day of real demand. The scoping is the
+    substance of this correction rather than a detail of it.
+
+    That matters more than it sounds, because
     an over-called load under-states the *solar surplus* kWh for kWh: on a real
     August afternoon it turned a genuine 2.3 kWh of spare sun into a forecast
     1.4 kWh, so the plan filled the last of the headroom from the grid at 19.7p
@@ -146,6 +152,16 @@ def daytime_correction(
     that is added while the model is young and retired as the evenings
     themselves disprove it -- and correcting them here as well would be the same
     adjustment applied twice, in a window where under-calling costs 45p a kWh.
+
+    One property to know before trusting the size of it. ``bias_kwh`` is measured
+    against the forecast as *published*, which already carries whatever
+    correction was applied last time, so the correction partly measures itself
+    away: with an instantaneous window the map would flip between nothing and
+    the full bias, and the rolling window damps that to roughly half. It settles
+    low rather than high, which is the safe direction -- under-correcting leaves
+    today's behaviour, over-correcting invents an empty house. Measuring the raw
+    model instead would need the uncorrected figure recorded alongside the
+    planned one, and is the fix if half ever proves too little.
     """
     if bias_kwh <= 0.0 or slots_measured < MIN_BIAS_SLOTS:
         # Under-calling is the evening allowance's business, and too little

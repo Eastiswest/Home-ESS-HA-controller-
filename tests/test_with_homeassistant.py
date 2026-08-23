@@ -17,7 +17,9 @@ Home Assistant installed.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import pathlib
 import sys
 from datetime import timedelta
@@ -165,6 +167,24 @@ def _install_solar_integration(hass, domain: str, base) -> None:
     from homeassistant import loader
 
     hass.data.pop(loader.DATA_CUSTOM_COMPONENTS, None)
+
+
+@contextlib.contextmanager
+def caplog_at(level: int):
+    """Collect log records emitted inside the block, at ``level`` and above."""
+    records: list[logging.LogRecord] = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Collector(level)
+    root = logging.getLogger("custom_components.ess_controller")
+    root.addHandler(handler)
+    try:
+        yield records
+    finally:
+        root.removeHandler(handler)
 
 
 def _config_entry(domain: str) -> object:
@@ -2661,6 +2681,33 @@ class TestTheTariffComparisonIsThereWithoutBeingAsked:
         assert state is not None
         assert state.state not in ("unknown", "unavailable", "None")
 
+    async def test_no_region_means_no_unprompted_warning(self, hass):
+        """Pressing the button with nothing to compare against should say so.
+        Saying it unprompted at every restart is how people learn to stop
+        reading the log -- the same failure the Repairs damping exists to stop.
+        """
+        import logging
+
+        from custom_components.ess_controller.const import CONF_OCTOPUS_REGION
+
+        entry_options = {CONF_OCTOPUS_REGION: ""}
+        coordinator = await self._coordinator(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, **entry_options}
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+
+        with caplog_at(logging.WARNING) as quiet:
+            assert await coordinator.async_auto_recommend_tariffs() is None
+        assert not [r for r in quiet if "Octopus region" in r.getMessage()]
+
+        # ...but asking directly still gets an answer, because then somebody did.
+        with caplog_at(logging.WARNING) as asked:
+            assert await coordinator.async_recommend_tariffs() is None
+        assert [r for r in asked if "Octopus region" in r.getMessage()]
+
     async def test_it_is_scheduled_to_run_by_itself(self, hass):
         """Registered against startup rather than left for the button."""
         from custom_components.ess_controller import (
@@ -2729,6 +2776,24 @@ class TestTheHourlyForecastIsFoundWhereItActuallyLives:
             4.0, abs=0.01
         )
         assert "curvy_solar" in coordinator._solar_forecast_note
+
+    async def test_two_providers_do_not_double_the_sun(self, hass):
+        """Running Forecast.Solar alongside Solcast is common, and concatenating
+        their curves does not average them -- the slots overlap and the energy in
+        them is summed, so the plan would see twice the sun and buy nothing."""
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        for domain in ("curvy_solar", "bendy_solar"):
+            _install_solar_integration(hass, domain, base)
+            await hass.config_entries.async_add(_config_entry(domain))
+
+        series = await coordinator._async_energy_platform_forecast()
+        assert series is not None
+        assert series.energy_between(base, base + timedelta(hours=4)) == pytest.approx(
+            4.0, abs=0.01
+        )
 
     async def test_an_integration_that_will_not_import_is_skipped(self, hass):
         """Forecast.Solar's own energy module imports a package that is not

@@ -127,7 +127,7 @@ from .const import (
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import daytime_correction, evening_uplift, is_evening
 from .forecast.confidence import describe as describe_confidence
-from .forecast.energy import EnergySeries, EnergySlot
+from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster, describe_climate_uplift
 from .forecast.solar import (
     SolarForecaster,
@@ -1337,7 +1337,6 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         from homeassistant.loader import async_get_integration
 
-        found: list[EnergySlot] = []
         for entry in self.hass.config_entries.async_entries():
             try:
                 integration = await async_get_integration(self.hass, entry.domain)
@@ -1353,15 +1352,22 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("Solar forecast from %s failed", entry.domain)
                 continue
             hours = (payload or {}).get("wh_hours")
-            if isinstance(hours, Mapping) and hours:
-                found.extend(parse_wh_mapping(hours, as_power=False))
-                self._solar_forecast_note = (
-                    f"hourly forecast from the {entry.domain} integration, read "
-                    "the same way the Energy dashboard reads it"
-                )
-        if not found:
-            return None
-        return EnergySeries(found)
+            if not isinstance(hours, Mapping) or not hours:
+                continue
+            found = parse_wh_mapping(hours, as_power=False)
+            if not found:
+                continue
+            # The first that answers, and then stop. Running two forecast
+            # providers is common -- Forecast.Solar alongside Solcast -- and
+            # concatenating their curves does not average them: the slots overlap
+            # and the energy in them is summed, so the plan would see twice the
+            # sun and buy nothing.
+            self._solar_forecast_note = (
+                f"hourly forecast from the {entry.domain} integration, read "
+                "the same way the Energy dashboard reads it"
+            )
+            return EnergySeries(found)
+        return None
 
     async def _async_fetch_weather(self) -> WeatherSeries | None:
         entity_id = self.options.get(CONF_WEATHER_ENTITY)
@@ -2070,6 +2076,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             "problems": list(self._appliance_notes),
         }
+
+    async def async_auto_recommend_tariffs(self) -> Any:
+        """The unprompted comparison, run once after startup.
+
+        Separate from the on-demand one because the two want different manners.
+        Pressing the button with no region configured should say so out loud --
+        somebody asked. Saying it unprompted at every restart is how people learn
+        to stop reading the log, and the same failure the Repairs damping exists
+        to prevent.
+        """
+        if not self.options.get(CONF_OCTOPUS_REGION):
+            return None
+        try:
+            return await self.async_recommend_tariffs()
+        except Exception:  # a convenience must never disturb a working setup
+            _LOGGER.debug("Tariff comparison at startup failed", exc_info=True)
+            return None
 
     async def async_recommend_tariffs(self) -> Any:
         """Score candidate tariffs against this system's learned profile.

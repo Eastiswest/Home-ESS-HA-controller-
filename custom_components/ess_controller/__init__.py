@@ -149,10 +149,7 @@ def _async_schedule_tariff_comparison(
     """
 
     async def _compare(_now: Any) -> None:
-        try:
-            await coordinator.async_recommend_tariffs()
-        except Exception:  # a convenience must not raise into startup
-            _LOGGER.debug("Tariff comparison at startup failed", exc_info=True)
+        await coordinator.async_auto_recommend_tariffs()
 
     @callback
     def _schedule(_event: Any) -> None:
