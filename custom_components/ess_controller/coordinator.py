@@ -205,6 +205,10 @@ CONTROL_ROLES = frozenset(
 # How much of a half-hour's battery gain the sun must fail to explain before the
 # slot is worth reporting. A whole-percent state of charge on a 22 kWh pack
 # quantises to 0.22 kWh, so this is comfortably clear of the rounding.
+# Daylight half-hours needed before the solar forecast error is worth sizing a
+# reserve from. Two days of sun; below that a single overcast afternoon sets it.
+MIN_SOLAR_ERROR_SLOTS = 40
+
 UNEXPLAINED_CHARGE_KWH = 0.15
 
 # Solar reaching the cells rather than the meter. The real figure is a setting;
@@ -530,7 +534,26 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_HORIZON_MEDIAN
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
+            solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
         )
+
+    def solar_forecast_error_kwh(self, days: float = 7.0) -> float:
+        """How far out the solar forecast has been per slot, in kWh.
+
+        Absolute error, not signed: what the headroom reserve needs to know is
+        how much the sun *could* differ from its forecast, and a day that beats
+        it and a day that misses it are equally informative about that. Returns
+        zero until there is enough measured to be worth acting on, which leaves
+        the reserve switched off on a fresh install rather than sized by a guess.
+        """
+        errors = [
+            abs(record.pv_error)
+            for record in self.performance_store.log.window(days)
+            if record.pv_error is not None and record.pv_kwh > 0.0
+        ]
+        if len(errors) < MIN_SOLAR_ERROR_SLOTS:
+            return 0.0
+        return sum(errors) / len(errors)
 
     def forecast_confidence(self) -> float:
         """How far the load and solar models have earned the right to be believed.

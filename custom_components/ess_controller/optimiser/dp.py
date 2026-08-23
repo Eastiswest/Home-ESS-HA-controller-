@@ -64,6 +64,13 @@ MIN_USEFUL_SURPLUS_KWH = 0.03
 # The setting was the cause and the plan was the only place anyone was looking.
 CRAMPED_WINDOW_SHARE = 0.15
 
+# How far ahead the solar headroom reserve looks for sun that has not arrived.
+#
+# Long enough to cover the rest of a day's generation from any morning slot,
+# short enough that tomorrow's sun cannot justify holding charge back today --
+# by tomorrow the plan will have been rebuilt a hundred times.
+SOLAR_RESERVE_LOOKAHEAD_HOURS = 12.0
+
 
 @dataclass(slots=True)
 class OptimiserSettings:
@@ -75,6 +82,15 @@ class OptimiserSettings:
     """Price in minor units per kWh used when ``terminal_mode`` is fixed."""
     terminal_weight: float = 1.0
     """Scales the value placed on energy left at the end of the horizon."""
+
+    solar_headroom_error_kwh: float = 0.0
+    """Measured solar forecast error per slot, in kWh.
+
+    Sets how much room to keep free for the sun to beat its own forecast before
+    filling the pack from the grid. Zero disables the reserve entirely, which is
+    the default: without a measurement there is nothing to size it from, and
+    guessing would hold charge back for no reason.
+    """
 
     def clamped_levels(self) -> int:
         # Below ~20 levels the plan gets visibly blocky; above ~150 the runtime
@@ -555,6 +571,62 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
     return max(sum(s.load_kwh - s.pv_kwh for s in window), 0.0)
 
 
+def _solar_headroom_levels(
+    slots: list[HorizonSlot],
+    battery: BatterySpec,
+    settings: OptimiserSettings,
+    levels: int,
+    step: float,
+) -> list[int]:
+    """The highest level each slot may fill to *from the grid*, per slot.
+
+    Solar is never capped by this: the whole purpose is to keep room free for
+    the array, so blocking the array would be self-defeating. Only purchases are
+    held below the ceiling, and only while there is still sun ahead of them.
+
+    Why it exists. The plan sizes the morning's purchase so that the forecast
+    afternoon surplus exactly tops the pack to its limit -- correct arithmetic on
+    a forecast, and a coin flip in practice. On a real install two consecutive
+    afternoons produced 0.78 kWh and 2.31 kWh of spare sun against forecasts of
+    1.66 and 1.37: the right place to stop buying was 91% one day and 84% the
+    next, and the plan chose 91% on the day that wanted 84%. The morning's
+    generation had already run 32% ahead of forecast by nine o'clock.
+
+    The error is asymmetric, which is what makes reserving worthwhile. Buying too
+    much costs the electricity *and* spills the generation it displaced. Buying
+    too little costs the difference between this half-hour's price and the price
+    of topping up later in the day -- two or three pence a kWh, not forty.
+
+    The reserve is the peak the battery would climb to on forecast sun alone,
+    plus the measured forecast error over the daylight still to come. Both terms
+    are measurements rather than guesses, and both fall to nothing as the light
+    goes, so the ceiling lifts by itself in the evening.
+    """
+    error = max(settings.solar_headroom_error_kwh, 0.0)
+    if error <= 0.0 or not slots:
+        return [levels] * len(slots)
+
+    ceilings: list[int] = []
+    for index, first in enumerate(slots):
+        run = 0.0
+        peak = 0.0
+        daylight = 0
+        for slot in slots[index:]:
+            ahead = (slot.start - first.start).total_seconds() / 3600.0
+            if ahead >= SOLAR_RESERVE_LOOKAHEAD_HOURS:
+                break
+            run += slot.pv_kwh - slot.load_kwh
+            peak = max(peak, run)
+            if slot.pv_kwh > 0.0:
+                daylight += 1
+        reserve = peak + error * daylight
+        if reserve <= 0.0:
+            ceilings.append(levels)
+            continue
+        ceilings.append(max(levels - int(reserve / step), 0))
+    return ceilings
+
+
 def _terminal_terms(
     slots: list[HorizonSlot], battery: BatterySpec, settings: OptimiserSettings
 ) -> tuple[float, float]:
@@ -659,6 +731,8 @@ def optimise(
     # ``values[i + 1]`` is what the charge is worth once slot ``i`` has ended.
     values: list[list[float]] = [[] for _ in range(n)] + [future]
 
+    headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
+
     for i in range(n - 1, -1, -1):
         slot = slots[i]
         hours = slot.duration_hours
@@ -670,21 +744,32 @@ def optimise(
         max_up = min(max_up, levels)
         max_down = min(max_down, levels)
 
-        # Price every reachable delta once for this slot.
-        priced: list[tuple[int, float]] = []
+        # Price every reachable delta once for this slot. The third term records
+        # whether the charge needed the grid, because the solar headroom reserve
+        # constrains purchases and must leave the array alone.
+        surplus = max(slot.pv_kwh - slot.load_kwh, 0.0)
+        priced: list[tuple[int, float, bool]] = []
         for offset in range(-max_down, max_up + 1):
             flow = _price_delta(slot, offset * step, battery, grid)
             if flow is not None:
-                priced.append((offset, flow.cost))
+                bought = flow.charge_ac_kwh - surplus > EPS
+                priced.append((offset, flow.cost, bought))
+        ceiling = headroom[i]
 
         current = [INF] * (levels + 1)
         slot_choices = choices[i]
         for j in range(levels + 1):
             best = INF
             best_k = -1
-            for offset, cost in priced:
+            for offset, cost, bought in priced:
                 k = j + offset
                 if k < 0 or k > levels:
+                    continue
+                if bought and k > ceiling:
+                    # Room kept free for sun that has not arrived. Never blocks
+                    # holding or discharging, and never blocks the array, so a
+                    # pack already above the ceiling simply stops buying rather
+                    # than being made to empty itself.
                     continue
                 candidate = cost + future[k]
                 # Strictly ``<``, which breaks exact ties towards the more

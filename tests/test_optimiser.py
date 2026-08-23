@@ -1726,3 +1726,105 @@ class TestItBuysCheapBeforeDear:
         from custom_components.ess_controller.optimiser.dp import MAX_REFINED_LEVELS
 
         assert make_battery().usable_kwh / MAX_REFINED_LEVELS < 0.02
+
+
+class TestRoomIsKeptForSunThatHasNotArrived:
+    """The plan sized the morning's purchase so the forecast afternoon surplus
+    exactly topped the pack to its limit -- correct arithmetic on a forecast, and
+    a coin flip in practice. Two consecutive afternoons on a real install gave
+    0.78 and 2.31 kWh of spare sun against forecasts of 1.66 and 1.37, so the
+    right place to stop buying was 91% one day and 84% the next, and the plan
+    chose 91% on the day that wanted 84%.
+
+    Worth reserving for because the error is asymmetric: buying too much costs
+    the electricity *and* spills the generation it displaced, while buying too
+    little costs the gap between this half-hour and a top-up later in the day --
+    pence, not tens of pence. Replayed on that install's own horizon the reserve
+    cost 1.4p when the sun behaved and saved 15.7p when it beat forecast by the
+    32% it had already beaten it by that morning.
+    """
+
+    # Cheap morning, modest sun through the middle, heavy expensive evening, and
+    # a pack low enough that the grid genuinely has to help. Without all four the
+    # optimiser never buys and there is nothing to reserve against.
+    PRICES = [20.0] * 8 + [22.0] * 8 + [45.0] * 16
+    PV = [0.0] * 4 + [0.55] * 12 + [0.0] * 16
+    LOAD = [0.35] * 16 + [0.8] * 16
+
+    def _slots(self):
+        out = []
+        for index, price in enumerate(self.PRICES):
+            start = START + timedelta(minutes=30 * index)
+            out.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=self.PV[index],
+                    load_kwh=self.LOAD[index],
+                )
+            )
+        return out
+
+    def _plan(self, error, start_soc=40.0):
+        return optimise(
+            self._slots(),
+            start_soc,
+            make_battery(min_soc=20.0, max_charge_kw=6.0, max_discharge_kw=6.0),
+            make_grid(allow_export=False),
+            OptimiserSettings(solar_headroom_error_kwh=error),
+        )
+
+    def test_without_a_measurement_nothing_is_reserved(self):
+        """A fresh install has nothing to size a reserve from, and guessing would
+        hold charge back for no reason."""
+        assert self._plan(0.0).slots[9].soc_end > 89.0
+
+    def test_a_measured_error_leaves_room_while_sun_is_still_coming(self):
+        loose = self._plan(0.0).slots[9].soc_end
+        tight = self._plan(0.12).slots[9].soc_end
+        assert tight < loose - 4.0, (tight, loose)
+
+    def test_the_array_is_never_held_back(self):
+        """Reserving room for the sun and then refusing the sun would be
+        self-defeating, so only purchases are capped."""
+        assert max(s.soc_end for s in self._plan(0.12).slots) > 93.0
+
+    def test_a_pack_above_the_ceiling_is_not_made_to_empty_itself(self):
+        """The reserve blocks buying. It never blocks holding or discharging, so
+        a pack already fuller than the ceiling simply stops buying -- it behaves
+        exactly as it would with no reserve at all, rather than dumping charge to
+        get under the line."""
+        loose = self._plan(0.0, start_soc=94.0)
+        tight = self._plan(0.12, start_soc=94.0)
+        assert not tight.infeasible
+        assert tight.slots[0].action is loose.slots[0].action
+        assert tight.slots[0].soc_end == pytest.approx(loose.slots[0].soc_end)
+
+    def test_after_dark_the_ceiling_lifts(self):
+        """Nothing left to keep room for, so nothing is held back -- which is why
+        the reserve costs so little when the sun disappoints."""
+        from custom_components.ess_controller.optimiser.dp import (
+            _solar_headroom_levels,
+        )
+
+        levels = _solar_headroom_levels(
+            self._slots(),
+            make_battery(),
+            OptimiserSettings(solar_headroom_error_kwh=0.12),
+            100,
+            0.176,
+        )
+        assert levels[0] < 100, "sun ahead, so room is kept"
+        assert levels[-1] == 100, "nothing left to keep room for"
+
+    def test_no_reserve_at_all_without_the_setting(self):
+        from custom_components.ess_controller.optimiser.dp import (
+            _solar_headroom_levels,
+        )
+
+        levels = _solar_headroom_levels(
+            self._slots(), make_battery(), OptimiserSettings(), 100, 0.176
+        )
+        assert levels == [100] * len(self.PRICES)

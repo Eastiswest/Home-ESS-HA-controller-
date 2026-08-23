@@ -2617,6 +2617,67 @@ class TestTheTariffComparisonIsThereWithoutBeingAsked:
         await hass.async_block_till_done()
 
 
+class TestTheSolarHeadroomReserveIsSizedFromMeasurement:
+    """Off until there is enough measured to size it from: a fresh install has
+    nothing to reserve against, and guessing would hold charge back for nothing.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_a_fresh_install_reserves_nothing(self, hass):
+        coordinator = await self._coordinator(hass)
+        assert coordinator.solar_forecast_error_kwh() == 0.0
+        assert coordinator.optimiser_settings().solar_headroom_error_kwh == 0.0
+
+    async def test_enough_measured_daylight_sizes_it(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.coordinator import MIN_SOLAR_ERROR_SLOTS
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow()
+        for index in range(MIN_SOLAR_ERROR_SLOTS):
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=now - timedelta(minutes=30 * (index + 1)),
+                    pv_kwh=0.5,
+                    pv_forecast_kwh=0.6,
+                )
+            )
+        # Absolute, not signed: what the reserve needs to know is how far the sun
+        # can differ from forecast, and a day that beats it says as much as a day
+        # that misses.
+        assert coordinator.solar_forecast_error_kwh() == pytest.approx(0.1, abs=0.001)
+
+    async def test_a_dark_slot_is_not_evidence_about_sunshine(self, hass):
+        """A half-hour that generated nothing agrees with its forecast trivially
+        and would dilute the measurement towards zero."""
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.coordinator import MIN_SOLAR_ERROR_SLOTS
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow()
+        for index in range(MIN_SOLAR_ERROR_SLOTS * 3):
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=now - timedelta(minutes=30 * (index + 1)),
+                    pv_kwh=0.5 if index < MIN_SOLAR_ERROR_SLOTS else 0.0,
+                    pv_forecast_kwh=0.6 if index < MIN_SOLAR_ERROR_SLOTS else 0.0,
+                )
+            )
+        assert coordinator.solar_forecast_error_kwh() == pytest.approx(0.1, abs=0.001)
+
+
 class TestTheEveningHedgeAnswersToTheEvenings:
     """The plan pads the evening load while the load model is young, because a
     battery that runs out at 20:00 buys the rest of the evening at 46-58p. The
