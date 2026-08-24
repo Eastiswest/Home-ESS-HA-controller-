@@ -209,6 +209,24 @@ def referenced_entities(config: dict) -> set[str]:
     return ids
 
 
+class TestOverviewShowsCapacityBesideTheGauge:
+    def test_usable_capacity_is_on_the_overview(self):
+        """The gauge says 61%; this says 61% of what. A second-life pack's
+        capacity is the number that drifts, and it lived three views away."""
+        config = build_dashboard(resolved())
+        overview = next(v for v in config["views"] if v["path"] == "overview")
+        cards = []
+
+        def visit(items):
+            for card in items:
+                cards.append(card)
+                if isinstance(card.get("cards"), list):
+                    visit(card["cards"])
+
+        visit(overview.get("sections", []))
+        assert any(card.get("entity") == entity_id("usable_capacity") for card in cards)
+
+
 class TestStructure:
     def test_five_views_with_a_full_install(self):
         config = build_dashboard(resolved())

@@ -1184,6 +1184,9 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
                         icon="mdi:battery-charging-medium",
                         grid_options={"columns": 6},
                     ),
+                    # Beside the percentage gauge, because the two answer the
+                    # same question at different depths: 61% of what?
+                    _tile("usable_capacity", resolved, grid_options={"columns": 6}),
                     _tile("next_action", resolved, grid_options={"columns": 6}),
                     _tile("import_price", resolved, grid_options={"columns": 6}),
                     _markdown(_plan_reason(plan, resolved.get("next_action")))
