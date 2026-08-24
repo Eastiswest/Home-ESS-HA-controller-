@@ -637,6 +637,63 @@ class TestTemplatesRender:
         assert ACTION_WORDS[IDLE_ON_SOLAR] in sunny, sunny
         assert ACTION_WORDS["idle"] in bought, bought
 
+    def test_plan_table_prices_each_slot(self):
+        """What the half-hour costs, from the energies already on the row.
+
+        Import at the import price less export at the export price, so the
+        column sums to the day's bill -- including on a slot that buys nothing
+        for the battery, where the house is simply drawing more than the sun.
+        """
+        plan = entity_id("plan_cost")
+        attributes = {
+            plan: {
+                "reason": "holding",
+                "slots": [
+                    {
+                        "start": "2026-02-18T17:00:00+00:00",
+                        "import_price": 30.0,
+                        "export_price": 15.0,
+                        "action": "idle",
+                        "grid_import_kwh": 1.2,
+                        "soc_end": 62.0,
+                    },
+                    {
+                        "start": "2026-02-18T17:30:00+00:00",
+                        "import_price": 30.0,
+                        "export_price": 15.0,
+                        "action": "idle",
+                        "grid_export_kwh": 0.5,
+                        "soc_end": 62.0,
+                    },
+                    {
+                        "start": "2026-02-18T18:00:00+00:00",
+                        "import_price": 30.0,
+                        "export_price": 15.0,
+                        "action": "idle",
+                        "soc_end": 62.0,
+                    },
+                ],
+            }
+        }
+        table = next(
+            text
+            for text in (
+                self._render(card, attributes)
+                for card in self._cards(build_dashboard(resolved()))
+            )
+            if "| Time |" in text
+        )
+
+        def cost_cell(time):
+            row = next(r for r in table.splitlines() if f"| {time} |" in r)
+            return row.split("|")[-3].strip()
+
+        assert cost_cell("17:00") == "36.0p"
+        # Exporting is money back, and the column has to be able to say so.
+        assert cost_cell("17:30") == "-7.5p"
+        assert cost_cell("18:00") == "—"
+        assert "whole half-hour's grid bill" in table
+
     def _soc_line(self, attributes, states=None):
         from custom_components.ess_controller.dashboard import _soc_summary
 

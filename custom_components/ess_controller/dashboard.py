@@ -922,9 +922,11 @@ def _plan_table(
     # "SoC" beside a live battery reading invites reading it as the battery's
     # state now. It is the plan's projection for the end of that half-hour.
     header = (
-        "| Time | Price | | Doing | Buy | Planned SoC |\n|---|--:|---|---|--:|--:|\n"
+        "| Time | Price | | Doing | Buy | Cost | Planned SoC |\n"
+        "|---|--:|---|---|--:|--:|--:|\n"
         if bars
-        else "| Time | Price | Doing | Buy | Planned SoC |\n|---|--:|---|--:|--:|\n"
+        else "| Time | Price | Doing | Buy | Cost | Planned SoC |\n"
+        "|---|--:|---|--:|--:|--:|\n"
     )
     # How much of the battery's charge this half-hour is actually bought.
     #
@@ -959,6 +961,25 @@ def _plan_table(
         "{% set bought = [charge - spare, 0] | max %}"
         "| {% if slot.action == 'charge' and bought > 0.005 %}"
         "{{ '%.2f' | format(bought) }}{% else %}—{% endif %} "
+    )
+    # What the half-hour adds to the bill: metered import at the import price,
+    # less anything exported. Computed from the two energies already on the row
+    # rather than taken from ``slot.cost``, which also carries the wear
+    # allowance and a spill tie-break -- modelling terms, not money anybody is
+    # billed for, and a "cost" that cannot be reproduced from the numbers beside
+    # it invites exactly the arithmetic argument the Buy column had to settle.
+    #
+    # The whole half-hour, not the battery's share, so the column sums to what
+    # the day costs. That is why a self-use row with no Buy figure can still
+    # show a few pence: the house was drawing more than the sun and the battery
+    # were covering between them.
+    cost_cell = (
+        "{% set gi = slot.get('grid_import_kwh') | float(0) %}"
+        "{% set ge = slot.get('grid_export_kwh') | float(0) %}"
+        "{% set xp = slot.get('export_price') | float(0) %}"
+        "{% set money = gi * p - ge * xp %}"
+        "| {% if money > 0.05 or money < -0.05 %}"
+        "{{ '%.1f' | format(money) }}p{% else %}—{% endif %} "
     )
     bar_cell = (
         (
@@ -1008,10 +1029,12 @@ def _plan_table(
         + _doing_expr()
         + " "
         + buy_cell
+        + cost_cell
         + "| {{ '%.0f' | format(slot.soc_end) }}% |\n"
         "{% endfor %}"
         "\nkWh under **Buy** is what comes off the grid into the battery; the rest "
-        "of a charge is sunshine.\n\n"
+        "of a charge is sunshine. **Cost** is the whole half-hour's grid bill, so "
+        "a row can cost something without buying for the battery.\n\n"
         "{% if prices | select('lt', 0) | list | count %}"
         "◄ paid to import. "
         "{% endif %}"
