@@ -113,6 +113,7 @@ LABELS: dict[str, str] = {
     "load_forecast_tomorrow": "Load tomorrow",
     # Battery
     "battery_soc": "State of charge",
+    "battery_energy": "In the battery",
     "usable_capacity": "Usable capacity",
     "wear_allowance": "Wear in use",
     "learning_progress": "Learning progress",
@@ -1184,9 +1185,10 @@ def _overview_view(resolved: dict[str, str]) -> dict[str, Any]:
                         icon="mdi:battery-charging-medium",
                         grid_options={"columns": 6},
                     ),
-                    # Beside the percentage gauge, because the two answer the
-                    # same question at different depths: 61% of what?
-                    _tile("usable_capacity", resolved, grid_options={"columns": 6}),
+                    # Beside the percentage gauge, because the two are the same
+                    # fact at different depths: 61% is 13.4 kWh, 9 of it above
+                    # the floor and spendable.
+                    _tile("battery_energy", resolved, grid_options={"columns": 6}),
                     _tile("next_action", resolved, grid_options={"columns": 6}),
                     _tile("import_price", resolved, grid_options={"columns": 6}),
                     _markdown(_plan_reason(plan, resolved.get("next_action")))

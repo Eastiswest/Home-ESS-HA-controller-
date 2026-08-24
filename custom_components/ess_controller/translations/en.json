@@ -605,6 +605,9 @@
       },
       "weekly_saving": {
         "name": "Saving vs self use this week"
+      },
+      "battery_energy": {
+        "name": "Energy in the battery"
       }
     },
     "binary_sensor": {

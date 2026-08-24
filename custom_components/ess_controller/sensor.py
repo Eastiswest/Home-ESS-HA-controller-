@@ -373,6 +373,36 @@ SENSORS: tuple[EssSensorDescription, ...] = (
         attributes=lambda c: c.battery.as_dict(),
     ),
     EssSensorDescription(
+        key="battery_energy",
+        translation_key="battery_energy",
+        name="Energy in the battery",
+        icon="mdi:battery-high",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        # The gauge's percentage, said in kWh. "61%" and "13.4 kWh, 9.0 of it
+        # spendable" are the same fact at two depths, and the second is the one
+        # a person sizing an evening against the battery actually wants.
+        value=lambda c: (
+            round(c.battery.soc / 100.0 * c.battery_spec().capacity_kwh, 2)
+            if c.battery.soc is not None
+            else None
+        ),
+        attributes=lambda c: (
+            {
+                "above_floor_kwh": round(
+                    max(c.battery.soc - c.settings.min_soc, 0.0)
+                    / 100.0
+                    * c.battery_spec().capacity_kwh,
+                    2,
+                ),
+                "floor_soc": c.settings.min_soc,
+                "capacity_kwh": c.battery_spec().capacity_kwh,
+            }
+            if c.battery.soc is not None
+            else {}
+        ),
+    ),
+    EssSensorDescription(
         key="usable_capacity",
         translation_key="usable_capacity",
         name="Usable battery capacity",

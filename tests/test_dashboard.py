@@ -39,6 +39,7 @@ ALL_KEYS = (
     "planned_grid_import",
     "planned_grid_export",
     "battery_soc",
+    "battery_energy",
     "usable_capacity",
     "learning_progress",
     "planned_charge_power",
@@ -209,10 +210,11 @@ def referenced_entities(config: dict) -> set[str]:
     return ids
 
 
-class TestOverviewShowsCapacityBesideTheGauge:
-    def test_usable_capacity_is_on_the_overview(self):
-        """The gauge says 61%; this says 61% of what. A second-life pack's
-        capacity is the number that drifts, and it lived three views away."""
+class TestOverviewShowsEnergyBesideTheGauge:
+    def test_stored_energy_is_on_the_overview(self):
+        """The gauge says 61%; this says what that is in kWh right now. Usable
+        capacity turned out to be the wrong companion -- it is the fixed window
+        the plan works in, not the state of the tank."""
         config = build_dashboard(resolved())
         overview = next(v for v in config["views"] if v["path"] == "overview")
         cards = []
@@ -224,7 +226,7 @@ class TestOverviewShowsCapacityBesideTheGauge:
                     visit(card["cards"])
 
         visit(overview.get("sections", []))
-        assert any(card.get("entity") == entity_id("usable_capacity") for card in cards)
+        assert any(card.get("entity") == entity_id("battery_energy") for card in cards)
 
 
 class TestStructure:
