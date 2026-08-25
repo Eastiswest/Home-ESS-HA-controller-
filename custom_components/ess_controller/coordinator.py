@@ -23,7 +23,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
@@ -222,6 +222,17 @@ CHARGE_EFFICIENCY_HINT = 1.0
 # the upstream integration for no benefit.
 FORECAST_REFRESH = timedelta(minutes=20)
 
+# How long a solar forecast stays usable after its sensor stops answering.
+#
+# A forecast integration is out of the state machine for the whole of a Home
+# Assistant restart and for every reload of its config entry, and a plan built
+# in that window is a plan built on no sun. The last good series still carries
+# real timestamps for the rest of today and all of tomorrow, so holding it is
+# strictly better than replacing it. Six hours covers a restart, an evening of
+# fiddling with an API key, and a provider that is down but coming back;
+# past that the day has moved on and the learned buckets are the honest answer.
+SOLAR_FORECAST_GRACE = timedelta(hours=6)
+
 
 def _slot_is_forecast(series: PriceSeries, start: datetime) -> bool:
     """Whether the price covering ``start`` is predicted rather than announced."""
@@ -289,6 +300,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Configured forecast sensors that yielded nothing, kept so the note can
         # still name them when the energy-platform fallback takes over.
         self._solar_unusable: list[str] = []
+        self._solar_forecast_at: datetime | None = None
         self._forecast_fetched: datetime | None = None
         self._import_prices = PriceSeries()
         self._export_prices = PriceSeries()
@@ -1025,6 +1037,16 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return "no such entity; check the name"
         if entry.disabled_by:
             return f"disabled in Home Assistant (by {entry.disabled_by}); enable it"
+        # An entity keeps its registry row across a reload and a restart, so a
+        # provider that is merely between setups looks identical to one that is
+        # broken. Naming the config entry's state is the difference between
+        # "wait" and "go and fix it", and an hour was spent on the wrong one.
+        if entry.config_entry_id:
+            owner = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+            if owner is None:
+                return "its integration was removed; re-pick the entity"
+            if owner.state is not ConfigEntryState.LOADED:
+                return f"its {owner.domain} integration is {owner.state.name.lower()}"
         return "registered but reporting nothing; is its integration loaded?"
 
     def problem_snapshot(self) -> problems.Snapshot:
@@ -1382,11 +1404,53 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         self._forecast_fetched = now
         self._weather = await self._async_fetch_weather()
-        self._solar_forecast = self._fetch_solar_forecast()
-        if self._solar_forecast is None:
+
+        fetched = self._fetch_solar_forecast()
+        if fetched is not None:
+            self._solar_forecast = fetched
+            self._solar_forecast_at = now
+            return
+
+        # Naming sensors is a statement about which forecast to plan on. Reading
+        # some other provider's instead is not a fallback, it is a substitution,
+        # and it is silent: a site with Solcast named and a long-forgotten
+        # Forecast.Solar entry still in Home Assistant planned a sunny afternoon
+        # at 2.3 kWh against Solcast's 8.7 and bought the difference off the
+        # grid. The energy platform is for installs that configured nothing.
+        if not _as_list(self.options.get(CONF_SOLAR_FORECAST_ENTITIES)):
             hourly = await self._async_energy_platform_forecast()
             if hourly is not None:
                 self._solar_forecast = hourly
+                self._solar_forecast_at = now
+            else:
+                self._solar_forecast = None
+            return
+
+        held = self._hold_solar_forecast(now)
+        if held is None:
+            self._solar_forecast = None
+
+    def _hold_solar_forecast(self, now: datetime) -> EnergySeries | None:
+        """Keep the last good forecast while its sensor is briefly unreadable.
+
+        Returns the held series, or None once it is too old to plan on. The note
+        says which, because "waiting for Solcast" and "planning without a solar
+        forecast" call for different reactions from whoever reads it.
+        """
+        if self._solar_forecast is None or self._solar_forecast_at is None:
+            return None
+        age = now - self._solar_forecast_at
+        if age > SOLAR_FORECAST_GRACE:
+            self._solar_forecast_at = None
+            return None
+        minutes = int(age.total_seconds() // 60)
+        note = (
+            f"holding the last good forecast, {minutes} min old, while "
+            f"{', '.join(self._solar_unusable) or 'the configured sensors'} "
+            f"report nothing"
+        )
+        self._solar_forecast_note = note
+        return self._solar_forecast
 
     async def _async_energy_platform_forecast(self) -> EnergySeries | None:
         """The hourly curve from whatever already feeds the Energy dashboard.

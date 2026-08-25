@@ -2939,6 +2939,124 @@ class TestTheHourlyForecastIsFoundWhereItActuallyLives:
         assert await coordinator._async_energy_platform_forecast() is None
 
 
+class TestAConfiguredForecastIsNotSwappedForAnotherProviders:
+    """A site named Solcast and got Forecast.Solar's answer instead.
+
+    Solcast was out of the state machine -- a reload takes its entities with it,
+    so does every restart -- and a Forecast.Solar config entry left over from
+    before the migration answered the energy platform. The afternoon was planned
+    at 2.3 kWh against Solcast's 8.7, and the battery bought the difference off
+    the grid while the array was making 1.2 kW.
+
+    Two rules come out of it. A named sensor that blips keeps its last good
+    forecast, and another provider is never substituted for one the user chose.
+    """
+
+    SOLCAST = "sensor.solcast_pv_forecast_forecast_today"
+
+    def _detailed(self, base, kw=2.0, count=8):
+        """Solcast's own attribute shape: average kW per half-hour."""
+        return {
+            "detailedForecast": [
+                {
+                    "period_start": (base + timedelta(minutes=30 * i)).isoformat(),
+                    "pv_estimate": kw,
+                }
+                for i in range(count)
+            ]
+        }
+
+    async def _coordinator(self, hass, entities):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.const import CONF_SOLAR_FORECAST_ENTITIES
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, CONF_SOLAR_FORECAST_ENTITIES: entities},
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        # Setup has already fetched once, and these tests drive the clock from a
+        # rounded-down hour -- which is in the past, so the refresh interval
+        # would swallow every call.
+        coordinator._forecast_fetched = None
+        return coordinator
+
+    async def _with_rival(self, hass, base):
+        """A working energy-platform provider, ready to be substituted in."""
+        _install_solar_integration(hass, "curvy_solar", base)
+        await hass.config_entries.async_add(_config_entry("curvy_solar"))
+
+    async def test_the_named_sensor_is_what_gets_planned_on(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [self.SOLCAST])
+        await self._with_rival(hass, base)
+        hass.states.async_set(self.SOLCAST, "8.0", self._detailed(base))
+
+        await coordinator._async_refresh_forecasts(base)
+        # 2 kW across four hours, not the rival's 1 kWh per hour.
+        assert coordinator._solar_forecast.energy_between(
+            base, base + timedelta(hours=4)
+        ) == pytest.approx(8.0, abs=0.01)
+
+    async def test_a_sensor_that_blips_keeps_its_last_good_forecast(self, hass):
+        """The whole point: a reload must not become a different forecast."""
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [self.SOLCAST])
+        await self._with_rival(hass, base)
+        hass.states.async_set(self.SOLCAST, "8.0", self._detailed(base))
+        await coordinator._async_refresh_forecasts(base)
+
+        hass.states.async_remove(self.SOLCAST)
+        await coordinator._async_refresh_forecasts(base + timedelta(minutes=25))
+
+        assert coordinator._solar_forecast.energy_between(
+            base, base + timedelta(hours=4)
+        ) == pytest.approx(8.0, abs=0.01)
+        note = coordinator._solar_forecast_note
+        assert "holding the last good forecast" in note
+        assert "25 min old" in note
+        assert "curvy_solar" not in note
+
+    async def test_a_forecast_too_old_to_plan_on_is_dropped_not_replaced(self, hass):
+        """Held, not kept forever -- and what follows is the sun-position
+        estimate and the learned buckets, never the other provider."""
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [self.SOLCAST])
+        await self._with_rival(hass, base)
+        hass.states.async_set(self.SOLCAST, "8.0", self._detailed(base))
+        await coordinator._async_refresh_forecasts(base)
+
+        hass.states.async_remove(self.SOLCAST)
+        await coordinator._async_refresh_forecasts(base + timedelta(hours=7))
+
+        assert coordinator._solar_forecast is None
+
+    async def test_the_energy_platform_still_serves_an_install_with_none_named(
+        self, hass
+    ):
+        """The fallback is for people who configured nothing, and stays."""
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [])
+        await self._with_rival(hass, base)
+
+        await coordinator._async_refresh_forecasts(base)
+        assert coordinator._solar_forecast is not None
+        assert "curvy_solar" in coordinator._solar_forecast_note
+
+
 class TestTheSolarHeadroomReserveIsSizedFromMeasurement:
     """Off until there is enough measured to size it from: a fresh install has
     nothing to reserve against, and guessing would hold charge back for nothing.
