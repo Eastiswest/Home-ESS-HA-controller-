@@ -233,6 +233,11 @@ FORECAST_REFRESH = timedelta(minutes=20)
 # past that the day has moved on and the learned buckets are the honest answer.
 SOLAR_FORECAST_GRACE = timedelta(hours=6)
 
+# How soon to try again after a forecast sensor fails to answer, as against the
+# interval between two working reads. A provider that is a few seconds behind us
+# at startup should cost seconds, not the whole refresh interval.
+FORECAST_RETRY = timedelta(minutes=2)
+
 
 def _slot_is_forecast(series: PriceSeries, start: datetime) -> bool:
     """Whether the price covering ``start`` is predicted rather than announced."""
@@ -301,6 +306,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # still name them when the energy-platform fallback takes over.
         self._solar_unusable: list[str] = []
         self._solar_forecast_at: datetime | None = None
+        self._solar_degraded_since: datetime | None = None
         self._forecast_fetched: datetime | None = None
         self._import_prices = PriceSeries()
         self._export_prices = PriceSeries()
@@ -1397,19 +1403,47 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ------------------------------------------------------------------
 
     async def _async_refresh_forecasts(self, now: datetime) -> None:
-        if (
-            self._forecast_fetched is not None
-            and now - self._forecast_fetched < FORECAST_REFRESH
-        ):
+        # A failed read must not earn a working read's cooldown. Nothing here
+        # waits for a forecast provider to finish setting up -- ``lovelace`` is
+        # the only after_dependency, and the provider is whatever the user
+        # picked -- so the first fetch after a restart lands in the gap before
+        # its entities exist. Twenty minutes of planning without sun is the cost
+        # of missing by two seconds, and every retry used to pay it again.
+        wait = FORECAST_RETRY if self._solar_degraded_since else FORECAST_REFRESH
+        if self._forecast_fetched is not None and now - self._forecast_fetched < wait:
             return
         self._forecast_fetched = now
-        self._weather = await self._async_fetch_weather()
+
+        # Separately, because they are separate inputs. Sharing a try meant a
+        # weather entity publishing a forecast this code could not parse took
+        # the solar read down with it, and both the series and the note it is
+        # diagnosed by then stayed frozen -- still naming an integration that
+        # had since been deleted, which is worse than saying nothing.
+        try:
+            self._weather = await self._async_fetch_weather()
+        except Exception:  # pragma: no cover - somebody else's integration
+            _LOGGER.debug("Weather forecast unreadable", exc_info=True)
 
         fetched = self._fetch_solar_forecast()
         if fetched is not None:
+            if self._solar_degraded_since is not None:
+                _LOGGER.warning(
+                    "Solar forecast readable again after %d min",
+                    (now - self._solar_degraded_since).total_seconds() // 60,
+                )
+                self._solar_degraded_since = None
             self._solar_forecast = fetched
             self._solar_forecast_at = now
             return
+
+        if self._solar_degraded_since is None and self._solar_unusable:
+            # At warning level because it changes what the plan is built on. It
+            # was only ever a diagnostics string, so answering "when did this
+            # start" meant catching it in a download at the right moment.
+            self._solar_degraded_since = now
+            _LOGGER.warning(
+                "Solar forecast unreadable: %s", "; ".join(self._solar_unusable)
+            )
 
         # Naming sensors is a statement about which forecast to plan on. Reading
         # some other provider's instead is not a fallback, it is a substitution,
@@ -3008,6 +3042,16 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "disabled_inverter_controls": self.disabled_inverter_controls(),
             "horizon_reach": self.horizon_reach,
             "solar_forecast_note": self._solar_forecast_note,
+            # A note cannot say whether it was written this cycle or hours ago,
+            # and a stale one reads exactly like a current one. These two say.
+            "solar_forecast_read_at": (
+                self._solar_forecast_at.isoformat() if self._solar_forecast_at else None
+            ),
+            "solar_forecast_degraded_since": (
+                self._solar_degraded_since.isoformat()
+                if self._solar_degraded_since
+                else None
+            ),
             "climate_note": self._climate_note,
             "reserve_conflict": self.reserve_conflict(),
             "rejected_writes": self._adapter.rejected_roles(),

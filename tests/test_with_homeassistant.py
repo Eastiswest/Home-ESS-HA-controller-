@@ -3042,6 +3042,46 @@ class TestAConfiguredForecastIsNotSwappedForAnotherProviders:
 
         assert coordinator._solar_forecast is None
 
+    async def test_a_provider_a_moment_behind_us_costs_a_moment(self, hass):
+        """Nothing makes us wait for a forecast provider to set up.
+
+        So the first read after a restart lands before its entities exist, and
+        charging a working read's cooldown for that meant twenty minutes of
+        planning without sun -- paid again by every retry.
+        """
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [self.SOLCAST])
+        await coordinator._async_refresh_forecasts(base)
+        assert coordinator._solar_forecast is None
+
+        hass.states.async_set(self.SOLCAST, "8.0", self._detailed(base))
+        await coordinator._async_refresh_forecasts(base + timedelta(minutes=3))
+        assert coordinator._solar_forecast is not None
+
+    async def test_unparsable_weather_does_not_take_the_solar_read_with_it(self, hass):
+        """They are separate inputs and share nothing but a function.
+
+        Sharing a try meant a weather entity publishing a shape this code could
+        not read froze the solar series *and* the note it is diagnosed by, which
+        then went on naming an integration that had since been deleted.
+        """
+        from homeassistant.util import dt as dt_util
+
+        base = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        coordinator = await self._coordinator(hass, [self.SOLCAST])
+        hass.states.async_set(self.SOLCAST, "8.0", self._detailed(base))
+
+        async def _explode():
+            raise ValueError("forecast in a shape we cannot read")
+
+        coordinator._async_fetch_weather = _explode
+        await coordinator._async_refresh_forecasts(base)
+
+        assert coordinator._solar_forecast is not None
+        assert coordinator._solar_forecast_at == base
+
     async def test_the_energy_platform_still_serves_an_install_with_none_named(
         self, hass
     ):
