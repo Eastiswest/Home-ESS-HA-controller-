@@ -2554,6 +2554,51 @@ class TestDisablingWritesHandsTheInverterBack:
         assert coordinator.settings.dry_run is True
 
 
+class TestConfigureEditsReachRuntimeSettings:
+    """An options edit used to be stored in the entry and silently discarded.
+
+    A wear allowance retyped as 2.0 through Configure sat in the entry while
+    every plan priced wear off the old 1.5. The store now snapshots the seeded
+    options and applies only the keys that changed since -- so the edit lands,
+    and an untouched stale value still cannot undo a dashboard tune.
+    """
+
+    async def test_only_the_changed_key_is_applied_on_reload(self, hass):
+        from custom_components.ess_controller.runtime import RuntimeStore
+
+        store = RuntimeStore(hass, "entry1")
+        await store.async_load({"cycle_cost_per_kwh": 1.5, "battery_min_soc": 20.0})
+        store.settings.min_soc = 35.0  # tuned from the dashboard since seeding
+        await store.async_save()
+
+        reloaded = RuntimeStore(hass, "entry1")
+        settings = await reloaded.async_load(
+            {"cycle_cost_per_kwh": 2.0, "battery_min_soc": 20.0}
+        )
+        assert settings.cycle_cost == 2.0  # the Configure edit finally lands
+        assert settings.min_soc == 35.0  # the stale 20.0 clobbers nothing
+
+    async def test_a_store_from_before_the_snapshot_applies_nothing(self, hass):
+        """With no baseline, an old edit and a stale value look identical, and
+        guessing would reprice every plan on an upgrade. Record, apply later."""
+        from custom_components.ess_controller.runtime import RuntimeStore
+
+        store = RuntimeStore(hass, "entry2")
+        await store.async_load({"cycle_cost_per_kwh": 1.5})
+        store.settings.cycle_cost = 1.2  # dashboard tune
+        # An old build's payload carries no snapshot.
+        await store._store.async_save(store.settings.as_dict())
+
+        upgraded = RuntimeStore(hass, "entry2")
+        settings = await upgraded.async_load({"cycle_cost_per_kwh": 2.0})
+        assert settings.cycle_cost == 1.2
+
+        # The snapshot recorded at the upgrade makes the *next* edit land.
+        later = RuntimeStore(hass, "entry2")
+        settings = await later.async_load({"cycle_cost_per_kwh": 2.5})
+        assert settings.cycle_cost == 2.5
+
+
 class TestUnusableForecastSensorsAreNamed:
     """Configuring a forecast sensor that yields nothing must not be silent.
 

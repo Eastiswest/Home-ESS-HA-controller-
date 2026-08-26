@@ -224,54 +224,68 @@ class RuntimeSettings:
         """Take initial values from the config flow, once.
 
         Only applied on first load. After that these values belong to their
-        entities, so a later options edit does not silently undo a tuning change
-        the user made from their dashboard.
+        entities, and only an options key that actually *changes* is applied --
+        see :meth:`apply_option_changes`.
         """
         if self.seeded:
             return
-        self.min_soc = float(options.get(CONF_BATTERY_MIN_SOC, self.min_soc))
-        self.max_soc = float(options.get(CONF_BATTERY_MAX_SOC, self.max_soc))
-        self.reserve_soc = float(options.get(CONF_BATTERY_RESERVE_SOC, self.reserve_soc))
-        self.max_charge_kw = float(options.get(CONF_MAX_CHARGE_POWER, self.max_charge_kw))
-        self.max_discharge_kw = float(
-            options.get(CONF_MAX_DISCHARGE_POWER, self.max_discharge_kw)
-        )
-        self.cycle_cost = float(options.get(CONF_CYCLE_COST, self.cycle_cost))
-        self.derive_wear_from_cost = bool(
-            options.get(CONF_DERIVE_WEAR_FROM_COST, self.derive_wear_from_cost)
-        )
-        self.battery_cost = float(options.get(CONF_BATTERY_COST, self.battery_cost))
-        self.battery_expected_cycles = float(
-            options.get(CONF_BATTERY_EXPECTED_CYCLES, self.battery_expected_cycles)
-        )
-        self.battery_residual_value = float(
-            options.get(CONF_BATTERY_RESIDUAL_VALUE, self.battery_residual_value)
-        )
-        self.default_daily_load = float(
-            options.get(CONF_DEFAULT_DAILY_LOAD, self.default_daily_load)
-        )
-        self.allow_grid_charge = bool(
-            options.get(CONF_ALLOW_GRID_CHARGE, self.allow_grid_charge)
-        )
-        self.allow_export = bool(options.get(CONF_ALLOW_EXPORT, self.allow_export))
-        self.allow_battery_export = bool(
-            options.get(CONF_ALLOW_BATTERY_EXPORT, self.allow_battery_export)
-        )
-        self.dry_run = bool(options.get(CONF_DRY_RUN, self.dry_run))
-        self.sessions_enabled = bool(
-            options.get(CONF_SESSIONS_ENABLED, self.sessions_enabled)
-        )
-        self.appliance_control = bool(
-            options.get(CONF_APPLIANCE_CONTROL, self.appliance_control)
-        )
-        self.shifting_enabled = bool(
-            options.get(CONF_SHIFTING_ENABLED, self.shifting_enabled)
-        )
-        self.outage_protection = bool(
-            options.get(CONF_OUTAGE_ENABLED, self.outage_protection)
-        )
+        for conf, field_name, cast in OPTION_FIELDS:
+            setattr(self, field_name, cast(options.get(conf, getattr(self, field_name))))
         self.seeded = True
         self.sanitised()
+
+    def apply_option_changes(
+        self, seen: dict[str, Any], options: dict[str, Any]
+    ) -> list[str]:
+        """Apply the options keys that changed since ``seen``. Returns the fields.
+
+        These values belong to their dashboard entities once seeded, but the
+        options flow shows them too, accepts edits, and used to discard every
+        one -- a wear allowance retyped through Configure sat in the entry
+        doing nothing while the plan priced wear off the old number. Diffing
+        against the snapshot from the previous load keeps both surfaces honest:
+        a stale option that merely sits there can never clobber a dashboard
+        tune, and a deliberate edit takes effect. Last edit wins, wherever it
+        was made.
+        """
+        changed: list[str] = []
+        for conf, field_name, cast in OPTION_FIELDS:
+            if conf not in options or options.get(conf) == seen.get(conf):
+                continue
+            setattr(self, field_name, cast(options[conf]))
+            changed.append(field_name)
+        if changed:
+            self.sanitised()
+        return changed
+
+    @staticmethod
+    def tracked_options(options: dict[str, Any]) -> dict[str, Any]:
+        """The subset of options that seed runtime settings, for snapshotting."""
+        return {conf: options[conf] for conf, _, _ in OPTION_FIELDS if conf in options}
+
+
+#: (options key, settings field, cast) for every value the config flow seeds.
+OPTION_FIELDS: tuple[tuple[str, str, Any], ...] = (
+    (CONF_BATTERY_MIN_SOC, "min_soc", float),
+    (CONF_BATTERY_MAX_SOC, "max_soc", float),
+    (CONF_BATTERY_RESERVE_SOC, "reserve_soc", float),
+    (CONF_MAX_CHARGE_POWER, "max_charge_kw", float),
+    (CONF_MAX_DISCHARGE_POWER, "max_discharge_kw", float),
+    (CONF_CYCLE_COST, "cycle_cost", float),
+    (CONF_DERIVE_WEAR_FROM_COST, "derive_wear_from_cost", bool),
+    (CONF_BATTERY_COST, "battery_cost", float),
+    (CONF_BATTERY_EXPECTED_CYCLES, "battery_expected_cycles", float),
+    (CONF_BATTERY_RESIDUAL_VALUE, "battery_residual_value", float),
+    (CONF_DEFAULT_DAILY_LOAD, "default_daily_load", float),
+    (CONF_ALLOW_GRID_CHARGE, "allow_grid_charge", bool),
+    (CONF_ALLOW_EXPORT, "allow_export", bool),
+    (CONF_ALLOW_BATTERY_EXPORT, "allow_battery_export", bool),
+    (CONF_DRY_RUN, "dry_run", bool),
+    (CONF_SESSIONS_ENABLED, "sessions_enabled", bool),
+    (CONF_APPLIANCE_CONTROL, "appliance_control", bool),
+    (CONF_SHIFTING_ENABLED, "shifting_enabled", bool),
+    (CONF_OUTAGE_ENABLED, "outage_protection", bool),
+)
 
 
 def _clamp(value: Any, low: float, high: float) -> float:

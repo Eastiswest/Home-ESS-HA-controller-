@@ -157,6 +157,49 @@ class TestSeeding:
         assert settings.reserve_soc <= settings.min_soc
 
 
+class TestOptionsEditsAfterSeeding:
+    """The options flow shows the seeded values, accepts edits, and used to
+    discard every one of them.
+
+    A real install retyped the wear allowance as 2.0 through Configure; the
+    entry stored it, the plan carried on pricing wear off the old 1.5, and
+    nothing said so. Only a key that *changed* since the last snapshot is
+    applied, so a stale option can never clobber a dashboard tune."""
+
+    def test_a_changed_option_takes_effect(self):
+        settings = RuntimeSettings()
+        settings.seed_from_options({"cycle_cost_per_kwh": 1.5})
+        changed = settings.apply_option_changes(
+            {"cycle_cost_per_kwh": 1.5}, {"cycle_cost_per_kwh": 2.0}
+        )
+        assert settings.cycle_cost == 2.0
+        assert changed == ["cycle_cost"]
+
+    def test_a_stale_option_cannot_undo_a_dashboard_tune(self):
+        settings = RuntimeSettings()
+        settings.seed_from_options({"battery_min_soc": 20.0, "cycle_cost_per_kwh": 1.5})
+        settings.min_soc = 35.0  # adjusted from the dashboard since
+        # An unrelated Configure save re-submits every field unchanged.
+        changed = settings.apply_option_changes(
+            {"battery_min_soc": 20.0, "cycle_cost_per_kwh": 1.5},
+            {"battery_min_soc": 20.0, "cycle_cost_per_kwh": 1.5},
+        )
+        assert changed == []
+        assert settings.min_soc == 35.0
+
+    def test_applied_changes_are_sanitised(self):
+        settings = RuntimeSettings()
+        settings.seed_from_options({"battery_min_soc": 20.0})
+        settings.apply_option_changes({}, {"battery_reserve_soc": 50.0})
+        assert settings.reserve_soc <= settings.min_soc
+
+    def test_tracked_options_keeps_only_seedable_keys(self):
+        tracked = RuntimeSettings.tracked_options(
+            {"cycle_cost_per_kwh": 2.0, "battery_soc_entity": "sensor.soc"}
+        )
+        assert tracked == {"cycle_cost_per_kwh": 2.0}
+
+
 class TestSlotBoundaries:
     def test_starts_now_with_a_partial_first_slot(self):
         boundaries = slot_boundaries(dt(12, 7), dt(14, 0))
