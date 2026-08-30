@@ -1842,6 +1842,87 @@ class TestTheInverterIsToldThePlansFloor:
         )
 
 
+class TestSelfUseCarriesTheEmergencyReserve:
+    """Plan to the planning floor; discharge, if reality demands it, to the reserve.
+
+    A self-use evening that ran hotter than forecast used to hit the planning
+    floor and flip to the grid at the top of the peak, with the emergency
+    reserve untouched beneath it. The band between the two floors is the
+    forecast-error cushion: the plan never schedules into it, the hardware may
+    spend it, and the next cycle replans from wherever it lands.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        coordinator.settings.min_soc = 20.0
+        coordinator.settings.reserve_soc = 15.0
+        return coordinator
+
+    async def test_a_planned_self_use_slot_gets_the_deep_floor(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        coordinator.plan.slots[0].action = SlotAction.SELF_USE
+        # The refresh already committed the slot's original action; the tests
+        # are about the floor, not anti-churn.
+        coordinator._committed = None
+
+        command = coordinator._resolve_command(now)
+        assert command.action is SlotAction.SELF_USE
+        assert command.min_soc == pytest.approx(15.0)
+        # The cushion is the hardware's, not the optimiser's.
+        assert coordinator.effective_min_soc == pytest.approx(20.0)
+
+    async def test_a_hold_keeps_the_planning_floor(self, hass):
+        """A hold *works* by raising the floor; the reserve would undo it."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        slot = coordinator.plan.slots[0]
+        slot.action = SlotAction.IDLE
+        # Survive the last-line hold sanity check at the write.
+        slot.hold_value = slot.import_price + 10.0
+        coordinator._committed = None
+
+        command = coordinator._resolve_command(now)
+        assert command.action is SlotAction.IDLE
+        assert command.min_soc == pytest.approx(20.0)
+
+    async def test_an_outage_boost_beats_the_cushion(self, hass):
+        """Charge held for a power cut is not a forecast-error cushion."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.outage_protection = True
+        await coordinator.async_refresh()
+        coordinator.outage.level = "high"
+        coordinator.outage.reserve_soc = 80.0
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        coordinator.plan.slots[0].action = SlotAction.SELF_USE
+        # The refresh already committed the slot's original action; the tests
+        # are about the floor, not anti-churn.
+        coordinator._committed = None
+
+        command = coordinator._resolve_command(now)
+        assert command.action is SlotAction.SELF_USE
+        assert command.min_soc == pytest.approx(80.0)
+
+
 class TestTheCurrentSlotDoesNotChurn:
     """The plan is rebuilt every cycle, so the half-hour already under way could
     change action several times inside it -- charge at 19:31, self-use at 19:46 --

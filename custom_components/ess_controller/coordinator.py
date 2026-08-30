@@ -499,6 +499,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # unusable rather than merely conservative.
         return min(floor, self.settings.max_soc - 1.0)
 
+    @property
+    def discharge_floor(self) -> float:
+        """The floor written to the inverter while it is in self-use.
+
+        Deliberately deeper than the floor the plan is built to. The plan never
+        *schedules* below ``min_soc``, but a self-use evening that runs hotter
+        than forecast used to hit that figure and flip to the grid at the top of
+        the peak -- the pack stood at its planning floor with the emergency
+        reserve untouched beneath it, buying 44p electricity to protect charge
+        that existed for exactly this overrun. The band between the reserve and
+        the planning floor is the forecast-error cushion: reality may spend it,
+        the plan may not, and the next cycle replans from wherever it lands.
+
+        An outage boost still wins -- charge held for a possible power cut is
+        not a cushion -- and the reserve cannot exceed the planning floor by
+        construction, so this never *raises* the written floor.
+        """
+        floor = self.settings.reserve_soc
+        if self.settings.outage_protection and self.outage.at_risk:
+            floor = max(floor, self.outage.reserve_soc)
+        return min(floor, self.settings.max_soc - 1.0)
+
     def nominal_capacity_kwh(self) -> float:
         """Capacity in force: measured if a BMS reports it, else nameplate."""
         return self.battery.capacity_kwh or float(
@@ -2475,14 +2497,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         undone two minutes later by the optimiser.
         """
         base = {
-            # The floor the *plan* was built on, not the deeper emergency reserve.
-            # The two were different, and the difference was invisible: the
-            # optimiser planned never to go below the configured minimum (raised
-            # further when an outage looks likely), while the inverter was told it
-            # could discharge down to the emergency reserve -- so in every
-            # self-use slot the hardware was free to spend energy the plan had
-            # already promised to something else, and an outage boost never
-            # reached the inverter at all.
+            # The floor the *plan* was built on. Overrides, strategy locks, holds
+            # and the blind fallbacks all get this; a planned self-use slot swaps
+            # in the deeper ``discharge_floor`` below, so a forecast miss spends
+            # the reserve-to-floor cushion instead of buying the peak. Holds must
+            # never get the deep floor -- a hold *works* by raising it.
             #
             # During a genuine power cut an islanded inverter follows its own
             # backup floor, which is not this setting and not ours to manage.
@@ -2620,6 +2639,14 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             power = self._committed_power[1]
         else:
             self._committed_power = (key, power)
+
+        if action is SlotAction.SELF_USE:
+            # Self-use gets the emergency reserve, not the planning floor, so a
+            # forecast miss discharges into the cushion instead of buying the
+            # peak. Only self-use: an idle or hold *works* by raising this
+            # floor, and handing it the reserve would turn "house on grid" back
+            # into discharge.
+            base["min_soc"] = self.discharge_floor
 
         grid = self.grid_spec()
         return ControlCommand(
