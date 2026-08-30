@@ -1853,3 +1853,38 @@ class TestRoomIsKeptForSunThatHasNotArrived:
         assert levels[8] == 100, "no ceiling while being paid to import"
         assert levels[7] < 100, "the positive slot beside it still reserves"
         assert levels[9] < 100
+
+    def test_a_shallow_negative_price_still_fills_the_pack(self):
+        """Any payment at all beats deferring the same throughput to a dearer
+        price.
+
+        The wear allowance prices incremental cycling, and energy taken in a
+        paid session is not incremental on a site whose load outruns its
+        array: the house consumes it within days, and the space would have
+        been charged anyway from something dearer. A real plan stopped at
+        89.5% in a -0.35p slot because the payment covered only 64% of the
+        way-in wear -- correct arithmetic on the wrong counterfactual.
+        """
+        # A light day: the horizon barely needs the battery, so energy bought
+        # in the paid window has no in-horizon use and lands beyond the
+        # terminal credit's cap. The payment alone has to justify it.
+        slots = []
+        for index in range(16):
+            start = START + timedelta(minutes=30 * index)
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=-0.1 if index in (6, 7, 8, 9, 10) else 20.0,
+                    export_price=0.0,
+                    pv_kwh=0.0,
+                    load_kwh=0.1,
+                )
+            )
+        plan = optimise(
+            slots,
+            40.0,
+            make_battery(min_soc=20.0, max_charge_kw=6.0, max_discharge_kw=6.0),
+            make_grid(allow_export=False),
+        )
+        assert max(s.soc_end for s in plan.slots) > 94.0

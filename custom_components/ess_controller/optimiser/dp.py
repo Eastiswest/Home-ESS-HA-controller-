@@ -241,10 +241,26 @@ def _price_delta(
     # cost in its own right and needs no nudge.
     spilled = curtailed + (grid_export if export_price <= 0.0 else 0.0)
     cost += spilled * SPILL_TIE_BREAK
-    # Wear allowance. Half is charged in each direction so that a full
-    # round-trip of X kWh costs X * cycle_cost_per_kwh, which is how users
-    # think about "cost per kWh cycled".
-    cost += abs(delta_kwh) * battery.cycle_cost_per_kwh * 0.5
+    # Wear allowance, charged on the way out. A full round trip of X kWh still
+    # costs X * cycle_cost_per_kwh -- how users think about "cost per kWh
+    # cycled" -- and it is how the performance report already books realised
+    # wear, but *when* it is charged decides real behaviour at the margins.
+    #
+    # Charging half on entry priced the wrong counterfactual. The allowance
+    # exists to price incremental cycling, and on a site whose load outruns its
+    # array the energy taken in a paid session is not incremental: the house
+    # consumes it within days, and the space it fills would have been charged
+    # anyway, later, from something dearer. Entry-side wear made a -0.35p slot
+    # stop at 89.5% because the payment covered only 64% of a half-wear the
+    # pack was going to incur whichever source eventually filled it.
+    #
+    # Charged on discharge, the accounting follows the value: energy pays for
+    # its cycling when it is spent, a paid fill is never refused for wear it
+    # has not caused yet, and dump-to-reimport arbitrage still prices the full
+    # round trip -- the dump pays it -- so a deep negative price must still
+    # clear the whole allowance before deliberate churn is worth it.
+    if delta_kwh < 0.0:
+        cost += -delta_kwh * battery.cycle_cost_per_kwh
 
     if charge_ac > EPS:
         action = (
@@ -496,7 +512,9 @@ def _hold_value(
     if below == INF or above == INF:
         return None
     at_cells = (below - above) / ((high - low) * step)
-    return (at_cells + battery.cycle_cost_per_kwh * 0.5) / battery.discharge_efficiency
+    # Full wear, matching what the sweep charges an actual discharge now that
+    # the allowance is booked entirely on the way out.
+    return (at_cells + battery.cycle_cost_per_kwh) / battery.discharge_efficiency
 
 
 def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> float:
