@@ -1865,26 +1865,41 @@ class TestRoomIsKeptForSunThatHasNotArrived:
         89.5% in a -0.35p slot because the payment covered only 64% of the
         way-in wear -- correct arithmetic on the wrong counterfactual.
         """
-        # A light day: the horizon barely needs the battery, so energy bought
-        # in the paid window has no in-horizon use and lands beyond the
-        # terminal credit's cap. The payment alone has to justify it.
+        # A light day with a cheap tail: the horizon barely needs the battery
+        # and the terminal credit is nearly worthless, so energy bought in the
+        # paid window has no booked use at all. The payment alone justifies it
+        # -- and under entry-side wear it could not, which is how a real plan
+        # stopped short.
         slots = []
         for index in range(16):
+            if index in (5, 6, 7, 8, 9):
+                price = -0.1  # far below the old ~0.55p entry-wear bar
+            elif index < 5:
+                price = 25.0
+            else:
+                price = 1.0  # collapses the terminal rate on the tail
             start = START + timedelta(minutes=30 * index)
             slots.append(
                 HorizonSlot(
                     start=start,
                     end=start + timedelta(minutes=30),
-                    import_price=-0.1 if index in (6, 7, 8, 9, 10) else 20.0,
+                    import_price=price,
                     export_price=0.0,
                     pv_kwh=0.0,
-                    load_kwh=0.1,
+                    load_kwh=0.05,
                 )
             )
         plan = optimise(
             slots,
             40.0,
-            make_battery(min_soc=20.0, max_charge_kw=6.0, max_discharge_kw=6.0),
+            make_battery(
+                min_soc=20.0,
+                max_charge_kw=6.0,
+                max_discharge_kw=6.0,
+                # Real wear, or the test proves nothing: with the default free
+                # cycling, any model fills at any negative price.
+                cycle_cost_per_kwh=1.147,
+            ),
             make_grid(allow_export=False),
         )
         assert max(s.soc_end for s in plan.slots) > 94.0
