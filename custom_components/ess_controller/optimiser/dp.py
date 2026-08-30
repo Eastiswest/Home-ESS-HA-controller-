@@ -607,6 +607,12 @@ def _solar_headroom_levels(
     too little costs the difference between this half-hour's price and the price
     of topping up later in the day -- two or three pence a kWh, not forty.
 
+    A negative price inverts that asymmetry, so no ceiling applies there. Being
+    paid to fill beats leaving room for sun that spills at nothing, and a real
+    plan showed the failure plainly: five slots bought at up to -1.6p at the full
+    rate, then the last negative slot throttled to a trickle to keep 1.8 kWh of
+    paid-for room empty for the afternoon array.
+
     The reserve is the peak the battery would climb to on forecast sun alone,
     plus the measured forecast error over the daylight still to come. Both terms
     are measurements rather than guesses, and both fall to nothing as the light
@@ -618,6 +624,9 @@ def _solar_headroom_levels(
 
     ceilings: list[int] = []
     for index, first in enumerate(slots):
+        if first.import_price < 0.0:
+            ceilings.append(levels)
+            continue
         run = 0.0
         peak = 0.0
         daylight = 0

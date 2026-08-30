@@ -1828,3 +1828,28 @@ class TestRoomIsKeptForSunThatHasNotArrived:
             self._slots(), make_battery(), OptimiserSettings(), 100, 0.176
         )
         assert levels == [100] * len(self.PRICES)
+
+    def test_a_negative_price_lifts_the_ceiling(self):
+        """Paid to fill beats holding room for sun that spills at nothing.
+
+        The asymmetry the reserve rests on inverts below zero: over-buying
+        pays, and the displaced generation was worth nothing exported. A real
+        plan throttled the last -0.35p slot to a trickle to keep 1.8 kWh of
+        paid-for room empty for the afternoon array.
+        """
+        from custom_components.ess_controller.optimiser.dp import (
+            _solar_headroom_levels,
+        )
+
+        slots = self._slots()
+        slots[8].import_price = -1.5  # mid-morning, plenty of sun still ahead
+        levels = _solar_headroom_levels(
+            slots,
+            make_battery(),
+            OptimiserSettings(solar_headroom_error_kwh=0.12),
+            100,
+            0.176,
+        )
+        assert levels[8] == 100, "no ceiling while being paid to import"
+        assert levels[7] < 100, "the positive slot beside it still reserves"
+        assert levels[9] < 100
