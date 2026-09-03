@@ -921,6 +921,26 @@ class TestApplianceTargets:
         assert appliance_targets(placements, dt(3, 30)) == {"switch.immersion": True}
 
 
+class TestPlacementDescriptions:
+    def test_the_reason_line_speaks_wall_clock_time(self):
+        """The one line that exists to be acted on printed UTC: for a whole
+        British summer "run Sauna at 18:30" meant 19:30, an hour early."""
+        from custom_components.ess_controller.shifting import describe_placements
+
+        placement = LoadPlacement(
+            name="Sauna",
+            start=dt(18, 30),
+            end=dt(19, 45),
+            power_kw=3.6,
+            energy_kwh=4.5,
+            cost=143.0,
+        )
+        bst = lambda moment: moment + timedelta(hours=1)  # noqa: E731
+        assert describe_placements([placement], bst) == "run Sauna at 19:30"
+        # Without a converter the raw time stands, for callers already local.
+        assert describe_placements([placement]) == "run Sauna at 18:30"
+
+
 class TestScheduleAdvice:
     """What a user with no smart appliances actually reads."""
 

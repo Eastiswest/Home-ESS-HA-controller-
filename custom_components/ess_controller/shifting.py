@@ -574,12 +574,18 @@ def _parse_time(value: Any) -> time | None:
     return time(hour=hour, minute=minute)
 
 
-def describe_placements(placements: list[LoadPlacement]) -> str:
-    """A one-line summary for the plan reason."""
+def describe_placements(placements: list[LoadPlacement], to_local=None) -> str:
+    """A one-line summary for the plan reason.
+
+    ``to_local`` converts to wall-clock time before formatting. Without it the
+    line printed UTC, and for a whole British summer "run Sauna at 18:30" meant
+    19:30 -- an hour early, on the one line that exists to be acted on.
+    """
     if not placements:
         return ""
+    convert = to_local or (lambda moment: moment)
     parts = [
-        f"{p.name} at {p.start.strftime('%H:%M')}"
+        f"{p.name} at {convert(p.start).strftime('%H:%M')}"
         for p in sorted(placements, key=lambda p: p.start)
     ]
     return "run " + ", ".join(parts)

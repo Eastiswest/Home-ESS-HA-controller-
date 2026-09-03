@@ -2207,7 +2207,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self.plan is not None and self.placements:
             self.plan.reason = (
-                f"{self.plan.reason} {describe_placements(self.placements)}."
+                f"{self.plan.reason} "
+                f"{describe_placements(self.placements, dt_util.as_local)}."
             )
 
     # ------------------------------------------------------------------
