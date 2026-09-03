@@ -486,12 +486,14 @@
           "earliest": "Earliest start",
           "latest": "Must finish by",
           "days": "Days it may run",
-          "switch": "Switch entity (optional)"
+          "switch": "Switch entity (optional)",
+          "run_hours": "Run time (if energy is empty)"
         },
         "data_description": {
-          "energy_kwh": "How much a whole session uses. For a heater, heat-up at full power plus thermostat cycling.",
+          "energy_kwh": "How much a whole session uses. Leave empty to work it out from power x run time.",
           "days": "Tick none to allow every day.",
-          "latest": "A finish time earlier than the start wraps past midnight, for overnight loads."
+          "latest": "A finish time earlier than the start wraps past midnight, for overnight loads.",
+          "run_hours": "Only used when Energy per run is empty: energy = power x run time. A thermostat-cycled heater draws for less than the whole session, so give the drawing time."
         }
       },
       "load_edit": {
@@ -526,7 +528,8 @@
       "octopus_not_found": "No such product or tariff. Check the code: Octopus product codes look like AGILE-24-10-01 for import and AGILE-OUTGOING-19-05-13 for export -- note that outgoing codes read AGILE-OUTGOING, not OUTGOING-AGILE. The live list is on the Octopus products API endpoint, linked from the README.",
       "octopus_unauthorised": "Octopus rejected the API key. Check it, or clear it and the account number and use a product code plus region instead.",
       "octopus_http_error": "Octopus returned an error. Try again shortly; if it persists, check the product and tariff codes.",
-      "octopus_bad_response": "Octopus returned something unreadable. Try again shortly."
+      "octopus_bad_response": "Octopus returned something unreadable. Try again shortly.",
+      "load_needs_energy_or_time": "Give either the energy per run or a run time, so the load can be sized."
     }
   },
   "selector": {

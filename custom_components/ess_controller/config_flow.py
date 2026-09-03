@@ -1231,12 +1231,21 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
         return vol.Schema(
             {
                 field("name", required=True): selector.TextSelector(),
-                field("energy_kwh", required=True): selector.NumberSelector(
+                field("energy_kwh"): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.1,
                         max=100,
                         step=0.1,
                         unit_of_measurement="kWh",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                field("run_hours"): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.25,
+                        max=24,
+                        step=0.25,
+                        unit_of_measurement="h",
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
@@ -1318,10 +1327,27 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
     ) -> ConfigFlowResult:
         loads = self._loads()
         if user_input is not None:
+            power = float(user_input["power_kw"])
+            energy = user_input.get("energy_kwh")
+            if not energy:
+                # Nobody knows their sauna in kilowatt-hours; everybody knows
+                # it runs about two hours. Power times run time is the same
+                # constant-draw assumption the placement itself makes, so the
+                # computed figure means exactly what a typed one would. A
+                # thermostat-cycled heater draws for less than the whole
+                # session, so the run time to give is the drawing time.
+                hours = user_input.get("run_hours")
+                if not hours:
+                    return self.async_show_form(
+                        step_id="load_form",
+                        data_schema=self._load_form_schema(user_input),
+                        errors={"base": "load_needs_energy_or_time"},
+                    )
+                energy = power * float(hours)
             entry: dict[str, Any] = {
                 "name": str(user_input["name"]).strip() or "load",
-                "energy_kwh": float(user_input["energy_kwh"]),
-                "power_kw": float(user_input["power_kw"]),
+                "energy_kwh": round(float(energy), 3),
+                "power_kw": power,
             }
             for key in ("earliest", "latest", "switch"):
                 if user_input.get(key):

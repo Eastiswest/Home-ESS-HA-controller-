@@ -427,6 +427,32 @@ class TestFlexibleLoadForms:
         assert load.latest == time(21, 0)
         assert load.switch_entity is None
 
+    async def test_energy_left_empty_is_worked_out_from_run_time(self, hass):
+        """Nobody knows their sauna in kilowatt-hours; everybody knows it
+        runs about two hours."""
+        from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
+
+        entry, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Sauna", "power_kw": 3.6, "run_hours": 1.25, "days": ["sat"]},
+        )
+        assert result["type"] == "create_entry"
+        assert entry.options[CONF_SHIFTABLE_LOADS][0]["energy_kwh"] == pytest.approx(4.5)
+
+    async def test_neither_energy_nor_run_time_asks_again(self, hass):
+        _entry, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"name": "Sauna", "power_kw": 3.6}
+        )
+        assert result["type"] == "form"
+        assert result["errors"] == {"base": "load_needs_energy_or_time"}
+        # The retry keeps what was typed and can complete.
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"name": "Sauna", "power_kw": 3.6, "energy_kwh": 4.5}
+        )
+        assert result["type"] == "create_entry"
+
     async def test_the_text_editor_shows_the_form_built_load(self, hass):
         from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
 
