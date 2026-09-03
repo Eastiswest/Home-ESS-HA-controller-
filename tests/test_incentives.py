@@ -613,6 +613,32 @@ class TestPlaceLoad:
         load = ShiftableLoad(name="Off", energy_kwh=1.0, power_kw=1.0, enabled=False)
         assert place_load(load, slots, marginal_prices(slots, None), local) is None
 
+    def test_runs_only_on_its_chosen_days(self):
+        """A sauna is a Tuesday-and-Saturday sort of load; a cheap Thursday
+        must not tempt it. The fixture's base date is Thursday 15 Jan 2026,
+        so a 60-slot horizon reaches into Friday."""
+        prices = [20.0] * 60
+        prices[10] = 1.0  # the cheapest half-hour, on Thursday
+        prices[52] = 10.0  # the cheapest Friday slot (02:00 Friday)
+        slots = horizon(prices)
+        load = ShiftableLoad(
+            name="Sauna",
+            energy_kwh=1.0,
+            power_kw=2.0,
+            days=frozenset({4}),  # Fridays only
+        )
+        placement = place_load(load, slots, marginal_prices(slots, None), local)
+        assert placement is not None
+        assert placement.start.weekday() == 4
+        assert placement.start == dt(2, 0, day=16)
+
+    def test_no_allowed_day_in_the_horizon_means_no_placement(self):
+        slots = horizon([5.0] * 8)  # all Thursday
+        load = ShiftableLoad(
+            name="Sauna", energy_kwh=1.0, power_kw=2.0, days=frozenset({5})
+        )
+        assert place_load(load, slots, marginal_prices(slots, None), local) is None
+
     def test_partial_slot_overlap_priced_proportionally(self):
         # 15 minutes of a 1 kW load in a 40p slot is 0.25 kWh -> 10p.
         slots = horizon([40.0] * 4)
@@ -742,6 +768,58 @@ class TestParseShiftableLoads:
     def test_bad_entries_skipped(self):
         loads = parse_shiftable_loads("garbage; Good=1kWh@1kW; Bad=0kWh@1kW")
         assert [load.name for load in loads] == ["Good"]
+
+    def test_compact_form_with_days(self):
+        loads = parse_shiftable_loads("Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat")
+        assert loads[0].days == frozenset({1, 3, 5})
+        assert loads[0].earliest == time(16, 0)
+
+    def test_trailing_fields_in_any_order(self):
+        loads = parse_shiftable_loads(
+            "Sauna=4.5kWh@3.6kW,saturdays,switch.sauna,16:00-21:00"
+        )
+        assert loads[0].days == frozenset({5})
+        assert loads[0].switch_entity == "switch.sauna"
+        assert loads[0].latest == time(21, 0)
+
+    def test_weekends_shorthand(self):
+        loads = parse_shiftable_loads("Sauna=4.5kWh@3.6kW,weekends")
+        assert loads[0].days == frozenset({5, 6})
+
+    def test_day_prefixes_and_a_half_typoed_day_list(self):
+        """'tues/thur' is fine (prefix match). 'tue/tomorow' is day-intended
+        and broken, and half-parsed days would quietly plan the sauna for
+        every day of the week -- so it costs the whole definition."""
+        loads = parse_shiftable_loads(
+            "Sauna=4.5kWh@3.6kW,tue/tomorow; Good=1kWh@1kW,tues/thur"
+        )
+        assert [load.name for load in loads] == ["Good"]
+        assert loads[0].days == frozenset({1, 3})
+
+    def test_a_field_that_is_no_shape_at_all_is_ignored_loudly(self):
+        """Same contract as a bad switch: the typo costs the field, not the load."""
+        loads = parse_shiftable_loads("Sauna=4.5kWh@3.6kW,tomorow")
+        assert loads[0].name == "Sauna"
+        assert loads[0].days is None
+
+    def test_mapping_form_with_days(self):
+        loads = parse_shiftable_loads(
+            [
+                {
+                    "name": "Sauna",
+                    "energy_kwh": 4.5,
+                    "power_kw": 3.6,
+                    "days": ["sat", "sun"],
+                }
+            ]
+        )
+        assert loads[0].days == frozenset({5, 6})
+        assert loads[0].as_dict()["days"] == "sat/sun"
+
+    def test_every_day_collapses_to_no_restriction(self):
+        loads = parse_shiftable_loads("Immersion=3kWh@3kW,daily")
+        assert loads[0].days is None
+        assert loads[0].as_dict()["days"] is None
 
     def test_empty_input(self):
         assert parse_shiftable_loads(None) == []

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -53,6 +54,13 @@ class ShiftableLoad:
     enabled: bool = True
     must_run_daily: bool = True
     """Whether it needs to run every day, or only when explicitly requested."""
+    days: frozenset[int] | None = None
+    """Local weekdays the load may be placed on (0=Monday), or None for any.
+
+    A sauna is a Tuesday-and-Saturday sort of load, and provisioning it daily
+    buys energy for sessions that are not happening. The run must *start* on an
+    allowed day; one that begins Saturday 23:30 and finishes Sunday morning is a
+    Saturday sauna, whatever the clock says when it ends."""
     switch_entity: str | None = None
     """Optional entity to switch on for the scheduled window.
 
@@ -87,6 +95,7 @@ class ShiftableLoad:
             "earliest": self.earliest.isoformat() if self.earliest else None,
             "latest": self.latest.isoformat() if self.latest else None,
             "enabled": self.enabled,
+            "days": format_days(self.days),
             "switch": self.switch_entity,
         }
 
@@ -247,6 +256,8 @@ def place_load(
             break
         if not _within_window(to_local(start), to_local(end), load.earliest, load.latest):
             continue
+        if load.days is not None and to_local(start).weekday() not in load.days:
+            continue
 
         # Spread the load's energy across the slots it overlaps and price it.
         cost = 0.0
@@ -398,6 +409,72 @@ def parse_shiftable_loads(raw: Any) -> list[ShiftableLoad]:
     return loads
 
 
+# Three-letter prefixes, because "Thurs", "thu" and "Thursday" are all the same
+# intent, plus the two groupings people actually mean.
+_DAY_TOKENS: dict[str, int] = {
+    "mon": 0,
+    "tue": 1,
+    "wed": 2,
+    "thu": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
+}
+_DAY_GROUPS: dict[str, tuple[int, ...]] = {
+    "weekdays": (0, 1, 2, 3, 4),
+    "weekends": (5, 6),
+    "weekend": (5, 6),
+    "daily": (0, 1, 2, 3, 4, 5, 6),
+}
+_DAY_NAMES: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_days(value: Any) -> frozenset[int] | None:
+    """Parse a day-of-week restriction; ``None`` means every day.
+
+    Accepts ``"tue/thu/sat"``, a list of names, or ``"weekends"``. Raises on a
+    token that is not a day, so a typo costs the load definition a warning
+    rather than silently planning the sauna for the wrong day of the week.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        tokens = [t for t in re.split(r"[/\s]+", value.strip().lower()) if t]
+    else:
+        tokens = [str(t).strip().lower() for t in value]
+    if not tokens:
+        return None
+    days: set[int] = set()
+    for token in tokens:
+        if token in _DAY_GROUPS:
+            days.update(_DAY_GROUPS[token])
+            continue
+        prefix = token[:3]
+        if prefix not in _DAY_TOKENS:
+            raise ValueError(f"not a day of the week: {token!r}")
+        days.add(_DAY_TOKENS[prefix])
+    return frozenset(days) if len(days) < 7 else None
+
+
+def format_days(days: frozenset[int] | None) -> str | None:
+    if days is None:
+        return None
+    return "/".join(_DAY_NAMES[d] for d in sorted(days))
+
+
+def _day_intended(text: str) -> bool:
+    """Whether a field is *trying* to be a day list, however badly.
+
+    "tue/tomorow" must fail the load rather than be shrugged off as an unknown
+    field: half-parsed days would quietly plan the sauna for every day of the
+    week, which is the exact mistake the restriction exists to prevent. A field
+    with no day in it at all is somebody's typo'd switch entity, and that costs
+    them the automation, not the definition.
+    """
+    tokens = [t for t in re.split(r"[/\s]+", text.strip().lower()) if t]
+    return any(t in _DAY_GROUPS or t[:3] in _DAY_TOKENS for t in tokens)
+
+
 def _parse_mapping(entry: Any) -> ShiftableLoad:
     return ShiftableLoad(
         name=str(entry["name"]),
@@ -407,40 +484,54 @@ def _parse_mapping(entry: Any) -> ShiftableLoad:
         latest=_parse_time(entry.get("latest")),
         enabled=bool(entry.get("enabled", True)),
         must_run_daily=bool(entry.get("must_run_daily", True)),
+        days=parse_days(entry.get("days")),
         switch_entity=entry.get("switch") or entry.get("switch_entity"),
     )
 
 
 def _parse_compact(text: str) -> ShiftableLoad:
-    """Parse ``Dishwasher=1.2kWh@2kW,22:00-06:00,switch.dishwasher``.
+    """Parse ``Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat,switch.sauna``.
 
-    Both trailing fields are optional, and an empty window may be left in place
-    to reach the switch: ``Dishwasher=1.2kWh@2kW,,switch.dishwasher``.
+    Everything after the energy@power spec is recognised by shape rather than
+    position -- a time window has a colon, an entity id has a dot, a day list is
+    made of day names -- so the trailing fields may appear in any order and any
+    of them may be left out. The old positional form (window, then switch, with
+    an empty field held open: ``Dishwasher=1.2kWh@2kW,,switch.dishwasher``)
+    parses identically under these rules.
     """
     name, _, rest = text.partition("=")
-    spec, window, switch = (part.strip() for part in _three_fields(rest))
+    fields = [part.strip() for part in rest.split(",")]
+    spec = fields[0]
     energy_text, _, power_text = spec.partition("@")
     energy = float(energy_text.strip().lower().removesuffix("kwh"))
     power = float(power_text.strip().lower().removesuffix("kw"))
     earliest = latest = None
-    if window:
-        start_text, _, end_text = window.partition("-")
-        earliest = _parse_time(start_text)
-        latest = _parse_time(end_text)
+    switch: str | None = None
+    days: frozenset[int] | None = None
+    for part in fields[1:]:
+        if not part:
+            continue
+        if _day_intended(part):
+            days = parse_days(part)
+        elif ":" in part:
+            start_text, _, end_text = part.partition("-")
+            earliest = _parse_time(start_text)
+            latest = _parse_time(end_text)
+        elif "." in part:
+            switch = part
+        else:
+            # A typo costs whatever the field was for, never the whole load --
+            # the same contract _clean_entity_id applies to a bad switch.
+            _LOGGER.warning("%s: unrecognised field %r ignored", name.strip(), part)
     return ShiftableLoad(
         name=name.strip() or "load",
         energy_kwh=energy,
         power_kw=power,
         earliest=earliest,
         latest=latest,
-        switch_entity=switch or None,
+        days=days,
+        switch_entity=switch,
     )
-
-
-def _three_fields(text: str) -> tuple[str, str, str]:
-    parts = text.split(",", 2)
-    parts += [""] * (3 - len(parts))
-    return parts[0], parts[1], parts[2]
 
 
 def _clean_entity_id(value: Any, load_name: str) -> str | None:
