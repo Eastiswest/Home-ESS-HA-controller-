@@ -193,7 +193,7 @@
           "appliance_control": "Switch appliances automatically"
         },
         "data_description": {
-          "shiftable_loads": "One per line: Dishwasher=1.2kWh@2kW,22:00-06:00 -- name, energy, power and the local window it must run inside. Add a third field to have it switched for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion.",
+          "shiftable_loads": "One per line: Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat -- name, energy and power, then any of: a local time window it must run inside, the days it may run (day names, 'weekdays' or 'weekends'; omit for every day), and a switch entity to have it driven for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion. The fields after the power can come in any order.",
           "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
         }
       },
@@ -449,7 +449,7 @@
           "appliance_control": "Switch appliances automatically"
         },
         "data_description": {
-          "shiftable_loads": "One per line: Dishwasher=1.2kWh@2kW,22:00-06:00 -- name, energy, power and the local window it must run inside. Add a third field to have it switched for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion.",
+          "shiftable_loads": "One per line: Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat -- name, energy and power, then any of: a local time window it must run inside, the days it may run (day names, 'weekdays' or 'weekends'; omit for every day), and a switch entity to have it driven for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion. The fields after the power can come in any order.",
           "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
         }
       },
