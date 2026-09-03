@@ -377,6 +377,126 @@ class TestOptionsFlow:
         )
 
 
+class TestFlexibleLoadForms:
+    """Each load is a form now -- tickboxes for days, boxes for the numbers --
+    with the compact text surviving as the bulk editor the forms round-trip
+    through."""
+
+    async def _to_step(self, hass, step):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "shifting"}
+        )
+        assert result["type"] == "menu"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": step}
+        )
+        return entry, result
+
+    async def test_a_load_added_through_the_form_parses_whole(self, hass):
+        from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
+        from custom_components.ess_controller.shifting import parse_shiftable_loads
+
+        entry, result = await self._to_step(hass, "load_add")
+        assert result["step_id"] == "load_form"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                "name": "Sauna",
+                "energy_kwh": 4.5,
+                "power_kw": 3.6,
+                "earliest": "16:00:00",
+                "latest": "21:00:00",
+                "days": ["tue", "thu", "sat"],
+            },
+        )
+        assert result["type"] == "create_entry"
+        stored = entry.options[CONF_SHIFTABLE_LOADS]
+        assert isinstance(stored, list)
+        from datetime import time
+
+        load = parse_shiftable_loads(stored)[0]
+        assert load.name == "Sauna"
+        assert load.days == frozenset({1, 3, 5})
+        assert load.earliest == time(16, 0)
+        assert load.latest == time(21, 0)
+        assert load.switch_entity is None
+
+    async def test_the_text_editor_shows_the_form_built_load(self, hass):
+        from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
+
+        entry, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Sauna", "energy_kwh": 4.5, "power_kw": 3.6, "days": ["sat"]},
+        )
+        assert result["type"] == "create_entry"
+
+        _, result = await self._to_step(hass, "load_text")
+        # The textarea offers the stored mappings back in the compact form.
+        suggested = next(
+            key.description["suggested_value"]
+            for key in result["data_schema"].schema
+            if getattr(key, "description", None)
+        )
+        assert suggested == "Sauna=4.5kWh@3.6kW,sat"
+        assert entry.options[CONF_SHIFTABLE_LOADS][0]["days"] == ["sat"]
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_SHIFTABLE_LOADS: "Sauna=4.5kWh@3.6kW,sat"}
+        )
+        assert result["type"] == "create_entry"
+        assert entry.options[CONF_SHIFTABLE_LOADS] == "Sauna=4.5kWh@3.6kW,sat"
+
+    async def test_removing_a_load_removes_only_it(self, hass):
+        from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
+
+        entry, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Sauna", "energy_kwh": 4.5, "power_kw": 3.6},
+        )
+        _, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Immersion", "energy_kwh": 3.0, "power_kw": 3.0},
+        )
+        _, result = await self._to_step(hass, "load_remove")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"loads": ["Sauna"]}
+        )
+        assert result["type"] == "create_entry"
+        names = [load["name"] for load in entry.options[CONF_SHIFTABLE_LOADS]]
+        assert names == ["Immersion"]
+
+    async def test_editing_prefills_and_replaces(self, hass):
+        from custom_components.ess_controller.const import CONF_SHIFTABLE_LOADS
+
+        entry, result = await self._to_step(hass, "load_add")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Sauna", "energy_kwh": 4.5, "power_kw": 3.6, "days": ["sat"]},
+        )
+        _, result = await self._to_step(hass, "load_edit")
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"load": "Sauna"}
+        )
+        assert result["step_id"] == "load_form"
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {"name": "Sauna", "energy_kwh": 5.0, "power_kw": 3.6, "days": ["sat", "sun"]},
+        )
+        assert result["type"] == "create_entry"
+        stored = entry.options[CONF_SHIFTABLE_LOADS]
+        assert len(stored) == 1
+        assert stored[0]["energy_kwh"] == pytest.approx(5.0)
+        assert stored[0]["days"] == ["sat", "sun"]
+
+
 class TestEntrySetup:
     async def test_entry_loads_and_publishes_entities(self, hass):
         """Four platforms once failed to import, which produced no entities."""

@@ -176,6 +176,7 @@ from .inverter.roles import (
     SOLAX_ROLE_SPECS,
     discover_entities,
 )
+from .shifting import format_days, loads_to_text, parse_shiftable_loads
 from .tariff.octopus import (
     KIND_BAD_RESPONSE,
     KIND_HTTP,
@@ -312,6 +313,20 @@ _OCTOPUS_ERRORS = {
     KIND_HTTP: "octopus_http_error",
     KIND_BAD_RESPONSE: "octopus_bad_response",
 }
+
+
+_WEEKDAY_OPTIONS: list[selector.SelectOptionDict] = [
+    selector.SelectOptionDict(value=value, label=label)
+    for value, label in (
+        ("mon", "Monday"),
+        ("tue", "Tuesday"),
+        ("wed", "Wednesday"),
+        ("thu", "Thursday"),
+        ("fri", "Friday"),
+        ("sat", "Saturday"),
+        ("sun", "Sunday"),
+    )
+]
 
 
 def _suggest(current: dict[str, Any], key: str, default: Any) -> Any:
@@ -606,9 +621,15 @@ class EssFlowMixin:
                 _suggest(current, CONF_SHIFTING_ENABLED, False): (
                     selector.BooleanSelector()
                 ),
-                _suggest(current, CONF_SHIFTABLE_LOADS, None): selector.TextSelector(
-                    selector.TextSelectorConfig(multiline=True)
-                ),
+                vol.Optional(
+                    CONF_SHIFTABLE_LOADS,
+                    description={
+                        "suggested_value": loads_to_text(
+                            current.get(CONF_SHIFTABLE_LOADS)
+                        )
+                        or None
+                    },
+                ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
                 _suggest(current, CONF_APPLIANCE_CONTROL, False): (
                     selector.BooleanSelector()
                 ),
@@ -792,6 +813,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self._edit_load: str | None = None
         self._reviewing = False
 
     def _next(self, current: str) -> str:
@@ -1167,20 +1189,202 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
     async def async_step_shifting(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        """A submenu, because a load is a form, not a line of syntax.
+
+        The compact text was the whole editor, and it asked a person to type
+        ``Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat`` without typos. Each load
+        now gets a proper form -- number boxes, time pickers, tickboxes for the
+        days -- and the textarea survives as the bulk editor the two forms
+        round-trip through.
+        """
+        options = ["shifting_settings", "load_add"]
+        if self._loads():
+            options += ["load_edit", "load_remove"]
+        options.append("load_text")
+        return self.async_show_menu(step_id="shifting", menu_options=options)
+
+    def _loads(self) -> list[dict[str, Any]]:
+        """The stored definitions as option mappings, whatever shape is stored."""
+        out: list[dict[str, Any]] = []
+        for load in parse_shiftable_loads(self.current.get(CONF_SHIFTABLE_LOADS)):
+            entry: dict[str, Any] = {
+                "name": load.name,
+                "energy_kwh": load.energy_kwh,
+                "power_kw": load.power_kw,
+            }
+            if load.earliest is not None:
+                entry["earliest"] = load.earliest.strftime("%H:%M:%S")
+            if load.latest is not None:
+                entry["latest"] = load.latest.strftime("%H:%M:%S")
+            if load.days is not None:
+                entry["days"] = (format_days(load.days) or "").split("/")
+            if load.switch_entity:
+                entry["switch"] = load.switch_entity
+            out.append(entry)
+        return out
+
+    def _load_form_schema(self, defaults: dict[str, Any]) -> vol.Schema:
+        def field(key: str, required: bool = False):
+            marker = vol.Required if required else vol.Optional
+            return marker(key, description={"suggested_value": defaults.get(key)})
+
+        return vol.Schema(
+            {
+                field("name", required=True): selector.TextSelector(),
+                field("energy_kwh", required=True): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.1,
+                        max=100,
+                        step=0.1,
+                        unit_of_measurement="kWh",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                field("power_kw", required=True): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.1,
+                        max=50,
+                        step=0.1,
+                        unit_of_measurement="kW",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                field("earliest"): selector.TimeSelector(),
+                field("latest"): selector.TimeSelector(),
+                vol.Optional(
+                    "days", default=defaults.get("days", [])
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=_WEEKDAY_OPTIONS,
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+                field("switch"): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=["switch", "input_boolean"])
+                ),
+            }
+        )
+
+    async def async_step_shifting_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self.current[CONF_SHIFTING_ENABLED] = bool(
+                user_input.get(CONF_SHIFTING_ENABLED, False)
+            )
+            self.current[CONF_APPLIANCE_CONTROL] = bool(
+                user_input.get(CONF_APPLIANCE_CONTROL, False)
+            )
+            return self._save()
+        schema = vol.Schema(
+            {
+                _suggest(self.current, CONF_SHIFTING_ENABLED, False): (
+                    selector.BooleanSelector()
+                ),
+                _suggest(self.current, CONF_APPLIANCE_CONTROL, False): (
+                    selector.BooleanSelector()
+                ),
+            }
+        )
+        return self.async_show_form(step_id="shifting_settings", data_schema=schema)
+
+    async def async_step_load_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        self._edit_load = None
+        return await self.async_step_load_form(user_input)
+
+    async def async_step_load_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self._edit_load = user_input["load"]
+            return await self.async_step_load_form()
+        schema = vol.Schema(
+            {
+                vol.Required("load"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[load["name"] for load in self._loads()],
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="load_edit", data_schema=schema)
+
+    async def async_step_load_form(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        loads = self._loads()
+        if user_input is not None:
+            entry: dict[str, Any] = {
+                "name": str(user_input["name"]).strip() or "load",
+                "energy_kwh": float(user_input["energy_kwh"]),
+                "power_kw": float(user_input["power_kw"]),
+            }
+            for key in ("earliest", "latest", "switch"):
+                if user_input.get(key):
+                    entry[key] = user_input[key]
+            if user_input.get("days"):
+                entry["days"] = user_input["days"]
+            # Renaming replaces the edited load; reusing a name replaces its
+            # namesake. Either way one name means one load.
+            dropped = {entry["name"], self._edit_load}
+            loads = [load for load in loads if load["name"] not in dropped]
+            loads.append(entry)
+            self.current[CONF_SHIFTABLE_LOADS] = loads
+            return self._save()
+        defaults = next((load for load in loads if load["name"] == self._edit_load), {})
+        return self.async_show_form(
+            step_id="load_form", data_schema=self._load_form_schema(defaults)
+        )
+
+    async def async_step_load_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        loads = self._loads()
+        if user_input is not None:
+            gone = set(user_input.get("loads", []))
+            self.current[CONF_SHIFTABLE_LOADS] = [
+                load for load in loads if load["name"] not in gone
+            ]
+            return self._save()
+        schema = vol.Schema(
+            {
+                vol.Required("loads", default=[]): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[load["name"] for load in loads],
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="load_remove", data_schema=schema)
+
+    async def async_step_load_text(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         if user_input is not None:
             # A cleared load list must actually clear, so this field bypasses the
             # empty-means-unset rule that protects the other optional fields.
             self.current[CONF_SHIFTABLE_LOADS] = user_input.get(CONF_SHIFTABLE_LOADS, "")
-            self.current[CONF_APPLIANCE_CONTROL] = bool(
-                user_input.get(CONF_APPLIANCE_CONTROL, False)
-            )
-            self.current[CONF_SHIFTING_ENABLED] = bool(
-                user_input.get(CONF_SHIFTING_ENABLED, False)
-            )
             return self._save()
-        return self.async_show_form(
-            step_id="shifting", data_schema=self._shifting_schema(self.current)
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_SHIFTABLE_LOADS,
+                    description={
+                        "suggested_value": loads_to_text(
+                            self.current.get(CONF_SHIFTABLE_LOADS)
+                        )
+                        or None
+                    },
+                ): selector.TextSelector(selector.TextSelectorConfig(multiline=True))
+            }
         )
+        return self.async_show_form(step_id="load_text", data_schema=schema)
 
     async def async_step_outage(
         self, user_input: dict[str, Any] | None = None

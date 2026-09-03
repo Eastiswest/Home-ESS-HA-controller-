@@ -475,6 +475,32 @@ def _day_intended(text: str) -> bool:
     return any(t in _DAY_GROUPS or t[:3] in _DAY_TOKENS for t in tokens)
 
 
+def loads_to_text(raw: Any) -> str:
+    """Render stored definitions in the compact one-line-each form.
+
+    The options flow edits loads as structured forms and stores them as
+    mappings, but the bulk-edit textarea and the initial setup still speak the
+    compact form -- so the two views have to round-trip through each other.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    lines: list[str] = []
+    for load in parse_shiftable_loads(raw):
+        parts = [f"{load.name}={load.energy_kwh:g}kWh@{load.power_kw:g}kW"]
+        if load.earliest is not None or load.latest is not None:
+            begin = load.earliest.strftime("%H:%M") if load.earliest else ""
+            finish = load.latest.strftime("%H:%M") if load.latest else ""
+            parts.append(f"{begin}-{finish}")
+        if load.days is not None:
+            parts.append(format_days(load.days) or "")
+        if load.switch_entity:
+            parts.append(load.switch_entity)
+        lines.append(",".join(parts))
+    return "\n".join(lines)
+
+
 def _parse_mapping(entry: Any) -> ShiftableLoad:
     return ShiftableLoad(
         name=str(entry["name"]),

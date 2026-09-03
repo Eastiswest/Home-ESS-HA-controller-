@@ -442,15 +442,13 @@
       },
       "shifting": {
         "title": "Flexible loads",
-        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them.\n\nNo smart appliances needed: leave the switch entity off a load and it is scheduled and published as advice, which you read off the 'Scheduled flexible loads' sensor and act on yourself. Give a load a switch entity and it can be driven automatically instead.",
-        "data": {
-          "shifting_enabled": "Schedule flexible loads",
-          "shiftable_loads": "Load definitions",
-          "appliance_control": "Switch appliances automatically"
-        },
-        "data_description": {
-          "shiftable_loads": "One per line: Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat -- name, energy and power, then any of: a local time window it must run inside, the days it may run (day names, 'weekdays' or 'weekends'; omit for every day), and a switch entity to have it driven for you, e.g. Immersion=3kWh@3kW,00:00-07:00,switch.immersion. The fields after the power can come in any order.",
-          "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
+        "description": "Loads whose timing can move. These are scheduled into the cheapest windows and the battery re-plans around them.",
+        "menu_options": {
+          "shifting_settings": "Scheduling switches",
+          "load_add": "Add a load",
+          "load_edit": "Edit a load",
+          "load_remove": "Remove loads",
+          "load_text": "Edit as text"
         }
       },
       "recommend": {
@@ -465,6 +463,57 @@
         "data_description": {
           "recommend_import_products": "Comma separated Octopus product codes. Leave empty for a sensible default set.",
           "recommend_window_hours": "Agile publishes only 24-48 hours ahead, so a longer window is not necessarily better."
+        }
+      },
+      "shifting_settings": {
+        "title": "Scheduling",
+        "data": {
+          "shifting_enabled": "Schedule flexible loads",
+          "appliance_control": "Switch appliances automatically"
+        },
+        "data_description": {
+          "shifting_enabled": "Definitions sit idle until this is on.",
+          "appliance_control": "Only affects loads you gave a switch entity. It switches them on at the start of their window and off at the end, and never touches anything you started yourself."
+        }
+      },
+      "load_form": {
+        "title": "Flexible load",
+        "description": "Without a switch entity the load is advisory: the schedule is published and you start it yourself. Reusing a name replaces that load.",
+        "data": {
+          "name": "Name",
+          "energy_kwh": "Energy per run",
+          "power_kw": "Power while running",
+          "earliest": "Earliest start",
+          "latest": "Must finish by",
+          "days": "Days it may run",
+          "switch": "Switch entity (optional)"
+        },
+        "data_description": {
+          "energy_kwh": "How much a whole session uses. For a heater, heat-up at full power plus thermostat cycling.",
+          "days": "Tick none to allow every day.",
+          "latest": "A finish time earlier than the start wraps past midnight, for overnight loads."
+        }
+      },
+      "load_edit": {
+        "title": "Edit a load",
+        "data": {
+          "load": "Load"
+        }
+      },
+      "load_remove": {
+        "title": "Remove loads",
+        "data": {
+          "loads": "Loads to remove"
+        }
+      },
+      "load_text": {
+        "title": "Load definitions as text",
+        "description": "The bulk editor. The forms and this box round-trip through each other.",
+        "data": {
+          "shiftable_loads": "Load definitions"
+        },
+        "data_description": {
+          "shiftable_loads": "One per line: Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat -- name, energy and power, then any of: a local time window it must run inside, the days it may run (day names, 'weekdays' or 'weekends'; omit for every day), and a switch entity to have it driven for you. The fields after the power can come in any order."
         }
       }
     },
