@@ -2525,15 +2525,18 @@ class TestTheWeeklySavingIsATotalNotARate:
         return hass.data[DOMAIN][entry.entry_id]
 
     async def test_the_unit_is_money(self, hass):
-        from custom_components.ess_controller.sensor import COST_UNIT, PRICE_UNIT
+        """The configured currency, as a monetary sensor, so the frontend
+        formats it ("\u00a39.02") rather than printing 901.7p."""
+        from custom_components.ess_controller.sensor import PRICE_UNIT
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
         state = hass.states.get("sensor.ai_ess_controller_saving_vs_self_use_this_week")
         assert state is not None
         unit = state.attributes.get("unit_of_measurement")
-        assert unit == COST_UNIT
+        assert unit == "GBP"
         assert unit != PRICE_UNIT
+        assert state.attributes.get("device_class") == "monetary"
 
     async def test_the_counterfactual_starts_where_the_window_does(self, hass):
         """Not where the whole log does.

@@ -785,12 +785,12 @@ class TestTemplatesRender:
             }
         }
         table = self._render(_performance_report(saving), attributes)
-        assert "| Charge left in the battery | +283.32p |" in table
+        assert "| Charge left in the battery | +\u00a32.83 |" in table
         # And the two deductions read as deductions.
-        assert "-159.77p" in table
-        assert "| Wear charged | -58.77p |" in table
-        # -159.77 - 58.77 + 283.32 = 64.78, which is now visibly the case.
-        assert "**64.78p**" in table
+        assert "-\u00a31.60" in table
+        assert "| Wear charged | -\u00a30.59 |" in table
+        # -1.60 - 0.59 + 2.83 = 0.65 (rounded per row), which is now visibly the case.
+        assert "**\u00a30.65**" in table
 
     def test_a_week_with_nothing_stored_still_renders(self):
         from custom_components.ess_controller.dashboard import _performance_report
@@ -919,8 +919,8 @@ class TestTemplatesRender:
         }
         card = self._cards(build_dashboard(resolved("weekly_saving")))[0]
         rendered = self._render(card, attributes)
-        assert "| Spent | 1160.0p |" in rendered
-        assert "| **Net saving** | **300.0p** |" in rendered
+        assert "| Spent | \u00a311.60 |" in rendered
+        assert "| **Net saving** | **\u00a33.00** |" in rendered
         assert "| Plan followed | 94% |" in rendered
         assert "| Round trip | 88% |" in rendered
         assert "> armed for 300 of 336 slots" in rendered
@@ -1006,8 +1006,8 @@ class TestTemplatesRender:
             self._cards(build_dashboard(resolved("shifted_loads")))[0], attributes
         )
         assert "**start Immersion at 03:00**" in rendered
-        assert "| Immersion | 03:00 to 04:00 | -13.5p | yes |" in rendered
-        assert "| Dishwasher | 03:30 to 04:06 | -5.6p | by hand |" in rendered
+        assert "| Immersion | 03:00 to 04:00 | -\u00a30.14 | yes |" in rendered
+        assert "| Dishwasher | 03:30 to 04:06 | -\u00a30.06 | by hand |" in rendered
 
     def test_every_markdown_card_renders_against_empty_state(self):
         """Nothing may raise or leak "None" before any data exists."""

@@ -19,18 +19,23 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import CONF_CURRENCY, DEFAULT_CURRENCY, DOMAIN
 from .coordinator import EssCoordinator
 from .entity import EssEntity
 from .models import SlotAction
 
 _LOGGER = logging.getLogger(__name__)
 
-# Plan costs are in minor currency units (pence for GBP). There is no HA unit
-# for "pence", so the unit is left as a plain string and the currency is exposed
-# as an attribute rather than pretending to be a monetary device class.
+# Prices stay in minor units per kWh -- that is how Agile is quoted. Money
+# totals are monetary sensors in the configured currency, so the frontend
+# formats them ("£9.02") and the attributes keep the pence for the arithmetic.
 PRICE_UNIT = "p/kWh"
 COST_UNIT = "p"
+MINOR_PER_MAJOR = 100.0
+
+
+def _major(value: float | None) -> float | None:
+    return None if value is None else round(value / MINOR_PER_MAJOR, 2)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -235,10 +240,10 @@ SENSORS: tuple[EssSensorDescription, ...] = (
         translation_key="plan_cost",
         name="Planned horizon cost",
         icon="mdi:cash",
-        native_unit_of_measurement=COST_UNIT,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
-        value=lambda c: round(c.plan.total_cost, 2) if c.plan else None,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        value=lambda c: _major(c.plan.total_cost) if c.plan else None,
         attributes=_plan_attributes,
     ),
     EssSensorDescription(
@@ -246,10 +251,10 @@ SENSORS: tuple[EssSensorDescription, ...] = (
         translation_key="plan_saving",
         name="Planned saving vs self-use",
         icon="mdi:piggy-bank-outline",
-        native_unit_of_measurement=COST_UNIT,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
-        value=lambda c: round(c.plan.saving_vs_self_use, 2) if c.plan else None,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        value=lambda c: _major(c.plan.saving_vs_self_use) if c.plan else None,
     ),
     EssSensorDescription(
         key="import_price",
@@ -554,7 +559,7 @@ def _performance_state(coordinator: EssCoordinator) -> float | None:
     is not one worth reporting.
     """
     net = coordinator.performance_report(7.0).net_saving_vs_self_use
-    return None if net is None else round(net, 1)
+    return _major(net)
 
 
 def _recommendation_state(coordinator: EssCoordinator) -> str | None:
@@ -614,12 +619,10 @@ SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
         translation_key="weekly_saving",
         name="Saving vs self use this week",
         icon="mdi:chart-line",
-        # A total, not a rate. Labelled p/kWh it read as "-476.6 p/kWh", which is
-        # not a quantity anybody can act on -- and on a graph of it, the y-axis
-        # made a week's money look like a tariff gone mad.
-        native_unit_of_measurement=COST_UNIT,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
+        # A total, not a rate: money in the configured currency.
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
         value=_performance_state,
         attributes=_performance_attributes,
     ),
@@ -656,6 +659,12 @@ class EssSensor(EssEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        if self.entity_description.device_class is SensorDeviceClass.MONETARY:
+            return str(self.coordinator.options.get(CONF_CURRENCY, DEFAULT_CURRENCY))
+        return self.entity_description.native_unit_of_measurement
 
     @property
     def native_value(self) -> Any:

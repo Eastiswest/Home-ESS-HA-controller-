@@ -41,7 +41,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
+from .const import CONF_CURRENCY, DEFAULT_CURRENCY, DOMAIN
 from .dashboard import (
     APEX_RESOURCE,
     DASHBOARD_ICON,
@@ -105,8 +105,12 @@ def has_apexcharts(hass: HomeAssistant) -> bool:
 
 def build_for_entry(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     title = entry.title or DASHBOARD_TITLE
+    currency = {**entry.data, **entry.options}.get(CONF_CURRENCY, DEFAULT_CURRENCY)
     return build_dashboard(
-        resolve_entities(hass, entry), title=title, charts=has_apexcharts(hass)
+        resolve_entities(hass, entry),
+        title=title,
+        charts=has_apexcharts(hass),
+        currency=str(currency),
     )
 
 

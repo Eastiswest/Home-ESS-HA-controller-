@@ -1110,7 +1110,40 @@ def _wear_workings(wear_entity: str) -> str:
     )
 
 
-def _performance_report(saving_entity: str) -> str:
+CURRENCY_SYMBOLS = {
+    "GBP": "\u00a3",
+    "EUR": "\u20ac",
+    "USD": "$",
+    "AUD": "A$",
+    "NZD": "NZ$",
+}
+
+
+def currency_symbol(code: str | None) -> str:
+    """The sign to put in front of money, or the code with a space if unknown."""
+    text = (code or "GBP").upper()
+    return CURRENCY_SYMBOLS.get(text, text + "\u00a0")
+
+
+def _money_macro(symbol: str) -> str:
+    """A Jinja macro turning minor units into money: 901.71 -> "\u00a39.02".
+
+    Totals in pence read like an accountant's ledger; the attributes keep the
+    pence for the arithmetic and this formats them at the edge. ``sign`` adds
+    a leading plus for a credit, and ``None`` renders as "not yet" so a table
+    never shows a broken-looking "\u00a3--".
+    """
+    return (
+        "{% macro money(v, sign=false) %}"
+        "{% if v is none or v is undefined %}not yet{% else %}"
+        "{% set q = (v | float) / 100 %}"
+        "{{ '-' if q < 0 else ('+' if sign else '') }}" + symbol + ""
+        "{{ '%.2f' | format(q | abs) }}"
+        "{% endif %}{% endmacro %}"
+    )
+
+
+def _performance_report(saving_entity: str, symbol: str = "\u00a3") -> str:
     """The weekly report, laid out from the summary attributes.
 
     Units live *inside* each conditional. Putting them outside is the obvious
@@ -1118,34 +1151,27 @@ def _performance_report(saving_entity: str) -> str:
     broken template rather than "not enough data yet".
     """
     return (
-        "{% set e = '" + saving_entity + "' %}"
-        "{% set money = state_attr(e, 'money') %}"
+        _money_macro(symbol) + "{% set e = '" + saving_entity + "' %}"
+        "{% set m = state_attr(e, 'money') %}"
         "{% set control = state_attr(e, 'control') %}"
         "{% set err = state_attr(e, 'forecast_error_kwh_per_slot') %}"
         "{% set window = state_attr(e, 'window') %}"
-        "{% if not money %}"
+        "{% if not m %}"
         "Nothing recorded yet -- this fills in as half-hours complete."
         "{% else %}"
         "| | |\n|---|--:|\n"
-        "| Spent | {{ money.actual }}p |\n"
-        "| With no battery | {{ money.if_no_battery }}p |\n"
-        "| With self-use only | "
-        "{{ (money.if_self_use_only ~ 'p') if money.if_self_use_only is not none "
-        "else 'not yet' }} |\n"
-        "| Saving vs self-use | "
-        "{{ (money.saving_vs_self_use ~ 'p') if money.saving_vs_self_use is not none "
-        "else 'not yet' }} |\n"
-        "| Wear charged | -{{ money.wear_cost }}p |\n"
+        "| Spent | {{ money(m.actual) }} |\n"
+        "| With no battery | {{ money(m.if_no_battery) }} |\n"
+        "| With self-use only | {{ money(m.if_self_use_only) }} |\n"
+        "| Saving vs self-use | {{ money(m.saving_vs_self_use) }} |\n"
+        "| Wear charged | {{ money(0 - (m.wear_cost | float(0))) }} |\n"
         # The row that was missing. Without it the three lines above cannot
         # reach the bold total below them -- a real week showed -159.77p and
         # -58.77p adding up to +64.78p, which reads as a broken sum. The credit
         # is the largest term of the three and it was the one left out.
         "| Charge left in the battery | "
-        "{{ ('+' ~ money.stored_energy_value ~ 'p') "
-        "if money.stored_energy_value is not none else 'not yet' }} |\n"
-        "| **Net saving** | **"
-        "{{ (money.net_saving_vs_self_use ~ 'p') if money.net_saving_vs_self_use "
-        "is not none else 'not yet' }}** |\n"
+        "{{ money(m.stored_energy_value, true) }} |\n"
+        "| **Net saving** | **{{ money(m.net_saving_vs_self_use) }}** |\n"
         "| Solar forecast error | "
         "{{ (err.solar_mae ~ ' kWh/slot') if err.solar_mae is not none "
         "else 'not yet' }} |\n"
@@ -1164,9 +1190,9 @@ def _performance_report(saving_entity: str) -> str:
     )
 
 
-def _flexible_loads(shifted_entity: str) -> str:
+def _flexible_loads(shifted_entity: str, symbol: str = "\u00a3") -> str:
     return (
-        "{% set e = '" + shifted_entity + "' %}"
+        _money_macro(symbol) + "{% set e = '" + shifted_entity + "' %}"
         "**{{ state_attr(e, 'advice') or 'nothing scheduled' }}**\n\n"
         "{% set placements = state_attr(e, 'placements') %}"
         "{% if placements %}"
@@ -1175,7 +1201,7 @@ def _flexible_loads(shifted_entity: str) -> str:
         "| {{ p.name }} "
         "| {{ as_timestamp(p.start) | timestamp_custom('%H:%M', true) }} to "
         "{{ as_timestamp(p.end) | timestamp_custom('%H:%M', true) }} "
-        "| {{ p.cost }}p "
+        "| {{ money(p.cost) }} "
         "| {{ 'yes' if p.switch else 'by hand' }} |\n"
         "{% endfor %}"
         "{% else %}No loads defined. Add them in the integration's options if you "
@@ -1387,7 +1413,7 @@ def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]
     )
 
 
-def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
+def _performance_view(resolved: dict[str, str], symbol: str = "\u00a3") -> dict[str, Any]:
     weekly = resolved.get("weekly_saving")
     wear = resolved.get("wear_allowance")
     return _view(
@@ -1398,7 +1424,7 @@ def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
             _section(
                 "This week",
                 "mdi:cash-multiple",
-                [_markdown(_performance_report(weekly)) if weekly else None],
+                [_markdown(_performance_report(weekly, symbol)) if weekly else None],
             ),
             _section(
                 "Wear",
@@ -1453,7 +1479,7 @@ def _performance_view(resolved: dict[str, str]) -> dict[str, Any]:
     )
 
 
-def _loads_view(resolved: dict[str, str]) -> dict[str, Any]:
+def _loads_view(resolved: dict[str, str], symbol: str = "\u00a3") -> dict[str, Any]:
     shifted = resolved.get("shifted_loads")
     return _view(
         "Loads & events",
@@ -1464,7 +1490,7 @@ def _loads_view(resolved: dict[str, str]) -> dict[str, Any]:
                 "Flexible loads",
                 "mdi:clock-fast",
                 [
-                    _markdown(_flexible_loads(shifted)) if shifted else None,
+                    _markdown(_flexible_loads(shifted, symbol)) if shifted else None,
                     *_toggles(["shifting_enabled", "appliance_control"], resolved),
                     *_tiles(["shifted_loads", "flexible_load_running"], resolved),
                 ],
@@ -1597,7 +1623,11 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
 
 
 def build_dashboard(
-    resolved: dict[str, str], title: str = DASHBOARD_TITLE, *, charts: bool = False
+    resolved: dict[str, str],
+    title: str = DASHBOARD_TITLE,
+    *,
+    charts: bool = False,
+    currency: str = "GBP",
 ) -> dict[str, Any]:
     """Build the whole dashboard from the entity keys that resolved.
 
@@ -1610,11 +1640,12 @@ def build_dashboard(
     install -- so the chart sections degrade to block-character drawings when it
     is absent, and become real charts when it is there.
     """
+    symbol = currency_symbol(currency)
     views = [
         _overview_view(resolved),
         _plan_view(resolved, charts),
-        _performance_view(resolved),
-        _loads_view(resolved),
+        _performance_view(resolved, symbol),
+        _loads_view(resolved, symbol),
         _settings_view(resolved),
     ]
     return {
