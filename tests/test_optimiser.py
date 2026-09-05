@@ -851,11 +851,16 @@ class TestASmallSurplusIsStoredRatherThanSpilled:
 
         plan = optimise(slots, 92.8, battery, grid, OptimiserSettings())
         afternoon = plan.slots[:5]
-        # The sun fills the last of the pack. Not a penny of it is bought.
-        assert sum(s.grid_import_kwh for s in afternoon) == pytest.approx(0.0, abs=0.01)
+        # The sun fills the last of the pack. None of it is bought: no slot is a
+        # forced charge, and what the grid shows is the odd watt-hour of level
+        # rounding on a self-use slot, not a purchase.
+        assert all(s.action is not SlotAction.CHARGE for s in afternoon)
+        assert sum(s.grid_import_kwh for s in afternoon) == pytest.approx(0.0, abs=0.02)
         assert sum(s.charge_ac_kwh for s in afternoon) > 0.3
-        # ...and it is full before the dear half-hours arrive.
-        assert plan.slots[4].soc_end > 94.0
+        # ...and it is full before the dear half-hours arrive. Within a level:
+        # the grid rounds, and a self-use slot may now round its discharge up
+        # rather than buy the remainder.
+        assert plan.slots[4].soc_end > 93.5
 
     def test_the_ceiling_can_still_bind(self):
         """Refinement is capped, and the cap is not a bug -- but it is a limit.
@@ -1360,9 +1365,20 @@ class TestARealSummerHorizon:
         plan = self.plan()
         assert sum(s.discharge_ac_kwh for s in plan.slots) > 1.0
 
-    def test_the_reason_says_why_it_is_doing_nothing_clever(self):
+    def test_nothing_clever_is_bought_on_a_day_the_sun_covers(self):
+        """The plan used to be thrown away for plain self-use here, because the
+        sweep's level rounding bought slivers self-use never paid for. Judged
+        like for like it stands, and it does nothing clever: no grid charge,
+        the sun stored, and a cost within pennies of leaving the inverter alone."""
+        from custom_components.ess_controller.optimiser.dp import simulate_self_use
+
         plan = self.plan()
-        assert "self-consumption" in plan.reason.lower()
+        slots, soc, battery, grid = self.load()
+        assert all(s.action is not SlotAction.CHARGE for s in plan.slots)
+        assert sum(s.grid_import_kwh for s in plan.slots) < 0.1
+        continuous = simulate_self_use(slots, soc, battery, grid)
+        assert abs(plan.total_cost - continuous.total_cost) < 3.0
+        assert plan.saving_vs_self_use >= 0.0
 
     def test_the_old_valuation_is_what_made_it_expensive(self):
         """Kept as evidence: crediting the whole pack at a typical half-hourly
@@ -1469,11 +1485,90 @@ class TestARealSummerHorizon:
         ]
         assert served[0] > served[1] > served[2]
 
-    def test_on_a_sunny_day_the_caution_is_free(self):
-        """Nothing is bought for it here: it only stops the charge being spent
-        elsewhere, which on a day with this much sun costs nothing at all."""
+    def test_on_a_sunny_day_the_caution_is_cheap(self):
+        """The hedge is provisioned, if at all, from the cheap end of the day
+        and never at the evening it is hedging -- and it never buys more than
+        the shortfall it was asked to cover."""
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        slots, _, _, _ = self.load()
+        uplift = sum(
+            evening_uplift(
+                [s.start.hour for s in slots], [s.load_kwh for s in slots], 0.0
+            )
+        )
         untrained = self.with_evening_allowance(0.0)
-        assert untrained.total_cost <= untrained.self_use_cost + 1e-6
+        bought = [s for s in untrained.slots if s.action is SlotAction.CHARGE]
+        evening_floor = min(s.import_price for s in untrained.slots if s.start.hour >= 16)
+        assert sum(s.grid_import_kwh for s in bought) <= uplift + 1e-6
+        assert all(s.import_price < evening_floor for s in bought)
+
+
+class TestAPaidHalfHourIsNotThrownAwayWithThePlan:
+    """Sat 5 Sep 2026, 15:00: -4.4p with a tenth of the pack empty, and the live
+    plan bought nothing.
+
+    The optimiser's plan filled the pack. It was vetoed by the guard that keeps
+    any plan worse than plain self-consumption, because the guard compared a
+    plan that pays the level grid's rounding -- a sliver bought in nearly every
+    self-use slot, 7.6p over this horizon -- against a baseline that never did.
+    9.2p earned in the paid window minus 7.6p of rounding tax left a margin one
+    cycle's noise could flip, and did.
+    """
+
+    @staticmethod
+    def load():
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        raw = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "negative_afternoon_horizon.json"
+            ).read_text()
+        )
+        slots = [
+            HorizonSlot(
+                start=datetime.fromisoformat(s["start"]),
+                end=datetime.fromisoformat(s["end"]),
+                import_price=s["import_price"],
+                export_price=s["export_price"],
+                pv_kwh=s["pv_kwh"],
+                load_kwh=s["load_kwh"],
+            )
+            for s in raw["slots"]
+        ]
+        return (
+            slots,
+            raw["start_soc"],
+            BatterySpec(**raw["battery"]),
+            GridSpec(**raw["grid"]),
+            OptimiserSettings(**raw["settings"]),
+        )
+
+    def test_the_paid_window_fills_the_pack(self):
+        slots, soc, battery, grid, settings = self.load()
+        plan = optimise(slots, soc, battery, grid, settings)
+        assert "self-consumption" not in plan.reason.lower()
+        paid = [s for s in plan.slots if s.import_price < 0]
+        assert sum(s.grid_import_kwh for s in paid) > 2.0
+        assert max(s.soc_end for s in plan.slots) > 94.0
+
+    def test_the_baseline_pays_the_same_rounding_as_the_plan(self):
+        """Self-use on the sweep's grid cannot land on the house exactly either,
+        so it books the same slivers -- which is what makes the comparison
+        fair. The continuous simulation, what the inverter really does, books
+        none."""
+        from custom_components.ess_controller.optimiser.dp import simulate_self_use
+
+        slots, soc, battery, grid, _ = self.load()
+        continuous = simulate_self_use(slots, soc, battery, grid)
+        gridded = simulate_self_use(slots, soc, battery, grid, step=0.05)
+        bought = lambda plan: sum(  # noqa: E731
+            s.grid_import_kwh for s in plan.slots if s.import_price > 0
+        )
+        assert bought(continuous) == pytest.approx(0.0, abs=1e-6)
+        assert gridded.total_cost != pytest.approx(continuous.total_cost, abs=0.5)
 
 
 class TestHorizonReach:

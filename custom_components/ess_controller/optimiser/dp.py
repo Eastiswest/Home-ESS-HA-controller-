@@ -56,6 +56,11 @@ MIN_GRID_CHARGE_KWH = 0.15
 # price it saves.
 MIN_USEFUL_SURPLUS_KWH = 0.03
 
+# The most a self-use discharge may overshoot the house by as level rounding: one
+# level of the grid, capped so a coarse grid cannot invent a whole level of
+# phantom discharge. Beyond the cap the sliver is bought instead.
+MAX_DISCHARGE_SLACK_KWH = 0.05
+
 # Below this share of the pack, the SoC limits have made the battery a spectator and
 # the plan is worth almost nothing -- but it is still a *valid* plan, so nothing used
 # to say so. A real install ran with Minimum charge at 90% against a maximum of 95%,
@@ -126,11 +131,17 @@ def _price_delta(
     delta_kwh: float,
     battery: BatterySpec,
     grid: GridSpec,
+    slack_kwh: float = 0.0,
 ) -> _Flow | None:
     """Price a single candidate battery energy change for one slot.
 
     ``delta_kwh`` is measured at the cells: positive charges, negative
     discharges. Returns ``None`` when the delta violates a hard limit.
+
+    ``slack_kwh`` lets a discharge overshoot the house by up to one grid level
+    without counting as export. The inverter lands on the load exactly; the
+    level grid cannot, and forcing every self-use slot to round down bought a
+    sliver at the half-hour's price every time, biasing plans towards holds.
     """
     hours = slot.duration_hours
     if hours <= 0:
@@ -176,7 +187,7 @@ def _price_delta(
     if (
         discharge_ac > EPS
         and not grid.allow_battery_export
-        and discharge_ac > deficit + EPS
+        and discharge_ac > deficit + slack_kwh + EPS
     ):
         # The battery may cover the house but must not push into the grid.
         return None
@@ -190,6 +201,11 @@ def _price_delta(
 
     grid_import = net if net > 0.0 else 0.0
     raw_export = -net if net < 0.0 else 0.0
+    # Rounding slack is neither exported nor curtailed: the inverter discharges
+    # a few watt-hours less. Wear is charged on the whole delta, so the sweep
+    # rounds this way only when a sliver of import would cost more.
+    if slack_kwh > 0.0 and discharge_ac > EPS and raw_export > 0.0:
+        raw_export -= min(raw_export, discharge_ac, slack_kwh)
 
     # Grid outflow is capped by the connection limit whether or not it earns
     # anything, and only *generation* can be curtailed: turning the array down is
@@ -278,7 +294,9 @@ def _price_delta(
         # to cover the house. The headroom never materialised and the plan
         # silently failed to do the one thing it had decided to do.
         action = (
-            SlotAction.DISCHARGE if discharge_ac > deficit + EPS else SlotAction.SELF_USE
+            SlotAction.DISCHARGE
+            if discharge_ac > deficit + slack_kwh + EPS
+            else SlotAction.SELF_USE
         )
     else:
         action = SlotAction.IDLE
@@ -772,6 +790,7 @@ def optimise(
     values: list[list[float]] = [[] for _ in range(n)] + [future]
 
     headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
+    slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
 
     for i in range(n - 1, -1, -1):
         slot = slots[i]
@@ -790,7 +809,7 @@ def optimise(
         surplus = max(slot.pv_kwh - slot.load_kwh, 0.0)
         priced: list[tuple[int, float, bool]] = []
         for offset in range(-max_down, max_up + 1):
-            flow = _price_delta(slot, offset * step, battery, grid)
+            flow = _price_delta(slot, offset * step, battery, grid, slack)
             if flow is not None:
                 bought = flow.charge_ac_kwh - surplus > EPS
                 priced.append((offset, flow.cost, bought))
@@ -846,9 +865,9 @@ def optimise(
         if next_level < 0:
             next_level = level
         delta = (next_level - level) * step
-        flow = _price_delta(slot, delta, battery, grid)
+        flow = _price_delta(slot, delta, battery, grid, slack)
         if flow is None:  # pragma: no cover - defensive
-            flow = _price_delta(slot, 0.0, battery, grid)
+            flow = _price_delta(slot, 0.0, battery, grid, slack)
             next_level = level
             delta = 0.0
         assert flow is not None
@@ -941,7 +960,6 @@ def optimise(
         else 0.0
     )
     self_use = simulate_self_use(slots, quantised_start_soc, battery, grid, created)
-    plan.self_use_cost = self_use.total_cost
 
     # Never hand back a plan that is worse than leaving the inverter alone.
     #
@@ -951,16 +969,26 @@ def optimise(
     # because energy banked past the horizon was credited at more than it could
     # ever be worth. Both sides are scored the same way here -- realised cost
     # minus what is left in the battery, valued identically -- so a plan only
-    # survives if it genuinely beats doing nothing clever. Discretising the
-    # battery into levels also means the DP cannot always express the continuous
-    # self-use trajectory exactly, and this catches that too.
-    self_use.terminal_value = (
-        terminal_value(slots, battery, settings, self_use.slots[-1].soc_end)
-        if self_use.slots
-        else 0.0
+    # survives if it genuinely beats doing nothing clever.
+    #
+    # Judged against self-use on the sweep's own level grid, so the baseline
+    # pays the same rounding as the plan. Against the continuous simulation a
+    # few pence of rounding outweighed a real win and the guard vetoed plans
+    # that filled the pack at a negative price.
+    gridded = simulate_self_use(
+        slots, quantised_start_soc, battery, grid, created, step=step
     )
-    plan.self_use_terminal_value = self_use.terminal_value
-    if self_use.net_cost < plan.net_cost - EPS:
+    for baseline in (self_use, gridded):
+        baseline.terminal_value = (
+            terminal_value(slots, battery, settings, baseline.slots[-1].soc_end)
+            if baseline.slots
+            else 0.0
+        )
+    # Reported against the gridded baseline too, so "saves Xp vs self-use" is
+    # the decision's own margin rather than the rounding the sweep cannot avoid.
+    plan.self_use_cost = gridded.total_cost
+    plan.self_use_terminal_value = gridded.terminal_value
+    if gridded.net_cost < plan.net_cost - EPS:
         self_use.baseline_cost = plan.baseline_cost
         self_use.baseline_terminal_value = plan.baseline_terminal_value
         self_use.self_use_cost = plan.self_use_cost
@@ -981,8 +1009,14 @@ def _simulate(
     grid: GridSpec,
     created: datetime | None,
     policy,
+    step: float = 0.0,
 ) -> Plan:
-    """Run a fixed policy over the horizon, for comparison against the plan."""
+    """Run a fixed policy over the horizon, for comparison against the plan.
+
+    With ``step`` the battery moves on the sweep's level grid under the sweep's
+    own rounding rules, so the baseline pays the rounding the plan pays.
+    Without it the policy runs continuously, which is what the inverter does.
+    """
     created = created or (slots[0].start if slots else datetime.now())
     plan = Plan(created=created)
     energy = battery.soc_to_energy(start_soc)
@@ -991,10 +1025,24 @@ def _simulate(
 
     for slot in slots:
         delta = policy(slot, energy, usable, battery, grid)
-        flow = _price_delta(slot, delta, battery, grid)
+        slack = 0.0
+        if step > 0.0:
+            slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
+            if delta < 0.0:
+                # A discharge may overshoot the house by the slack; a charge
+                # that overshoots the surplus would need a sliver from the grid.
+                delta = -math.floor(-delta / step + 0.5) * step
+            else:
+                delta = math.floor(delta / step + 1e-9) * step
+        flow = _price_delta(slot, delta, battery, grid, slack)
+        if flow is None and step > 0.0 and delta < 0.0:
+            # Rounding up tripped a limit; the level below is always the sweep's
+            # own fallback, and leaving the house on the grid would not be.
+            delta = -math.floor(-delta / step + 1e-9) * step
+            flow = _price_delta(slot, delta, battery, grid, slack)
         if flow is None:
             delta = 0.0
-            flow = _price_delta(slot, 0.0, battery, grid)
+            flow = _price_delta(slot, 0.0, battery, grid, slack)
         if flow is None:  # pragma: no cover - defensive
             continue
         soc_start = battery.energy_to_soc(energy)
@@ -1072,6 +1120,7 @@ def simulate_self_use(
     battery: BatterySpec,
     grid: GridSpec,
     created: datetime | None = None,
+    step: float = 0.0,
 ) -> Plan:
     """Plain self-consumption, the behaviour of an unmanaged hybrid inverter.
 
@@ -1095,7 +1144,7 @@ def simulate_self_use(
     and the release never fires. Not moving is not the same as refusing to move,
     and only the sweep is ever entitled to refuse.
     """
-    plan = _simulate(slots, start_soc, battery, grid, created, _self_use_policy)
+    plan = _simulate(slots, start_soc, battery, grid, created, _self_use_policy, step)
     for slot in plan.slots:
         if slot.action is SlotAction.IDLE:
             slot.action = SlotAction.SELF_USE
