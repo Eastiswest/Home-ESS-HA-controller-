@@ -4603,6 +4603,42 @@ class TestAStalledBatteryIsWokenEndToEnd:
         assert coordinator._stall_runs == 0
         assert "Self Use" not in self._mode_writes(calls)
 
+    async def test_without_a_battery_power_sensor_the_balance_is_used(
+        self, hass, monkeypatch
+    ):
+        """The real install binds no battery power role at all: its PV, load and
+        grid figures come from the inverter's dashboard sensors. Load less PV
+        less import is what the battery must be doing."""
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        hass.states.async_remove("sensor.solax_battery_power_charge")
+        coordinator._build_adapters()
+        await coordinator.async_refresh()
+        reading = coordinator._stall_reading(
+            coordinator.last_command, coordinator._last_site
+        )
+        assert coordinator.battery.power_kw is None
+        assert reading.battery_kw == pytest.approx(0.0, abs=0.01)
+        for _ in range(STALL_CYCLES):
+            await coordinator.async_refresh()
+        assert "Manual Mode" in self._mode_writes(calls)
+
+    async def test_a_balance_that_shows_discharge_is_not_a_stall(self, hass, monkeypatch):
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        hass.states.async_remove("sensor.solax_battery_power_charge")
+        coordinator._build_adapters()
+        # 2.2 kW house, 0.1 kW bought: the pack is carrying 2.1 kW.
+        hass.states.async_set(
+            "sensor.solax_measured_power", "100", {"unit_of_measurement": "W"}
+        )
+        for _ in range(STALL_CYCLES + 1):
+            await coordinator.async_refresh()
+        assert coordinator._stall_runs == 0
+        assert "Manual Mode" not in self._mode_writes(calls)
+
     async def test_the_floor_doing_its_job_is_not_a_stall(self, hass, monkeypatch):
         from custom_components.ess_controller.stall import STALL_CYCLES
 

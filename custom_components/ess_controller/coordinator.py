@@ -843,14 +843,39 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and self.last_apply.verified
             and "manual" not in mode.lower()
         )
+        battery_kw = self.battery.power_kw
+        if battery_kw is None:
+            battery_kw = self._inferred_battery_kw(site)
         return StallReading(
             self_use=self_use,
             soc=site.soc if site.soc_valid else None,
             floor=state.min_soc if state.min_soc is not None else command.min_soc,
             grid_kw=site.grid_power_kw if site.grid_valid else None,
-            battery_kw=self.battery.power_kw,
+            battery_kw=battery_kw,
             islanded=state.islanded,
         )
+
+    def _inferred_battery_kw(self, site: SiteState) -> float | None:
+        """Battery flow from the site balance, for installs with no sensor for it.
+
+        A real install measures PV, load and grid through the inverter's own
+        dashboard sensors and binds no battery power role, so the one figure
+        the stall rule needs most was the one it never had. Load less PV less
+        import is what the battery must be doing; sign aside, it is exact by
+        construction on an inverter whose load figure is itself derived. None
+        unless all three are actually reported.
+        """
+        options = self.options
+        state = self.inverter_state
+        load = power_kw(self.hass, options.get(CONF_LOAD_POWER_ENTITY))
+        if load is None:
+            load = state.load_power_kw
+        pv = power_kw(self.hass, options.get(CONF_PV_POWER_ENTITY))
+        if pv is None:
+            pv = state.pv_power_kw
+        if load is None or pv is None or not site.grid_valid:
+            return None
+        return load - pv - site.grid_power_kw
 
     async def _async_wake_if_stalled(
         self, now: datetime, command: ControlCommand, site: SiteState
