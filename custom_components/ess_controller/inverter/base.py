@@ -481,6 +481,25 @@ class InverterAdapter(ABC):
             )
         return kept
 
+    def drop_unavailable_writes(
+        self, writes: list[Write], skipped: list[str]
+    ) -> list[Write]:
+        """Hold back writes to entities that currently report no state.
+
+        In the first cycle after a restart the inverter's entities can exist
+        without attributes, and a current limit planned against a unit-less,
+        bound-less entity came out as 6.0 rather than 17 A. The write was only
+        harmless because the entity was still unavailable when it was sent.
+        The next cycle sees the real entity and plans the real value.
+        """
+        kept: list[Write] = []
+        for write in writes:
+            if state_value(self.hass, write.entity_id) is None:
+                skipped.append(f"{write.entity_id} unavailable; not written this cycle")
+                continue
+            kept.append(write)
+        return kept
+
     async def async_apply(
         self, command: ControlCommand, dry_run: bool = True, verify: bool = True
     ) -> ApplyResult:
@@ -489,6 +508,7 @@ class InverterAdapter(ABC):
 
         writes, skipped = self.plan_writes(command)
         writes = self.drop_rejected_writes(writes, skipped)
+        writes = self.drop_unavailable_writes(writes, skipped)
         result.skipped = skipped
         result.writes = writes
         result.changed = bool(writes)

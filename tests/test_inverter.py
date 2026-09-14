@@ -1824,3 +1824,45 @@ class TestAStalledInverterIsWoken:
         finally:
             base.VERIFY_DELAY_SECONDS = original
         assert results[0].unverified
+
+
+class TestNothingIsWrittenToAnEntityThatIsNotThere:
+    """In the first cycle after a restart the inverter's entities can exist
+    without attributes. A current limit planned against a unit-less, bound-less
+    entity came out as 6.0 rather than 17 A, and was only harmless because the
+    entity was still unavailable when the write was sent."""
+
+    def test_an_unavailable_limit_is_held_back_and_said(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", "unavailable")
+        adapter = solax_adapter(hass)
+        result = apply(adapter, command(SlotAction.SELF_USE, max_charge_kw=6.0))
+        written = {c[2]["entity_id"] for c in hass.services.calls}
+        assert "number.solax_battery_charge_max_current" not in written
+        assert any("unavailable" in note for note in result.skipped)
+
+    def test_the_other_writes_still_go(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", "unavailable")
+        hass.states.set("number.solax_battery_minimum_capacity", 31.0)
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.SELF_USE, min_soc=15.0, max_charge_kw=6.0))
+        written = {c[2]["entity_id"] for c in hass.services.calls}
+        assert "number.solax_battery_minimum_capacity" in written
+
+    def test_it_is_retried_once_the_entity_is_back(self):
+        hass = build_solax_hass()
+        hass.states.set("number.solax_battery_charge_max_current", "unavailable")
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.SELF_USE, max_charge_kw=6.0))
+        hass.states.set(
+            "number.solax_battery_charge_max_current",
+            3.0,
+            unit_of_measurement="A",
+            min=0,
+            max=30,
+            step=0.1,
+        )
+        apply(adapter, command(SlotAction.SELF_USE, max_charge_kw=6.0))
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_battery_charge_max_current"]["value"] > 15.0
