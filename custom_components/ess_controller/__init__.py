@@ -120,6 +120,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Link status and live readings on their own fast clock, so they are not
     # hostage to the five-minute planning cycle.
     entry.async_on_unload(coordinator.async_start_live_polling())
+    # A planning cycle seconds after each half-hour, so the slot's action is not
+    # up to five minutes late.
+    entry.async_on_unload(coordinator.async_start_slot_alignment())
     _async_register_services(hass)
     _async_schedule_dashboard(hass, entry, coordinator)
     _async_schedule_tariff_comparison(hass, entry, coordinator)

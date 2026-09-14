@@ -4228,3 +4228,150 @@ class TestAMissingStateOfChargeStopsTheWriting:
         await coordinator.async_refresh()
         command = coordinator._resolve_command(ha_dt.utcnow())
         assert "unavailable" not in command.reason
+
+
+class TestTheCycleLandsOnTheHalfHour:
+    """A decision must land when its slot does.
+
+    The planning clock runs every five minutes from whenever the last cycle
+    finished, and each cycle takes a few seconds, so it drifts: a real install
+    fired at 22:59:08 and next at 23:04:11, and the self-use the plan wanted from
+    23:00 reached the inverter four minutes late. The owner had stepped in by
+    hand at 23:02.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _count_refreshes(coordinator) -> list[int]:
+        calls = [0]
+
+        async def _spy():
+            calls[0] += 1
+
+        coordinator.async_request_refresh = _spy
+        return calls
+
+    def test_the_tick_is_seconds_after_the_boundary(self):
+        from custom_components.ess_controller.const import SLOT_BOUNDARY_SECONDS
+
+        assert 0 < SLOT_BOUNDARY_SECONDS <= 15
+
+    async def test_a_new_half_hour_forces_a_cycle(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        # The last cycle belonged to the previous half-hour.
+        coordinator._cycle_started = ha_dt.utcnow() - timedelta(minutes=30)
+        calls = self._count_refreshes(coordinator)
+        await coordinator._async_slot_boundary(ha_dt.now())
+        assert calls[0] == 1
+
+    async def test_a_half_hour_already_acted_on_is_not_planned_twice(self, hass):
+        """The five-minute clock can land inside the first seconds of a slot on
+        its own; the tick must not then run a second cycle on top of it."""
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        assert coordinator._cycle_started is not None
+        calls = self._count_refreshes(coordinator)
+        await coordinator._async_slot_boundary(ha_dt.now())
+        assert calls[0] == 0
+
+    async def test_a_tick_before_the_first_refresh_is_harmless(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        coordinator = await self._coordinator(hass)
+        coordinator.data = None
+        calls = self._count_refreshes(coordinator)
+        await coordinator._async_slot_boundary(ha_dt.now())
+        assert calls[0] == 0
+
+    async def test_every_cycle_stamps_when_it_began(self, hass):
+        coordinator = await self._coordinator(hass)
+        coordinator._cycle_started = None
+        await coordinator.async_refresh()
+        assert coordinator._cycle_started is not None
+
+    async def test_setup_wires_the_tick_and_unload_removes_it(self, hass):
+        coordinator = await self._coordinator(hass)
+        unsub = coordinator.async_start_slot_alignment()
+        assert callable(unsub)
+        unsub()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+class TestAnOverrideEndsOnTime:
+    """The plan takes back over when the override expires, not up to five
+    minutes later when the planning clock next happens to fire."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_setting_an_override_arms_a_timer_for_its_end(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=20))
+        assert coordinator._override_timer is not None
+
+    async def test_the_timer_replans(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=20))
+        calls = [0]
+
+        async def _spy():
+            calls[0] += 1
+
+        coordinator.async_request_refresh = _spy
+        await coordinator._async_override_expired(ha_dt.utcnow())
+        assert calls[0] == 1
+        assert coordinator._override_timer is None
+
+    async def test_clearing_the_override_disarms_it(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=20))
+        await coordinator.async_clear_override()
+        assert coordinator._override_timer is None
+
+    async def test_a_second_override_replaces_the_first_timer(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=20))
+        first = coordinator._override_timer
+        await coordinator.async_set_override(SlotAction.IDLE, timedelta(minutes=5))
+        assert coordinator._override_timer is not first
+
+    async def test_unload_does_not_leave_the_timer_behind(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=20))
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert coordinator._override_timer is None

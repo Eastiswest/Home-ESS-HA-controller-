@@ -26,7 +26,11 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_time_change,
+    async_track_time_interval,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -115,6 +119,7 @@ from .const import (
     DEFAULT_SOC_LEVELS,
     DEFAULT_SOLAR_PEAK_POWER,
     DOMAIN,
+    SLOT_BOUNDARY_SECONDS,
     SLOT_MINUTES,
     STRATEGY_AUTO,
     STRATEGY_FORCE_CHARGE,
@@ -270,6 +275,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # (slot start, action) for the half-hour currently being acted on.
         self._committed: tuple[datetime, SlotAction] | None = None
         self._committed_power: tuple[datetime, float] | None = None
+        # When the planning cycle in progress (or the last one) began, so the
+        # half-hour tick can tell whether this slot has already been acted on.
+        self._cycle_started: datetime | None = None
+        self._override_timer: CALLBACK_TYPE | None = None
+        # Consecutive cycles the battery has sat idle in self-use above its
         self._writes_day: Any = None
         self._writes_by_role: dict[str, int] = {}
         self.accumulator = SlotAccumulator()
@@ -392,6 +402,38 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.exception("Live state refresh failed")
             return
         self.async_update_listeners()
+
+    @callback
+    def async_start_slot_alignment(self) -> CALLBACK_TYPE:
+        """Force a planning cycle seconds after every half-hour boundary.
+
+        The planning clock runs every five minutes from whenever the last cycle
+        finished, and each cycle takes a few seconds, so it drifts: on a real
+        install it fired at 22:59:08 and next at 23:04:11, and the self-use the
+        plan wanted from 23:00 reached the inverter four minutes late. Tariff
+        slots are the unit of every decision, so a decision must land when the
+        slot does.
+
+        Returns the unsubscribe callable, for ``entry.async_on_unload``.
+        """
+        return async_track_time_change(
+            self.hass,
+            self._async_slot_boundary,
+            minute=list(range(0, 60, SLOT_MINUTES)),
+            second=SLOT_BOUNDARY_SECONDS,
+        )
+
+    async def _async_slot_boundary(self, _now: datetime) -> None:
+        """Re-plan for the half-hour that has just begun, unless one already has."""
+        if self.data is None:
+            return
+        now = dt_util.utcnow()
+        if self._cycle_started is not None and slot_start_for(
+            self._cycle_started
+        ) == slot_start_for(now):
+            # The five-minute clock happened to fire inside this slot already.
+            return
+        await self.async_request_refresh()
 
     def _build_adapters(self) -> None:
         options = self.options
@@ -702,6 +744,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         now = dt_util.utcnow()
+        self._cycle_started = now
 
         self._rediscover_if_blind()
         self.inverter_state = await self._adapter.async_read_state()
@@ -2774,10 +2817,30 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._adapter.reset_last_applied()
         self.clear_commitment()
+        # The plan takes back over when the override expires, not up to five
+        # minutes later when the planning clock next happens to fire.
+        self._cancel_override_timer()
+        self._override_timer = async_call_later(
+            self.hass, duration.total_seconds() + 1.0, self._async_override_expired
+        )
         await self.async_request_refresh()
+
+    async def _async_override_expired(self, _now: datetime) -> None:
+        self._override_timer = None
+        await self.async_request_refresh()
+
+    def _cancel_override_timer(self) -> None:
+        if self._override_timer is not None:
+            self._override_timer()
+            self._override_timer = None
+
+    async def async_shutdown(self) -> None:
+        self._cancel_override_timer()
+        await super().async_shutdown()
 
     async def async_clear_override(self) -> None:
         self.override = None
+        self._cancel_override_timer()
         self._adapter.reset_last_applied()
         self.clear_commitment()
         await self.async_request_refresh()

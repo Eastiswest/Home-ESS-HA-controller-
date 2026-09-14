@@ -21,9 +21,15 @@ PLATFORMS: Final = [
 
 # How often the coordinator wakes up to re-plan. The optimiser itself is cheap,
 # but a cycle also refreshes forecasts and may call the tariff API, so this is
-# not something to run every few seconds. Half-hour slot boundaries are handled
-# separately.
+# not something to run every few seconds. This clock drifts by the few seconds
+# each cycle takes, so it does not land on half-hour boundaries by itself.
 DEFAULT_SCAN_INTERVAL: Final = timedelta(minutes=5)
+
+# How long after each half-hour boundary an extra planning cycle is forced, so
+# the slot's action reaches the inverter seconds into the slot rather than up
+# to five minutes later. Long enough for the tariff and inverter entities to
+# have rolled over; short enough that a plan change is not visibly late.
+SLOT_BOUNDARY_SECONDS: Final = 5
 
 # How often the *live* state is re-read, separately from re-planning. Reading the
 # inverter costs nothing -- the adapters read Home Assistant states that some
