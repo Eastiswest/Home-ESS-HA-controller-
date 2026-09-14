@@ -89,6 +89,28 @@ class TestSomethingElseIsDrivingTheInverter:
             Snapshot(controlling=False, unexplained_charge_kwh=1.0)
         )
 
+    def test_a_battery_idle_in_self_use_is_named_with_the_evidence(self):
+        """The house is buying what the pack could supply, and the mode cycle
+        that normally frees the inverter has already been tried."""
+        note = "battery idle at 31% with the floor at 15% while the house imports 2.2 kW"
+        problem = next(
+            p
+            for p in detect(Snapshot(controlling=True, self_use_stall=note))
+            if p.key == "battery_idle_in_self_use"
+        )
+        assert problem.severity == "warning"
+        assert problem.placeholders == {"detail": note}
+
+    def test_a_behaving_battery_says_nothing(self):
+        assert "battery_idle_in_self_use" not in keys(Snapshot(controlling=True))
+
+    def test_an_advisory_install_is_not_told_about_a_stall(self):
+        """Without control the wake was never attempted, so there is nothing to
+        report that the plan's own reason does not already say."""
+        assert "battery_idle_in_self_use" not in keys(
+            Snapshot(controlling=False, self_use_stall="idle")
+        )
+
 
 class TestItCannotSeeSomethingItWasTold:
     def test_a_vanished_forecast_entity_is_named(self):
@@ -142,9 +164,10 @@ class TestTheKeysAreStable:
             missing_forecast_entities=["sensor.gone"],
             unexplained_charge_kwh=1.0,
             quiet_load_slots=QUIET_LOAD_SLOTS,
+            self_use_stall="idle",
         )
         problems = detect(state)
-        assert len(problems) == 8
+        assert len(problems) == 9
         assert len({p.key for p in problems}) == len(problems)
         for problem in problems:
             assert problem.severity in ("warning", "error")

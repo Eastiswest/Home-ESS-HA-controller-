@@ -942,6 +942,10 @@
       "title": "Something outside the plan is charging the battery",
       "description": "About {kwh} kWh went into the battery that the sun cannot account for, in half-hours the plan had costed as self-use. Estimated cost: {cost}p.\n\nThis is usually the inverter's own settings: a self-use charge-from-grid option, a charge period, or a manual mode left armed. Those are set on the inverter and are not all visible to Home Assistant."
     },
+    "battery_idle_in_self_use": {
+      "title": "The battery is not discharging in self-use",
+      "description": "{detail}.\n\nThe controller has cycled the inverter's working mode to wake it and the battery is still idle. Check the inverter's own discharge settings (discharge current limit, battery temperature, BMS warnings). This clears on its own once the battery starts discharging or the house stops importing."
+    },
     "forecast_entity_missing": {
       "title": "A forecast sensor is not reporting",
       "description": "{count} configured forecast entity has no value:\n\n{entities}\n\nThe controller has fallen back to estimating from the sun's position, which is cruder.\n\nA working forecast on the Energy dashboard does not mean these are working: that comes from the forecast provider's own config entry, not from these sensors. If one is disabled, enable it under Settings → Devices & services → its integration → Entities. If the name is wrong, fix it in this integration's options, or clear it so the warning stops."

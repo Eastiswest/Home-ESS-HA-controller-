@@ -4375,3 +4375,242 @@ class TestAnOverrideEndsOnTime:
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert coordinator._override_timer is None
+
+
+class TestAStalledBatteryIsWokenEndToEnd:
+    """The 14 September evening, replayed through the whole loop.
+
+    Self-use, 31% over a 15% floor, the house importing 2.2 kW, the battery at
+    nothing, and every register reading what the plan wanted. The controller
+    must notice from the power flows, cycle the working mode once, record what
+    it did, and say so in Repairs if the battery still does not move.
+    """
+
+    SOLAX_MODES = ["Self Use", "Feedin Priority", "Back Up Mode", "Manual Mode"]
+    SOLAX_MANUAL = ["Stop Charge and Discharge", "Force Charge", "Force Discharge"]
+
+    @staticmethod
+    def _fake_inverter_services(hass):
+        """``select`` and ``number`` services that update state, as the SolaX
+        integration's entities do on a write."""
+        calls = []
+
+        async def _select(call):
+            entity_id = call.data["entity_id"]
+            calls.append((entity_id, call.data["option"]))
+            state = hass.states.get(entity_id)
+            hass.states.async_set(entity_id, call.data["option"], state.attributes)
+
+        async def _number(call):
+            entity_id = call.data["entity_id"]
+            calls.append((entity_id, call.data["value"]))
+            state = hass.states.get(entity_id)
+            hass.states.async_set(entity_id, str(call.data["value"]), state.attributes)
+
+        hass.services.async_register("select", "select_option", _select)
+        hass.services.async_register("number", "set_value", _number)
+        return calls
+
+    def _inverter(self, hass, *, battery_w: float = 0.0, grid_w: float = 2200.0):
+        set_state = hass.states.async_set
+        set_state(
+            "select.solax_charger_use_mode", "Self Use", {"options": self.SOLAX_MODES}
+        )
+        set_state(
+            "select.solax_manual_mode_select",
+            "Stop Charge and Discharge",
+            {"options": self.SOLAX_MANUAL},
+        )
+        set_state(
+            "select.solax_lock_state", "Unlocked", {"options": ["Locked", "Unlocked"]}
+        )
+        set_state("sensor.solax_battery_capacity", "31", {"unit_of_measurement": "%"})
+        set_state(
+            "sensor.solax_battery_power_charge",
+            str(battery_w),
+            {"unit_of_measurement": "W"},
+        )
+        set_state(
+            "sensor.solax_measured_power", str(grid_w), {"unit_of_measurement": "W"}
+        )
+        set_state("sensor.solax_house_load", "2200", {"unit_of_measurement": "W"})
+        set_state("sensor.solax_pv_power_total", "0", {"unit_of_measurement": "W"})
+        set_state(
+            "sensor.solax_battery_voltage_charge", "360", {"unit_of_measurement": "V"}
+        )
+        for role in ("battery_charge_max_current", "battery_discharge_max_current"):
+            set_state(
+                f"number.solax_{role}",
+                "16.7",
+                {"unit_of_measurement": "A", "min": 0, "max": 30, "step": 0.1},
+            )
+        set_state(
+            "number.solax_battery_minimum_capacity",
+            "15",
+            {"unit_of_measurement": "%", "min": 10, "max": 100, "step": 1},
+        )
+
+    async def _coordinator(self, hass, monkeypatch):
+        from homeassistant.setup import async_setup_component
+
+        import custom_components.ess_controller.inverter.base as base
+        from custom_components.ess_controller.const import STRATEGY_SELF_USE
+
+        # Read-back is real Modbus latency; the fake services are instant.
+        monkeypatch.setattr(base, "VERIFY_DELAY_SECONDS", 0.0)
+        self._inverter(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        # After setup: loading our own number and select platforms registers
+        # Home Assistant's entity services under the same names, which would
+        # otherwise replace these and find no entities to act on.
+        calls = self._fake_inverter_services(hass)
+        coordinator.settings.enabled = True
+        coordinator.settings.dry_run = False
+        coordinator.settings.strategy = STRATEGY_SELF_USE
+        coordinator.settings.reserve_soc = 15.0
+        coordinator.settings.min_soc = 15.0
+        # Setup's own first refresh already saw the stall once; the tests count
+        # cycles from here.
+        coordinator._stall_runs = 0
+        coordinator._stall_note = ""
+        return coordinator, calls
+
+    @staticmethod
+    def _mode_writes(calls) -> list[str]:
+        return [value for entity_id, value in calls if entity_id.endswith("use_mode")]
+
+    @staticmethod
+    def _issues(hass):
+        from homeassistant.helpers import issue_registry as ir
+
+        return {
+            issue_id
+            for (domain, issue_id) in ir.async_get(hass).issues
+            if domain == DOMAIN
+        }
+
+    async def test_the_stall_is_seen_from_the_power_flows(self, hass, monkeypatch):
+        from custom_components.ess_controller.stall import stalled
+
+        coordinator, _calls = await self._coordinator(hass, monkeypatch)
+        await coordinator.async_refresh()
+        reading = coordinator._stall_reading(
+            coordinator.last_command, coordinator._last_site
+        )
+        assert reading.self_use is True
+        assert reading.soc == pytest.approx(31.0)
+        assert reading.floor == pytest.approx(15.0)
+        assert reading.grid_kw == pytest.approx(2.2)
+        assert reading.battery_kw == pytest.approx(0.0)
+        assert stalled(reading) is not None
+
+    async def test_one_cycle_is_not_enough(self, hass, monkeypatch):
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        await coordinator.async_refresh()
+        assert "Manual Mode" not in self._mode_writes(calls)
+        assert coordinator._stall_runs == 1
+
+    async def test_the_second_cycle_cycles_the_mode_and_comes_back(
+        self, hass, monkeypatch
+    ):
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        for _ in range(STALL_CYCLES):
+            await coordinator.async_refresh()
+        assert self._mode_writes(calls) == ["Manual Mode", "Self Use"]
+        assert hass.states.get("select.solax_charger_use_mode").state == "Self Use"
+
+    async def test_the_wake_is_in_the_apply_history(self, hass, monkeypatch):
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, _calls = await self._coordinator(hass, monkeypatch)
+        for _ in range(STALL_CYCLES):
+            await coordinator.async_refresh()
+        notes = [e.get("note", "") for e in coordinator._apply_history]
+        assert sum(1 for n in notes if n.startswith("wake:")) == 2
+        assert "31%" in notes[-1]
+        assert coordinator.diagnostics()["self_use_stall"]["last_wake"] is not None
+
+    async def test_it_is_woken_once_not_every_cycle(self, hass, monkeypatch):
+        """If the mode cycle did not free it, flapping every five minutes will
+        not either -- and each flap is two register writes."""
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        for _ in range(STALL_CYCLES + 3):
+            await coordinator.async_refresh()
+        assert self._mode_writes(calls).count("Manual Mode") == 1
+
+    async def test_a_persisting_stall_reaches_repairs(self, hass, monkeypatch):
+        from custom_components.ess_controller.problems import PERSIST_CYCLES
+
+        coordinator, _calls = await self._coordinator(hass, monkeypatch)
+        for _ in range(PERSIST_CYCLES):
+            await coordinator.async_refresh()
+        assert "battery_idle_in_self_use" in self._issues(hass)
+
+    async def test_a_battery_that_starts_moving_clears_everything(
+        self, hass, monkeypatch
+    ):
+        from custom_components.ess_controller.problems import PERSIST_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        for _ in range(PERSIST_CYCLES):
+            await coordinator.async_refresh()
+        assert "battery_idle_in_self_use" in self._issues(hass)
+
+        hass.states.async_set(
+            "sensor.solax_battery_power_charge", "-2100", {"unit_of_measurement": "W"}
+        )
+        hass.states.async_set(
+            "sensor.solax_measured_power", "50", {"unit_of_measurement": "W"}
+        )
+        await coordinator.async_refresh()
+        assert "battery_idle_in_self_use" not in self._issues(hass)
+        assert coordinator._stall_runs == 0
+        assert coordinator._stall_may_wake is True
+
+        # A fresh episode later is woken again.
+        self._inverter(hass)
+        for _ in range(2):
+            await coordinator.async_refresh()
+        assert self._mode_writes(calls).count("Manual Mode") == 2
+
+    async def test_a_dry_run_install_notices_but_does_not_touch(self, hass, monkeypatch):
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        coordinator.settings.dry_run = True
+        for _ in range(STALL_CYCLES + 1):
+            await coordinator.async_refresh()
+        assert calls == []
+        assert coordinator._stall_note
+
+    async def test_a_hold_sitting_idle_is_not_a_stall(self, hass, monkeypatch):
+        """A hold is *meant* to leave the pack idle with the house on the grid."""
+        from custom_components.ess_controller.const import STRATEGY_IDLE
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        coordinator.settings.strategy = STRATEGY_IDLE
+        for _ in range(STALL_CYCLES + 1):
+            await coordinator.async_refresh()
+        assert coordinator._stall_runs == 0
+        assert "Self Use" not in self._mode_writes(calls)
+
+    async def test_the_floor_doing_its_job_is_not_a_stall(self, hass, monkeypatch):
+        from custom_components.ess_controller.stall import STALL_CYCLES
+
+        coordinator, calls = await self._coordinator(hass, monkeypatch)
+        hass.states.async_set(
+            "sensor.solax_battery_capacity", "15", {"unit_of_measurement": "%"}
+        )
+        for _ in range(STALL_CYCLES + 1):
+            await coordinator.async_refresh()
+        assert coordinator._stall_runs == 0
+        assert "Manual Mode" not in self._mode_writes(calls)

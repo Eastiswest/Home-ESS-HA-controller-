@@ -190,20 +190,7 @@ class SolaxModbusAdapter(InverterAdapter):
         action = command.action
         voltage = state_float(self.hass, self.entity(ROLE_BATTERY_VOLTAGE))
 
-        # Unlock first: SolaX refuses setting writes while locked, and a locked
-        # inverter is the single most common reason control appears to do nothing.
-        lock_entity = self.entity(ROLE_LOCK)
-        if lock_entity:
-            current_lock = state_value(self.hass, lock_entity)
-            unlocked = pick_option(
-                state_options(self.hass, lock_entity), self.OPT_UNLOCKED
-            )
-            already_unlocked = (
-                current_lock is not None
-                and pick_option([current_lock], self.OPT_UNLOCKED) is not None
-            )
-            if unlocked and current_lock is not None and not already_unlocked:
-                writes.append(_select_write(lock_entity, unlocked, ROLE_LOCK))
+        writes.extend(self._unlock_writes())
 
         # A hold expressed as self-use only holds if the reserve can be raised to
         # the current charge. Where the inverter exposes no minimum-SoC control --
@@ -270,6 +257,47 @@ class SolaxModbusAdapter(InverterAdapter):
         writes.extend(self._export_limit_writes(command, skipped))
 
         return _dedupe(writes), skipped
+
+    def _unlock_writes(self) -> list[Write]:
+        """Unlock first: SolaX refuses setting writes while locked, and a locked
+        inverter is the single most common reason control appears to do nothing."""
+        lock_entity = self.entity(ROLE_LOCK)
+        if not lock_entity:
+            return []
+        current_lock = state_value(self.hass, lock_entity)
+        unlocked = pick_option(state_options(self.hass, lock_entity), self.OPT_UNLOCKED)
+        already_unlocked = (
+            current_lock is not None
+            and pick_option([current_lock], self.OPT_UNLOCKED) is not None
+        )
+        if unlocked and current_lock is not None and not already_unlocked:
+            return [_select_write(lock_entity, unlocked, ROLE_LOCK)]
+        return []
+
+    def plan_wake_writes(self) -> list[Write]:
+        """Step into Manual mode with charge and discharge stopped.
+
+        The G4 has been seen to sit in self-use with the house on the grid and
+        the pack idle above its floor after the floor was raised for a hold and
+        lowered again. Lowering the floor by hand did not free it; a mode change
+        does. Stop rather than a forced action, so the moment out of self-use
+        moves no energy.
+        """
+        use_mode_entity = self.entity(ROLE_USE_MODE)
+        manual_entity = self.entity(ROLE_MANUAL_MODE)
+        if not use_mode_entity or not manual_entity:
+            return []
+        manual_mode = pick_option(
+            state_options(self.hass, use_mode_entity), self.OPT_MANUAL
+        )
+        stop = pick_option(state_options(self.hass, manual_entity), self.OPT_STOP)
+        if manual_mode is None or stop is None:
+            return []
+        writes = self._unlock_writes()
+        writes.extend(
+            _mode_writes(self.hass, use_mode_entity, manual_mode, manual_entity, stop)
+        )
+        return writes
 
     def _self_use_writes(
         self, use_mode_entity: str, use_options: list[str], skipped: list[str]

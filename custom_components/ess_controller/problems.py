@@ -90,6 +90,10 @@ class Snapshot:
     unexplained_charge_kwh: float = 0.0
     unexplained_charge_cost: float = 0.0
     quiet_load_slots: int = 0
+    self_use_stall: str = ""
+    """Why the battery ought to be discharging in self-use and is not; empty
+    when it is behaving. Set only after the controller has already tried
+    cycling the mode, so a persisting note means that did not work."""
 
 
 def _plural(count: int, one: str, many: str) -> str:
@@ -140,6 +144,15 @@ def detect(state: Snapshot) -> list[Problem]:
         )
 
     # -- something else is driving the inverter --------------------------
+    if state.controlling and state.self_use_stall:
+        # The house is buying electricity the pack could be supplying, and the
+        # mode cycle that normally frees the inverter has not.
+        found.append(
+            Problem(
+                "battery_idle_in_self_use", "warning", {"detail": state.self_use_stall}
+            )
+        )
+
     if state.unexplained_charge_kwh > 0:
         found.append(
             Problem(

@@ -188,6 +188,7 @@ from .shifting import (
     parse_shiftable_loads,
     place_loads,
 )
+from .stall import STALL_CYCLES, StallReading, stalled
 from .tariff import agile_predict
 from .tariff.base import PriceSeries
 from .tariff.factory import build_provider
@@ -280,6 +281,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._cycle_started: datetime | None = None
         self._override_timer: CALLBACK_TYPE | None = None
         # Consecutive cycles the battery has sat idle in self-use above its
+        # floor, the current description of that, whether this episode has
+        # been woken yet, and when the last wake was.
+        self._stall_runs = 0
+        self._stall_note = ""
+        self._stall_may_wake = True
+        self._stall_woken: datetime | None = None
         self._writes_day: Any = None
         self._writes_by_role: dict[str, int] = {}
         self.accumulator = SlotAccumulator()
@@ -818,12 +825,70 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._remember_apply(now, self.last_apply)
             if self.last_apply.writes:
                 _LOGGER.info("%s: %s", command.action.value, self.last_apply.summary())
+            await self._async_wake_if_stalled(now, command, site)
 
         self._sync_problems()
 
         self._last_site = site
         self._note_slot_state(now, site)
         return self._build_data(now, site)
+
+    def _stall_reading(self, command: ControlCommand, site: SiteState) -> StallReading:
+        """The facts the stall rule looks at, from this cycle's readings."""
+        state = self.inverter_state
+        mode = state.mode or ""
+        self_use = (
+            command.action in (SlotAction.SELF_USE, SlotAction.CHARGE_SOLAR_ONLY)
+            and self.last_apply is not None
+            and self.last_apply.verified
+            and "manual" not in mode.lower()
+        )
+        return StallReading(
+            self_use=self_use,
+            soc=site.soc if site.soc_valid else None,
+            floor=state.min_soc if state.min_soc is not None else command.min_soc,
+            grid_kw=site.grid_power_kw if site.grid_valid else None,
+            battery_kw=self.battery.power_kw,
+            islanded=state.islanded,
+        )
+
+    async def _async_wake_if_stalled(
+        self, now: datetime, command: ControlCommand, site: SiteState
+    ) -> None:
+        """Cycle the working mode when self-use has stopped discharging.
+
+        A G4 whose floor was raised for a hold and lowered again has twice sat
+        in self-use with the house importing and the pack idle above the floor,
+        every register reading what the plan wanted. An ordinary apply had
+        nothing to write. Leaving self-use for a moment and coming back is what
+        frees it, so that is done here, after the symptom has held for
+        ``STALL_CYCLES`` cycles and only while writing is allowed. Once per
+        episode: if the battery is still idle afterwards the mode cycle is not
+        the answer, and the Repairs entry says so rather than the mode flapping
+        every few minutes.
+        """
+        why = stalled(self._stall_reading(command, site))
+        if why is None:
+            self._stall_runs = 0
+            self._stall_note = ""
+            self._stall_may_wake = True
+            return
+        self._stall_runs += 1
+        self._stall_note = why
+        if (
+            self._stall_runs < STALL_CYCLES
+            or not self.settings.controlling
+            or not self._stall_may_wake
+        ):
+            return
+        self._stall_may_wake = False
+        self._stall_woken = now
+        _LOGGER.warning("Cycling the inverter's working mode: %s", why)
+        results = await self._adapter.async_wake(command, verify=True)
+        for result in results:
+            self._remember_apply(now, result, note=f"wake: {why}")
+        if results:
+            self.last_apply = results[-1]
 
     def _hand_back_command(self, reason: str) -> ControlCommand:
         """The instruction that returns the inverter to running itself.
@@ -1150,6 +1215,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             unexplained_charge_kwh=sum(row["unexplained_kwh"] for row in unexplained),
             unexplained_charge_cost=sum(row["cost_estimate"] for row in unexplained),
             quiet_load_slots=sum(1 for r in recent if not r.load_measured),
+            self_use_stall=self._stall_note,
         )
 
     @callback
@@ -1217,10 +1283,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         self._raised_problems = wanted
 
-    def _remember_apply(self, now: datetime, result: ApplyResult) -> None:
+    def _remember_apply(self, now: datetime, result: ApplyResult, note: str = "") -> None:
         """Keep an apply in the rolling history, timestamped."""
         entry = result.as_dict()
         entry["at"] = now.isoformat()
+        if note:
+            entry["note"] = note
         self._apply_history.append(entry)
         # Register writes land in the inverter's EEPROM, whose documented life
         # is ~100k cycles -- under thirty a day over ten years. Counted per day
@@ -3204,6 +3272,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.recommendation.as_dict() if self.recommendation else None
             ),
             "apply_history": list(self._apply_history),
+            "self_use_stall": {
+                "note": self._stall_note,
+                "cycles": self._stall_runs,
+                "last_wake": (
+                    self._stall_woken.isoformat() if self._stall_woken else None
+                ),
+            },
             "live_power": self._live_power(),
             "register_writes_today": {
                 **self._writes_by_role,

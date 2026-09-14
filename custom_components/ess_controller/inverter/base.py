@@ -501,7 +501,46 @@ class InverterAdapter(ABC):
             _LOGGER.debug("Dry run: %s", result.summary())
             return result
 
-        for write in writes:
+        await self._async_execute(result, verify)
+        if result.ok:
+            self._last_applied = command
+        else:
+            # Do not remember a failed command, so the next cycle retries it.
+            self._last_applied = None
+        return result
+
+    def plan_wake_writes(self) -> list[Write]:
+        """Writes that take the inverter out of self-use for a moment.
+
+        Empty where the inverter has no other mode to step into, in which case
+        ``async_wake`` does nothing.
+        """
+        return []
+
+    async def async_wake(
+        self, command: ControlCommand, verify: bool = True
+    ) -> list[ApplyResult]:
+        """Cycle the working mode, then re-apply ``command``.
+
+        For an inverter that has stopped discharging in self-use although the
+        charge sits above its floor. Every register already reads what the plan
+        wants, so an ordinary apply has nothing to write; the mode has to leave
+        self-use and come back before the inverter looks at its floor again.
+        Returns the two results, or nothing where the adapter cannot do it.
+        """
+        writes = self.plan_wake_writes()
+        if not writes:
+            return []
+        kick = ApplyResult(action=SlotAction.IDLE, dry_run=False, writes=writes)
+        kick.changed = True
+        await self._async_execute(kick, verify)
+        self._last_applied = None
+        back = await self.async_apply(command, dry_run=False, verify=verify)
+        return [kick, back]
+
+    async def _async_execute(self, result: ApplyResult, verify: bool) -> None:
+        """Send ``result.writes`` and fill in its errors and unverified lists."""
+        for write in result.writes:
             data: dict[str, Any] = {"entity_id": write.entity_id}
             if write.field:
                 data[write.field] = write.value
@@ -517,14 +556,7 @@ class InverterAdapter(ABC):
                 self._note_rejection(write, err)
 
         if verify and not result.errors:
-            result.unverified = await self._async_verify(writes)
-
-        if result.ok:
-            self._last_applied = command
-        else:
-            # Do not remember a failed command, so the next cycle retries it.
-            self._last_applied = None
-        return result
+            result.unverified = await self._async_verify(result.writes)
 
     async def _async_verify(self, writes: list[Write]) -> list[str]:
         """Read back each write and report any that did not stick.

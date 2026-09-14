@@ -1718,3 +1718,109 @@ class TestTheCandidateListReachesPastTheNoisyNames:
 
         listed = unmatched_candidates(hass, {}, prefix="solax")
         assert any("selfuse_night_charge_spare" in entry for entry in listed)
+
+
+class TestAStalledInverterIsWoken:
+    """A G4 in self-use with the house importing and the pack idle above its floor.
+
+    Seen twice on a real install after a hold raised the floor and lowered it
+    again. Every register read what the plan wanted, so an ordinary apply had
+    nothing to write, and lowering the floor by hand did not free it either. A
+    step out of self-use and back does.
+    """
+
+    @staticmethod
+    def _hass():
+        hass = build_solax_hass()
+        hass.states.set(
+            "select.solax_lock_state", "Unlocked", options=["Locked", "Unlocked"]
+        )
+        return hass
+
+    def test_the_wake_steps_into_manual_with_the_battery_stopped(self):
+        adapter = solax_adapter(self._hass())
+        writes = adapter.plan_wake_writes()
+        assert [(w.entity_id, w.value) for w in writes] == [
+            ("select.solax_charger_use_mode", "Manual Mode")
+        ]
+
+    def test_an_armed_manual_selector_is_stopped_before_the_mode_changes(self):
+        """Entering Manual mode with Force Discharge still selected would dump
+        the battery for the moment before the second write lands."""
+        hass = self._hass()
+        hass.states.set(
+            "select.solax_manual_mode_select", "Force Discharge", options=SOLAX_MANUAL
+        )
+        writes = solax_adapter(hass).plan_wake_writes()
+        assert [w.value for w in writes] == ["Stop Charge and Discharge", "Manual Mode"]
+
+    def test_a_locked_inverter_is_unlocked_first(self):
+        hass = build_solax_hass()  # Locked
+        writes = solax_adapter(hass).plan_wake_writes()
+        assert [w.role for w in writes] == [ROLE_LOCK, ROLE_USE_MODE]
+
+    def test_the_cycle_ends_back_in_self_use(self):
+        hass = self._hass()
+        adapter = solax_adapter(hass)
+        results = asyncio.run(
+            adapter.async_wake(command(SlotAction.SELF_USE), verify=False)
+        )
+        modes = [
+            c[2]["option"]
+            for c in hass.services.calls
+            if c[2]["entity_id"] == "select.solax_charger_use_mode"
+        ]
+        assert modes == ["Manual Mode", "Self Use"]
+        assert len(results) == 2
+        assert all(r.ok for r in results)
+        assert hass.states.get("select.solax_charger_use_mode").state == "Self Use"
+
+    def test_the_kick_is_recorded_as_an_idle(self):
+        hass = self._hass()
+        results = asyncio.run(
+            solax_adapter(hass).async_wake(command(SlotAction.SELF_USE), verify=False)
+        )
+        assert results[0].action is SlotAction.IDLE
+        assert results[0].changed is True
+        assert results[1].action is SlotAction.SELF_USE
+
+    def test_the_return_journey_is_a_full_apply(self):
+        """Coming back is the ordinary self-use apply, so the floor and the rate
+        ceilings are re-asserted at the same time."""
+        hass = self._hass()
+        hass.states.set("number.solax_battery_minimum_capacity", 31.0)
+        asyncio.run(
+            solax_adapter(hass).async_wake(
+                command(SlotAction.SELF_USE, min_soc=15.0), verify=False
+            )
+        )
+        by_entity = {c[2]["entity_id"]: c[2] for c in hass.services.calls}
+        assert by_entity["number.solax_battery_minimum_capacity"]["value"] == 15.0
+
+    def test_without_a_manual_mode_there_is_nothing_to_step_into(self):
+        hass = self._hass()
+        entities = discover_entities(hass, SOLAX_ROLE_SPECS, prefix="solax")
+        entities.pop(ROLE_MANUAL_MODE)
+        adapter = SolaxModbusAdapter(hass, entities)
+        assert adapter.plan_wake_writes() == []
+        results = asyncio.run(adapter.async_wake(command(SlotAction.SELF_USE)))
+        assert results == []
+        assert hass.services.calls == []
+
+    def test_the_null_adapter_cannot_wake_anything(self):
+        adapter = NullAdapter(StubHass())
+        assert asyncio.run(adapter.async_wake(command(SlotAction.SELF_USE))) == []
+
+    def test_a_dropped_mode_write_is_reported_not_believed(self):
+        hass = self._hass()
+        hass.services.silently_drop.add("select.solax_charger_use_mode")
+        adapter = solax_adapter(hass)
+        import custom_components.ess_controller.inverter.base as base
+
+        original = base.VERIFY_DELAY_SECONDS
+        base.VERIFY_DELAY_SECONDS = 0.0
+        try:
+            results = asyncio.run(adapter.async_wake(command(SlotAction.SELF_USE)))
+        finally:
+            base.VERIFY_DELAY_SECONDS = original
+        assert results[0].unverified
