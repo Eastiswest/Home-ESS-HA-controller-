@@ -4718,6 +4718,66 @@ class TestANightHoldNeverTouchesTheFloor:
         assert command.hold_absorbs_solar is False
 
 
+class TestASelfUseLockGetsTheReserve:
+    """Locking the strategy to self-use wrote the 20% planning floor while a
+    planned self-use slot wrote the 15% reserve, so the lock quietly withdrew
+    the forecast-error cushion and the register changed on every toggle."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        coordinator.settings.min_soc = 20.0
+        coordinator.settings.reserve_soc = 15.0
+        await coordinator.async_refresh()
+        return coordinator
+
+    async def test_the_lock_writes_the_reserve(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.const import STRATEGY_SELF_USE
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.strategy = STRATEGY_SELF_USE
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command.action is SlotAction.SELF_USE
+        assert command.min_soc == pytest.approx(15.0)
+
+    async def test_an_outage_boost_still_wins_under_the_lock(self, hass):
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.const import STRATEGY_SELF_USE
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.strategy = STRATEGY_SELF_USE
+        coordinator.settings.outage_protection = True
+        coordinator.outage.level = "high"
+        coordinator.outage.reserve_soc = 80.0
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command.min_soc == pytest.approx(80.0)
+
+    async def test_an_idle_lock_keeps_the_planning_floor(self, hass):
+        """A hold works by raising the floor; the reserve would undo it."""
+        import homeassistant.util.dt as ha_dt
+
+        from custom_components.ess_controller.const import STRATEGY_IDLE
+
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.strategy = STRATEGY_IDLE
+        command = coordinator._resolve_command(ha_dt.utcnow())
+        assert command.min_soc == pytest.approx(20.0)
+
+
 class TestTheOptimiserDefaultsReachTheCoordinator:
     async def _coordinator(self, hass):
         from homeassistant.setup import async_setup_component

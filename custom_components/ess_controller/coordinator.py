@@ -2692,6 +2692,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 STRATEGY_IDLE: SlotAction.IDLE,
             }.get(strategy)
             if forced is not None:
+                if forced is SlotAction.SELF_USE:
+                    # The same floor a planned self-use slot gets, so locking
+                    # the strategy does not quietly withdraw the cushion.
+                    base["min_soc"] = self.discharge_floor
                 return ControlCommand(
                     action=forced,
                     power_kw=self._default_power(forced),
