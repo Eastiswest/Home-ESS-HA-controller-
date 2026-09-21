@@ -25,6 +25,7 @@ from ..const import (
     TERMINAL_MODE_FIXED,
     TERMINAL_MODE_HORIZON_MEAN,
     TERMINAL_MODE_HORIZON_MEDIAN,
+    TERMINAL_MODE_REPLACEMENT,
     TERMINAL_MODE_ZERO,
 )
 from ..models import (
@@ -92,7 +93,7 @@ class OptimiserSettings:
     """Knobs that shape the optimisation but are not physical limits."""
 
     soc_levels: int = 60
-    terminal_mode: str = TERMINAL_MODE_HORIZON_MEDIAN
+    terminal_mode: str = TERMINAL_MODE_REPLACEMENT
     terminal_rate: float = 0.0
     """Price in minor units per kWh used when ``terminal_mode`` is fixed."""
     terminal_weight: float = 1.0
@@ -690,8 +691,13 @@ def _terminal_terms(
 ) -> tuple[float, float]:
     """``(value per kWh, credit cap)`` for this horizon's terminal valuation."""
     rate = _terminal_rate(slots, settings) * settings.terminal_weight
-    # Only the energy that survives the inverter on the way out has value.
-    return rate * battery.discharge_efficiency, _terminal_energy_cap(slots)
+    # Only the energy that survives the inverter on the way out has value, and
+    # it pays its wear on the way out too: the sweep books the allowance on
+    # every discharge, so a kWh credited without it was worth more left in the
+    # pack than spent, and at a 10p allowance a 4p spread bought 7 kWh to sit
+    # there. Clamped at zero: a pack is never a liability.
+    value = rate * battery.discharge_efficiency - battery.cycle_cost_per_kwh
+    return max(value, 0.0), _terminal_energy_cap(slots)
 
 
 def terminal_value(
@@ -1213,4 +1219,6 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
 
     saving = plan.saving_vs_self_use
     summary = "; ".join(parts)
+    if abs(saving) < 0.5:
+        saving = 0.0  # never "-0p"
     return f"{summary}. Saves {saving:.0f}p vs self-use over the horizon."

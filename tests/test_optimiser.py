@@ -520,8 +520,11 @@ class TestTerminalValuationDoesNotHoard:
         assert median == pytest.approx(20.0)
         assert median < mean
 
-    def test_median_is_the_default_rate(self):
-        assert OptimiserSettings().terminal_mode == "horizon_median"
+    def test_replacement_cost_is_the_default_rate(self):
+        """The module's own account of the mean and the median is that both
+        bought energy to sit in the pack; the default has to be the one that
+        does not."""
+        assert OptimiserSettings().terminal_mode == "replacement_cost"
 
     def test_a_flat_horizon_values_energy_at_that_price(self):
         from custom_components.ess_controller.optimiser.dp import _terminal_rate
@@ -1389,7 +1392,13 @@ class TestARealSummerHorizon:
         original = dp._terminal_energy_cap
         try:
             dp._terminal_energy_cap = lambda _slots: 1e9
-            greedy = optimise(slots, soc, battery, grid, OptimiserSettings())
+            greedy = optimise(
+                slots,
+                soc,
+                battery,
+                grid,
+                OptimiserSettings(terminal_mode="horizon_median"),
+            )
         finally:
             dp._terminal_energy_cap = original
         assert greedy.total_cost > greedy.self_use_cost + 100.0
@@ -1998,3 +2007,43 @@ class TestRoomIsKeptForSunThatHasNotArrived:
             make_grid(allow_export=False),
         )
         assert max(s.soc_end for s in plan.slots) > 94.0
+
+
+class TestLeftoverEnergyPaysItsWear:
+    """The wear allowance is booked on the way out, so a kWh credited at the
+    horizon end without it looked worth more sitting in the pack than spent:
+    with a 10p allowance a 4p spread bought 7 kWh to hold."""
+
+    def test_a_marginal_spread_buys_nothing_under_any_valuation(self):
+        slots = build_slots([20.0] * 12 + [24.0] * 12, load=0.3)
+        for mode in ("replacement_cost", "horizon_median", "horizon_mean"):
+            plan = optimise(
+                slots,
+                15.0,
+                make_battery(cycle_cost_per_kwh=10.0),
+                make_grid(),
+                OptimiserSettings(terminal_mode=mode),
+            )
+            assert plan.window_energy(SlotAction.CHARGE) == pytest.approx(
+                0.0, abs=0.01
+            ), mode
+
+    def test_the_credit_is_net_of_wear(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_terms
+
+        slots = build_slots([24.0] * 12)
+        free, _ = _terminal_terms(slots, make_battery(), OptimiserSettings())
+        worn, _ = _terminal_terms(
+            slots, make_battery(cycle_cost_per_kwh=3.0), OptimiserSettings()
+        )
+        assert free - worn == pytest.approx(3.0)
+
+    def test_a_pack_is_never_a_liability(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_terms
+
+        value, _ = _terminal_terms(
+            build_slots([2.0] * 12),
+            make_battery(cycle_cost_per_kwh=10.0),
+            OptimiserSettings(),
+        )
+        assert value == 0.0

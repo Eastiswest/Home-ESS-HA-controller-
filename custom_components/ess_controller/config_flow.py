@@ -668,7 +668,7 @@ class EssFlowMixin:
                 _suggest(
                     current,
                     CONF_TERMINAL_VALUE_MODE,
-                    TERMINAL_MODE_HORIZON_MEDIAN,
+                    TERMINAL_MODE_REPLACEMENT,
                 ): _options(
                     [
                         TERMINAL_MODE_REPLACEMENT,

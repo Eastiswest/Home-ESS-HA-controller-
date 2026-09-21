@@ -127,7 +127,7 @@ from .const import (
     STRATEGY_IDLE,
     STRATEGY_OFF,
     STRATEGY_SELF_USE,
-    TERMINAL_MODE_HORIZON_MEDIAN,
+    TERMINAL_MODE_REPLACEMENT,
 )
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import daytime_correction, evening_uplift, is_evening
@@ -628,7 +628,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return OptimiserSettings(
             soc_levels=int(options.get(CONF_SOC_LEVELS, DEFAULT_SOC_LEVELS)),
             terminal_mode=options.get(
-                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_HORIZON_MEDIAN
+                CONF_TERMINAL_VALUE_MODE, TERMINAL_MODE_REPLACEMENT
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
             solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
