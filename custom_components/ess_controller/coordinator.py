@@ -2809,7 +2809,16 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Only give surplus PV to the grid during a hold if the grid pays for
             # it. On an import-only tariff it is worth nothing exported and
             # something stored, so the hold must let the array keep charging.
-            hold_absorbs_solar=not (grid.allow_export and slot.export_price > 0),
+            # But only where there is forecast surplus to keep: that hold is
+            # expressed by raising the inverter's floor to the current charge,
+            # and on a SolaX G4 that write is what has left the battery stuck
+            # idle in self-use afterwards. With nothing to absorb, Manual mode
+            # with the battery stopped holds just as well and never touches
+            # the floor.
+            hold_absorbs_solar=(
+                not (grid.allow_export and slot.export_price > 0)
+                and slot.pv_kwh > slot.load_kwh
+            ),
             reason=self.plan.reason,
             slot_end=slot.end,
             **base,

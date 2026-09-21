@@ -4652,6 +4652,72 @@ class TestAStalledBatteryIsWokenEndToEnd:
         assert "Manual Mode" not in self._mode_writes(calls)
 
 
+class TestANightHoldNeverTouchesTheFloor:
+    """The floor method exists so the array can keep charging during a hold.
+
+    At night there is no array, and on a SolaX G4 the floor-equals-SoC write
+    is what has left the battery idle in self-use afterwards, three evenings
+    running. A hold with no forecast surplus is Manual mode with the battery
+    stopped, which never goes near the floor.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        await coordinator.async_refresh()
+        return coordinator
+
+    @staticmethod
+    def _hold(coordinator, pv_kwh: float, load_kwh: float):
+        from custom_components.ess_controller.models import SlotAction
+
+        slot = coordinator.plan.slots[0]
+        slot.action = SlotAction.IDLE
+        slot.pv_kwh = pv_kwh
+        slot.load_kwh = load_kwh
+        # Clear the write-side veto: charge worth far more than the slot.
+        slot.hold_value = slot.import_price + 20.0
+        coordinator._committed = None
+        return coordinator._resolve_command(slot.start + timedelta(minutes=1))
+
+    async def test_a_hold_with_no_surplus_is_strict(self, hass):
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        command = self._hold(coordinator, pv_kwh=0.0, load_kwh=0.3)
+        assert command.action is SlotAction.IDLE
+        assert command.hold_absorbs_solar is False
+
+    async def test_a_hold_under_a_surplus_still_absorbs_it(self, hass):
+        coordinator = await self._coordinator(hass)
+        command = self._hold(coordinator, pv_kwh=0.9, load_kwh=0.3)
+        assert command.hold_absorbs_solar is True
+
+    async def test_daylight_that_only_covers_the_house_is_strict_too(self, hass):
+        """PV below the load leaves nothing to store; Manual mode with the
+        battery stopped still lets the array feed the house."""
+        coordinator = await self._coordinator(hass)
+        command = self._hold(coordinator, pv_kwh=0.2, load_kwh=0.3)
+        assert command.hold_absorbs_solar is False
+
+    async def test_a_paying_export_price_keeps_the_strict_hold(self, hass):
+        coordinator = await self._coordinator(hass)
+        coordinator.settings.allow_export = True
+        coordinator.plan.slots[0].export_price = 15.0
+        command = self._hold(coordinator, pv_kwh=0.9, load_kwh=0.3)
+        assert command.hold_absorbs_solar is False
+
+
 class TestTheOptimiserDefaultsReachTheCoordinator:
     async def _coordinator(self, hass):
         from homeassistant.setup import async_setup_component
