@@ -407,13 +407,17 @@ class SolaxModbusAdapter(InverterAdapter):
         # matters while the inverter is running its own self-use logic.
         if action is SlotAction.CHARGE:
             return []
-        # Never during a hold. A hold expressed as self-use with a raised reserve
-        # leaves the inverter running its own logic, and its own logic with grid
-        # charging enabled will buy energy to fill the pack -- which is the
-        # opposite of holding, and expensive at the prices a hold happens at.
-        want_on = command.allow_grid_charge and action not in (
-            SlotAction.CHARGE_SOLAR_ONLY,
-            SlotAction.IDLE,
+        # This switch is the inverter's *own* grid-charging schedule, not a
+        # permission the plan needs: every planned purchase goes through a
+        # forced charge. Left on during self-use it topped a real pack up at
+        # 29p to 32p through half-hours the plan had costed as self-use, and it
+        # flipped on and off with every self-use/solar-only label change. So it
+        # stays off wherever a forced charge is available. Only an inverter
+        # that cannot force-charge is given it as the plan's one way to buy.
+        want_on = (
+            command.allow_grid_charge
+            and not self.capabilities.force_charge
+            and action not in (SlotAction.CHARGE_SOLAR_ONLY, SlotAction.IDLE)
         )
         domain = entity_id.split(".", 1)[0]
 

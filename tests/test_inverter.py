@@ -701,11 +701,66 @@ class TestGridChargeToggle:
 
     def test_no_write_when_switch_already_correct(self):
         hass = build_solax_hass()
-        hass.states.set("switch.solax_selfuse_night_charge_enable", "on")
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "off")
         adapter = solax_adapter(hass)
         apply(adapter, command(SlotAction.SELF_USE, allow_grid_charge=True))
         entities = [c[2]["entity_id"] for c in hass.services.calls]
         assert "switch.solax_selfuse_night_charge_enable" not in entities
+
+
+class TestTheInvertersOwnNightChargeStaysOff:
+    """The switch is the inverter's *own* grid-charging schedule, not a
+    permission the plan needs: every planned purchase is a forced charge.
+
+    Turned on for self-use because "allow grid charge" was on, a real pack was
+    topped up at 29p to 32p through half-hours the plan had costed as self-use,
+    and the switch flipped on and off with every self-use/solar-only label
+    change: one register write each for no physical difference.
+    """
+
+    def test_self_use_turns_it_off(self):
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "on")
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.SELF_USE, allow_grid_charge=True))
+        calls = [
+            c[1]
+            for c in hass.services.calls
+            if c[2]["entity_id"] == "switch.solax_selfuse_night_charge_enable"
+        ]
+        assert calls == ["turn_off"]
+
+    def test_solar_only_and_self_use_agree_so_nothing_flips(self):
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "off")
+        adapter = solax_adapter(hass)
+        for action in (
+            SlotAction.SELF_USE,
+            SlotAction.CHARGE_SOLAR_ONLY,
+            SlotAction.SELF_USE,
+        ):
+            apply(adapter, command(action, allow_grid_charge=True))
+        entities = [c[2]["entity_id"] for c in hass.services.calls]
+        assert "switch.solax_selfuse_night_charge_enable" not in entities
+
+    def test_an_inverter_that_cannot_force_charge_is_still_given_it(self):
+        """Without a forced charge the inverter's own schedule is the plan's
+        one way to buy, so there the permission still means the switch."""
+        hass = build_solax_hass()
+        hass.states.set("switch.solax_selfuse_night_charge_enable", "off")
+        hass.states.set(
+            "select.solax_manual_mode_select",
+            "Stop Charge and Discharge",
+            options=["Stop Charge and Discharge", "Force Discharge"],
+        )
+        adapter = solax_adapter(hass)
+        apply(adapter, command(SlotAction.SELF_USE, allow_grid_charge=True))
+        calls = [
+            c[1]
+            for c in hass.services.calls
+            if c[2]["entity_id"] == "switch.solax_selfuse_night_charge_enable"
+        ]
+        assert calls == ["turn_on"]
 
 
 class TestIdempotence:
