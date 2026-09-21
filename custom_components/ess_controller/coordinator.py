@@ -202,6 +202,11 @@ _LOGGER = logging.getLogger(__name__)
 
 _SLOT = timedelta(minutes=SLOT_MINUTES)
 
+# How long after setup unfilled inverter roles are still looked for. The
+# inverter integration adds its entities over the seconds after a restart;
+# anything arriving later than this is a reload's job.
+REDISCOVER_WINDOW = timedelta(minutes=30)
+
 # How many applies to keep for the diagnostics download. Twenty half-hourly-ish
 # cycles is a couple of hours of behaviour: long enough to show a setting that
 # was written once and never cleared, short enough not to bloat the file.
@@ -316,6 +321,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.battery: BatteryReading = BatteryReading()
 
         self._adapter: InverterAdapter = NullAdapter(hass)
+        self._setup_at: datetime | None = None
         self._battery_source: BatterySource | None = None
         self._import_provider = None
         self._export_provider = None
@@ -369,6 +375,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.performance_store.async_load(
             int(self.options.get(CONF_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS))
         )
+        self._setup_at = dt_util.utcnow()
         self._build_adapters()
         self._build_tariffs()
 
@@ -489,7 +496,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def _rediscover_if_blind(self) -> None:
-        """Re-scan for inverter entities while we cannot see the inverter at all.
+        """Re-scan for inverter entities that were not there at setup.
 
         Discovery ran once, at setup. That is wrong for the commonest install
         order: people add this integration first and get the inverter talking
@@ -498,14 +505,27 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         is now full of the inverter's sensors. Reloading fixed it, which is a thing
         nobody should have to know.
 
-        Cheap because it is conditional: once either the state-of-charge or the
-        use-mode entity is mapped we never scan again, so a working install pays
-        nothing. Overrides the user set by hand always win, as before.
+        A partial scan is the same fault in a quieter form. After a restart the
+        inverter integration adds its entities over some seconds, and a real
+        install came up with the state of charge and the working mode bound but
+        not the night-charge switch: the one control that keeps the inverter
+        from charging itself was silently unmanaged until the next reload. So
+        while any role is unfilled the scan is repeated for a while after
+        setup, and only ever adds. Cheap: a scan is a pass over the state
+        machine, and it stops as soon as every role is filled or the window
+        closes. Overrides the user set by hand always win, as before.
         """
         if self._adapter is None:
             return
         entities = self._adapter.entities
-        if entities.get(ROLE_SOC) or entities.get(ROLE_USE_MODE):
+        blind = not (entities.get(ROLE_SOC) or entities.get(ROLE_USE_MODE))
+        unfilled = [spec.role for spec in SOLAX_ROLE_SPECS if not entities.get(spec.role)]
+        if not blind and not unfilled:
+            return
+        if not blind and (
+            self._setup_at is None
+            or dt_util.utcnow() - self._setup_at > REDISCOVER_WINDOW
+        ):
             return
 
         options = self.options
@@ -515,13 +535,13 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not discovered:
             return
         merged = merge_overrides(discovered, options.get(CONF_ENTITY_MAP) or {})
-        if merged == entities:
+        gained = sorted(role for role in unfilled if merged.get(role))
+        if not gained:
             return
         _LOGGER.info(
-            "Found %d inverter entities that did not exist at setup; rebuilding "
-            "the adapter (roles: %s)",
-            len(discovered),
-            ", ".join(sorted(discovered)),
+            "Found inverter entities that did not exist at setup; rebuilding the "
+            "adapter (new roles: %s)",
+            ", ".join(gained),
         )
         self._build_adapters()
 

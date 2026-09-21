@@ -1502,12 +1502,19 @@ class TestInverterRediscovery:
         assert coordinator.inverter_state.soc == 61.0
 
     async def test_it_stops_scanning_once_connected(self, hass):
-        """A working install must not pay for the scan on every cycle."""
+        """A working install must not pay for the scan on every cycle.
+
+        Unfilled roles keep the scan going for a while after setup, because the
+        inverter integration adds its entities over some seconds; once that
+        window has closed a connected install scans no more."""
+        from custom_components.ess_controller.coordinator import REDISCOVER_WINDOW
+
         coordinator = await self._coordinator(hass)
         hass.states.async_set("sensor.solax_battery_capacity", "61", {})
         await hass.async_block_till_done()
         await coordinator.async_refresh()
         assert coordinator.inverter_state.available is True
+        coordinator._setup_at = coordinator._setup_at - REDISCOVER_WINDOW * 2
 
         calls = []
         import custom_components.ess_controller.coordinator as coordinator_mod
@@ -4836,3 +4843,89 @@ class TestTheOptimiserDefaultsReachTheCoordinator:
         coordinator._committed = None
         command = coordinator._resolve_command(slot.start + timedelta(minutes=1))
         assert command.action is SlotAction.SELF_USE
+
+
+class TestRolesThatArriveAfterSetupAreStillBound:
+    """A partial scan at setup is the blind scan in a quieter form.
+
+    After a restart a real install came up with the state of charge and the
+    working mode bound but not the night-charge switch, which the inverter
+    integration added a few seconds later. The one control that keeps the
+    inverter from charging itself was silently unmanaged until the next reload.
+    """
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        hass.states.async_set("sensor.solax_battery_capacity", "61", {})
+        hass.states.async_set(
+            "select.solax_charger_use_mode",
+            "Self Use Mode",
+            {"options": ["Self Use Mode", "Manual Mode"]},
+        )
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_refresh()
+        return coordinator
+
+    async def test_a_control_that_appears_later_is_bound(self, hass):
+        from custom_components.ess_controller.inverter.roles import ROLE_GRID_CHARGE
+
+        coordinator = await self._coordinator(hass)
+        assert ROLE_GRID_CHARGE not in coordinator.adapter.entities
+        hass.states.async_set("switch.solax_selfuse_night_charge", "on", {})
+        coordinator._rediscover_if_blind()
+        assert coordinator.adapter.entities[ROLE_GRID_CHARGE] == (
+            "switch.solax_selfuse_night_charge"
+        )
+
+    async def test_bindings_in_hand_are_kept(self, hass):
+        from custom_components.ess_controller.inverter.roles import ROLE_SOC
+
+        coordinator = await self._coordinator(hass)
+        before = coordinator.adapter.entities[ROLE_SOC]
+        hass.states.async_set("switch.solax_selfuse_night_charge", "on", {})
+        coordinator._rediscover_if_blind()
+        assert coordinator.adapter.entities[ROLE_SOC] == before
+
+    async def test_nothing_new_means_no_rebuild(self, hass):
+        coordinator = await self._coordinator(hass)
+        adapter = coordinator.adapter
+        coordinator._rediscover_if_blind()
+        assert coordinator.adapter is adapter
+
+    async def test_the_window_closes(self, hass):
+        """Entities arriving half an hour after setup are a reload's job, so a
+        working install does not scan the state machine for ever."""
+        from custom_components.ess_controller.coordinator import REDISCOVER_WINDOW
+        from custom_components.ess_controller.inverter.roles import ROLE_GRID_CHARGE
+
+        coordinator = await self._coordinator(hass)
+        coordinator._setup_at = coordinator._setup_at - REDISCOVER_WINDOW * 2
+        hass.states.async_set("switch.solax_selfuse_night_charge", "on", {})
+        coordinator._rediscover_if_blind()
+        assert ROLE_GRID_CHARGE not in coordinator.adapter.entities
+
+    async def test_a_blind_install_still_rescans_for_ever(self, hass):
+        """The original case: the inverter arrives long after setup."""
+        from homeassistant.setup import async_setup_component
+
+        from custom_components.ess_controller.coordinator import REDISCOVER_WINDOW
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._setup_at = coordinator._setup_at - REDISCOVER_WINDOW * 2
+        hass.states.async_set("sensor.solax_battery_capacity", "61", {})
+        hass.states.async_set(
+            "select.solax_charger_use_mode",
+            "Self Use Mode",
+            {"options": ["Self Use Mode", "Manual Mode"]},
+        )
+        coordinator._rediscover_if_blind()
+        assert coordinator.adapter.entities.get("soc") == "sensor.solax_battery_capacity"
