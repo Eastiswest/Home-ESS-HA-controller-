@@ -63,6 +63,7 @@ from .const import (
     CONF_GRID_EXPORT_LIMIT,
     CONF_GRID_IMPORT_LIMIT,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOLD_MIN_BENEFIT,
     CONF_HORIZON_HOURS,
     CONF_IMPORT_FIXED_RATE,
     CONF_IMPORT_PRICE_SCALE,
@@ -75,6 +76,7 @@ from .const import (
     CONF_LOG_RETENTION_DAYS,
     CONF_MAX_CHARGE_POWER,
     CONF_MAX_DISCHARGE_POWER,
+    CONF_MIN_GRID_CHARGE_KWH,
     CONF_OCTOPUS_ACCOUNT,
     CONF_OCTOPUS_API_KEY,
     CONF_OCTOPUS_EXPORT_PRODUCT,
@@ -125,12 +127,14 @@ from .const import (
     DEFAULT_EXPORT_FIXED_RATE,
     DEFAULT_GRID_EXPORT_LIMIT,
     DEFAULT_GRID_IMPORT_LIMIT,
+    DEFAULT_HOLD_MIN_BENEFIT,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_IMPORT_FIXED_RATE,
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_MAX_CHARGE_POWER,
     DEFAULT_MAX_DISCHARGE_POWER,
     DEFAULT_MAX_SOC,
+    DEFAULT_MIN_GRID_CHARGE_KWH,
     DEFAULT_MIN_SOC,
     DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
     DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
@@ -682,6 +686,12 @@ class EssFlowMixin:
                 _suggest(current, CONF_TERMINAL_VALUE_RATE, 0.0): _number(
                     0, 200, 0.5, "p/kWh"
                 ),
+                _suggest(
+                    current, CONF_HOLD_MIN_BENEFIT, DEFAULT_HOLD_MIN_BENEFIT
+                ): _number(0, 20, 0.1, "p"),
+                _suggest(
+                    current, CONF_MIN_GRID_CHARGE_KWH, DEFAULT_MIN_GRID_CHARGE_KWH
+                ): _number(0.1, 3, 0.1, "kWh"),
                 _suggest(
                     current, CONF_ALLOW_GRID_CHARGE, True
                 ): selector.BooleanSelector(),

@@ -210,6 +210,8 @@ CONF_HORIZON_HOURS: Final = "horizon_hours"
 CONF_SOC_LEVELS: Final = "soc_levels"
 CONF_TERMINAL_VALUE_MODE: Final = "terminal_value_mode"
 CONF_TERMINAL_VALUE_RATE: Final = "terminal_value_rate"
+CONF_HOLD_MIN_BENEFIT: Final = "hold_min_benefit"
+CONF_MIN_GRID_CHARGE_KWH: Final = "min_grid_charge_kwh"
 CONF_ALLOW_GRID_CHARGE: Final = "allow_grid_charge"
 CONF_ALLOW_BATTERY_EXPORT: Final = "allow_battery_export"
 CONF_ALLOW_EXPORT: Final = "allow_export"
@@ -299,6 +301,12 @@ DEFAULT_GRID_EXPORT_LIMIT: Final = 3.68
 DEFAULT_GRID_IMPORT_LIMIT: Final = 15.0
 DEFAULT_HORIZON_HOURS: Final = 36
 DEFAULT_SOC_LEVELS: Final = 60
+# A hold saving less than this over its slot, in minor units, is planned as
+# self-use: the register writes and the latch risk outweigh the pennies.
+DEFAULT_HOLD_MIN_BENEFIT: Final = 0.5
+# The smallest grid purchase a single slot is planned to make; anything smaller
+# is folded into a neighbouring charge rather than costing a mode change.
+DEFAULT_MIN_GRID_CHARGE_KWH: Final = 0.5
 DEFAULT_STANDING_CHARGE: Final = 0.0
 DEFAULT_CURRENCY: Final = "GBP"
 DEFAULT_IMPORT_FIXED_RATE: Final = 25.0

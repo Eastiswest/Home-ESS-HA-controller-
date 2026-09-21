@@ -1701,11 +1701,43 @@ class TestASliverFromTheGridIsNotWorthAModeChange:
         plan = self.plan(0.5)
         assert sum(s.charge_ac_kwh for s in plan.slots) > 0.0
 
-    def test_the_threshold_is_small_enough_not_to_matter_in_money(self):
-        """A few pence at the dearest price on an Agile day."""
+    @staticmethod
+    def _awkward_amount(min_grid_charge_kwh: float):
+        """Three cheap slots and a need that does not divide into them: two
+        full charges and a sliver, unless the sliver is not allowed."""
+        slots = build_slots([8.0] * 3 + [45.0] * 12, load=0.3)
+        return optimise(
+            slots,
+            40.0,
+            make_battery(),
+            make_grid(allow_export=False, allow_battery_export=False),
+            OptimiserSettings(min_grid_charge_kwh=min_grid_charge_kwh),
+        )
+
+    def test_the_threshold_moves_energy_rather_than_losing_it(self):
+        """A purchase below the minimum is planned into a neighbouring slot, so
+        the threshold costs a few tenths of a penny of price difference, never
+        the energy. A real plan wrapped four 0.16 kWh trickles around one
+        2.9 kWh charge, each a full Manual mode transition, to save 0.3p."""
         from custom_components.ess_controller.optimiser.dp import MIN_GRID_CHARGE_KWH
 
-        assert MIN_GRID_CHARGE_KWH * 0.60 < 0.15
+        assert pytest.approx(0.5) == MIN_GRID_CHARGE_KWH
+        plan = self._awkward_amount(MIN_GRID_CHARGE_KWH)
+        bought = [s.grid_import_kwh for s in plan.slots if s.action is SlotAction.CHARGE]
+        assert bought, plan.reason
+        assert all(b >= MIN_GRID_CHARGE_KWH - 1e-6 for b in bought), bought
+        assert sum(bought) > 3.0
+
+    def test_the_minimum_is_a_setting(self):
+        """The optimiser prices each move with the configured minimum."""
+        from custom_components.ess_controller.optimiser.dp import _price_delta
+
+        slot = build_slots([8.0], load=0.3)[0]
+        battery = make_battery()
+        grid = make_grid()
+        # 0.3 kWh at the cells needs about 0.32 kWh from the grid.
+        assert _price_delta(slot, 0.3, battery, grid, 0.0, 0.5) is None
+        assert _price_delta(slot, 0.3, battery, grid, 0.0, 0.05) is not None
 
     def test_a_real_grid_charge_still_happens(self):
         """The rule must not stop a genuine cheap-window purchase."""
@@ -2007,6 +2039,69 @@ class TestRoomIsKeptForSunThatHasNotArrived:
             make_grid(allow_export=False),
         )
         assert max(s.soc_end for s in plan.slots) > 94.0
+
+
+class TestAHoldMustBeWorthAPenny:
+    """Right to the penny, wrong to the register.
+
+    A real night plan held the house on the grid nine times at 28p to 30p
+    against a hold value of 31.9p: 0.13 kWh at 1.4p, a fifth of a penny a slot,
+    and each one four inverter writes and one more floor-equals-SoC transition,
+    which on that inverter is what latches the battery. Below a small saving
+    the slot is planned as self-use.
+    """
+
+    # An evening, a night priced just under what the stored charge is worth,
+    # the refill that sets that value, and the next evening it is kept for.
+    PRICES = [40.0] * 4 + [29.0] * 8 + [28.0] * 4 + [40.0] * 8
+
+    def _plan(self, soc: float, load: float, min_benefit: float):
+        return optimise(
+            build_slots(self.PRICES, load=load),
+            soc,
+            make_battery(cycle_cost_per_kwh=1.147),
+            make_grid(allow_export=False, allow_battery_export=False),
+            OptimiserSettings(hold_min_benefit=min_benefit),
+        )
+
+    def _night(self, plan):
+        return [s for s in plan.slots if s.import_price == 29.0]
+
+    def test_with_no_threshold_the_night_is_held(self):
+        """The scenario: a 28p refill values the charge at about 32p, so at 29p
+        the sweep protects it and buys the house."""
+        night = self._night(self._plan(20.0, 0.13, 0.0))
+        assert night
+        assert any(s.action is SlotAction.IDLE for s in night), night
+        assert all(s.hold_value > 29.0 for s in night if s.hold_value is not None)
+
+    def test_a_fifth_of_a_penny_is_not_worth_a_hold(self):
+        night = self._night(self._plan(20.0, 0.13, 0.5))
+        assert all(s.action is SlotAction.SELF_USE for s in night), night
+
+    def test_a_hold_that_pays_still_goes_out(self):
+        """The same margin over a bigger shortfall clears the bar."""
+        night = self._night(self._plan(60.0, 1.2, 0.5))
+        assert any(s.action is SlotAction.IDLE for s in night), night
+
+    def test_a_sunny_slot_is_free_protection(self):
+        """Under a surplus nothing is bought, so the threshold does not apply:
+        the hold guards a 95p evening against an oven, and costs nothing."""
+        from custom_components.ess_controller.optimiser.dp import hold_is_worthwhile
+
+        assert hold_is_worthwhile(5.0, 90.0, -0.4, 0.5) is True
+
+    def test_the_rule_itself(self):
+        from custom_components.ess_controller.optimiser.dp import hold_is_worthwhile
+
+        # 1.4p margin over 0.13 kWh is 0.18p: below half a penny.
+        assert hold_is_worthwhile(29.0, 30.4, 0.13, 0.5) is False
+        # ...and over 0.5 kWh it is 0.7p.
+        assert hold_is_worthwhile(29.0, 30.4, 0.5, 0.5) is True
+        # Never hold when the charge is worth less than the grid costs.
+        assert hold_is_worthwhile(29.0, 28.0, 5.0, 0.0) is False
+        # An unknown value keeps the sweep's own decision.
+        assert hold_is_worthwhile(29.0, None, 0.13, 0.5) is True
 
 
 class TestLeftoverEnergyPaysItsWear:

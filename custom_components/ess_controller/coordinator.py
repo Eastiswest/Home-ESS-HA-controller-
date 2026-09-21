@@ -65,11 +65,13 @@ from .const import (
     CONF_GRID_EXPORT_LIMIT,
     CONF_GRID_IMPORT_LIMIT,
     CONF_GRID_POWER_ENTITY,
+    CONF_HOLD_MIN_BENEFIT,
     CONF_HORIZON_HOURS,
     CONF_INVERTER_ADAPTER,
     CONF_INVERTER_PREFIX,
     CONF_LOAD_POWER_ENTITY,
     CONF_LOG_RETENTION_DAYS,
+    CONF_MIN_GRID_CHARGE_KWH,
     CONF_OCTOPUS_IMPORT_PRODUCT,
     CONF_OCTOPUS_REGION,
     CONF_ONLY_JOINED_SESSIONS,
@@ -103,9 +105,11 @@ from .const import (
     DEFAULT_DISCHARGE_EFFICIENCY,
     DEFAULT_GRID_EXPORT_LIMIT,
     DEFAULT_GRID_IMPORT_LIMIT,
+    DEFAULT_HOLD_MIN_BENEFIT,
     DEFAULT_HORIZON_HOURS,
     DEFAULT_LIVE_INTERVAL,
     DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_MIN_GRID_CHARGE_KWH,
     DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
     DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
@@ -175,7 +179,7 @@ from .models import (
     SlotAction,
     describe_horizon_reach,
 )
-from .optimiser.dp import OptimiserSettings, optimise, percentile
+from .optimiser.dp import OptimiserSettings, hold_is_worthwhile, optimise, percentile
 from .performance import PerformanceSummary, SelfUseShadow, SlotRecord, summarise
 from .performance_store import PerformanceStore
 from .runtime import RuntimeSettings, RuntimeStore
@@ -632,7 +636,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
             solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
+            hold_min_benefit=self.hold_min_benefit,
+            min_grid_charge_kwh=float(
+                options.get(CONF_MIN_GRID_CHARGE_KWH, DEFAULT_MIN_GRID_CHARGE_KWH)
+                or DEFAULT_MIN_GRID_CHARGE_KWH
+            ),
         )
+
+    @property
+    def hold_min_benefit(self) -> float:
+        """The least a hold must save over its slot before it is issued."""
+        value = self.options.get(CONF_HOLD_MIN_BENEFIT, DEFAULT_HOLD_MIN_BENEFIT)
+        return max(float(value if value is not None else DEFAULT_HOLD_MIN_BENEFIT), 0.0)
 
     def solar_forecast_error_kwh(self, days: float = 7.0) -> float:
         """Per-daylight-slot solar forecast error, calibrated at the day level.
@@ -2748,10 +2763,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # the damage was done here, at the write. So the test is applied here as
         # well as where the plan is built: whatever produced it, a hold that
         # cannot say the charge is worth more than this half-hour does not go out.
-        if (
-            action is SlotAction.IDLE
-            and slot.hold_value is not None
-            and slot.hold_value <= slot.import_price
+        if action is SlotAction.IDLE and not hold_is_worthwhile(
+            slot.import_price,
+            slot.hold_value,
+            slot.load_kwh - slot.pv_kwh,
+            self.hold_min_benefit,
         ):
             action = SlotAction.SELF_USE
 

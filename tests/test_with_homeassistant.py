@@ -4650,3 +4650,63 @@ class TestAStalledBatteryIsWokenEndToEnd:
             await coordinator.async_refresh()
         assert coordinator._stall_runs == 0
         assert "Manual Mode" not in self._mode_writes(calls)
+
+
+class TestTheOptimiserDefaultsReachTheCoordinator:
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_replacement_cost_is_the_default_terminal_mode(self, hass):
+        coordinator = await self._coordinator(hass)
+        assert coordinator.optimiser_settings().terminal_mode == "replacement_cost"
+
+    async def test_the_hold_threshold_and_minimum_charge_are_read(self, hass):
+        coordinator = await self._coordinator(hass)
+        settings = coordinator.optimiser_settings()
+        assert settings.hold_min_benefit == pytest.approx(0.5)
+        assert settings.min_grid_charge_kwh == pytest.approx(0.5)
+
+    async def test_the_options_form_carries_both(self, hass):
+        coordinator = await self._coordinator(hass)
+        entry = coordinator.entry
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                **entry.options,
+                "hold_min_benefit": 2.0,
+                "min_grid_charge_kwh": 1.0,
+            },
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        settings = coordinator.optimiser_settings()
+        assert settings.hold_min_benefit == pytest.approx(2.0)
+        assert settings.min_grid_charge_kwh == pytest.approx(1.0)
+        assert coordinator.hold_min_benefit == pytest.approx(2.0)
+
+    async def test_the_write_side_veto_uses_the_threshold(self, hass):
+        """A hold the plan published must clear the same bar at the write."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        from custom_components.ess_controller.inverter.battery import BatteryReading
+
+        coordinator._battery_source.read = lambda *_a, **_k: BatteryReading(
+            soc=55.0, soc_source="sensor.test", capacity_kwh=22.0
+        )
+        await coordinator.async_refresh()
+        slot = coordinator.plan.slots[0]
+        slot.action = SlotAction.IDLE
+        slot.pv_kwh = 0.0
+        slot.load_kwh = 0.1
+        # 1p over 0.1 kWh is a tenth of a penny: below the half-penny bar.
+        slot.hold_value = slot.import_price + 1.0
+        coordinator._committed = None
+        command = coordinator._resolve_command(slot.start + timedelta(minutes=1))
+        assert command.action is SlotAction.SELF_USE

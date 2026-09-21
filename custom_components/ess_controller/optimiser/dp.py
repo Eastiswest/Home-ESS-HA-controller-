@@ -46,10 +46,12 @@ INF = math.inf
 # level discretisation would produce nonsense. Treat it as a misconfiguration.
 MIN_USABLE_KWH = 0.05
 
-# The smallest purchase worth putting the inverter into Manual mode for. Below this,
-# a forced charge costs a mode change and a write cycle to acquire a couple of
-# pence-worth of electricity, and does it at whatever the price happens to be.
-MIN_GRID_CHARGE_KWH = 0.15
+# The smallest purchase worth putting the inverter into Manual mode for, unless
+# the settings say otherwise. Below this a forced charge costs a mode change and
+# six register writes to acquire a few pence of electricity. At 0.15 a real plan
+# wrapped four 0.16 kWh trickles around one 2.9 kWh charge to save 0.3p in
+# total; the energy is simply planned into the neighbouring slot instead.
+MIN_GRID_CHARGE_KWH = 0.5
 
 # The smallest solar surplus worth refining the whole level grid to be able to
 # store. Thirty watt-hours is barely a penny even at the top of the tariff, and
@@ -99,6 +101,18 @@ class OptimiserSettings:
     terminal_weight: float = 1.0
     """Scales the value placed on energy left at the end of the horizon."""
 
+    hold_min_benefit: float = 0.5
+    """The least a hold must save over its slot, in minor units, to be issued.
+
+    A hold is a decision to buy the house's load rather than spend charge worth
+    more later. Right to the penny, it is wrong to the register: every hold is
+    two writes in and two out, and on some inverters the floor write is what
+    latches the battery. Below this saving the slot is planned as self-use.
+    """
+
+    min_grid_charge_kwh: float = MIN_GRID_CHARGE_KWH
+    """The smallest grid purchase a slot may be planned to make on its own."""
+
     solar_headroom_error_kwh: float = 0.0
     """Measured solar forecast error per slot, in kWh.
 
@@ -133,6 +147,7 @@ def _price_delta(
     battery: BatterySpec,
     grid: GridSpec,
     slack_kwh: float = 0.0,
+    min_grid_charge_kwh: float = MIN_GRID_CHARGE_KWH,
 ) -> _Flow | None:
     """Price a single candidate battery energy change for one slot.
 
@@ -182,7 +197,7 @@ def _price_delta(
     # charge or a purchase big enough to justify the trouble; ``delta = 0`` is always
     # available, so nothing can deadlock.
     from_grid = charge_ac - surplus
-    if charge_ac > EPS and EPS < from_grid < MIN_GRID_CHARGE_KWH:
+    if charge_ac > EPS and EPS < from_grid < min_grid_charge_kwh:
         return None
 
     if (
@@ -536,6 +551,33 @@ def _hold_value(
     return (at_cells + battery.cycle_cost_per_kwh) / battery.discharge_efficiency
 
 
+def hold_is_worthwhile(
+    import_price: float,
+    hold_value: float | None,
+    deficit_kwh: float,
+    min_benefit: float,
+) -> bool:
+    """Whether protecting the charge through this slot is worth a hold.
+
+    Two tests, both applied at the plan and again at the write. The charge must
+    be worth more later than the grid costs now, or the battery is the cheaper
+    source and stays available. And where the house has a forecast shortfall,
+    the saving over the slot -- that shortfall at the margin -- must reach
+    ``min_benefit``, or the hold costs more in register writes and latch risk
+    than it earns. A slot the sun already covers buys nothing under a hold, so
+    the hold is free protection against a load nobody forecast and only the
+    margin decides it. An unknown hold value keeps the plan's own decision.
+    """
+    if hold_value is None:
+        return True
+    margin = hold_value - import_price
+    if margin <= 0.0:
+        return False
+    if deficit_kwh <= 0.0:
+        return True
+    return margin * deficit_kwh >= min_benefit
+
+
 def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> float:
     """Value per kWh assigned to energy still in the battery at horizon end.
 
@@ -815,7 +857,9 @@ def optimise(
         surplus = max(slot.pv_kwh - slot.load_kwh, 0.0)
         priced: list[tuple[int, float, bool]] = []
         for offset in range(-max_down, max_up + 1):
-            flow = _price_delta(slot, offset * step, battery, grid, slack)
+            flow = _price_delta(
+                slot, offset * step, battery, grid, slack, settings.min_grid_charge_kwh
+            )
             if flow is not None:
                 bought = flow.charge_ac_kwh - surplus > EPS
                 priced.append((offset, flow.cost, bought))
@@ -871,7 +915,9 @@ def optimise(
         if next_level < 0:
             next_level = level
         delta = (next_level - level) * step
-        flow = _price_delta(slot, delta, battery, grid, slack)
+        flow = _price_delta(
+            slot, delta, battery, grid, slack, settings.min_grid_charge_kwh
+        )
         if flow is None:  # pragma: no cover - defensive
             flow = _price_delta(slot, 0.0, battery, grid, slack)
             next_level = level
@@ -919,10 +965,11 @@ def optimise(
         # the sweep would have discharged if the grid could express it, the
         # shadow price says so, and that is the whole of the test.
         action = flow.action
-        if (
-            action is SlotAction.IDLE
-            and hold_value is not None
-            and hold_value <= slot.import_price
+        if action is SlotAction.IDLE and not hold_is_worthwhile(
+            slot.import_price,
+            hold_value,
+            slot.load_kwh - slot.pv_kwh,
+            settings.hold_min_benefit,
         ):
             action = SlotAction.SELF_USE
         plan.slots.append(
