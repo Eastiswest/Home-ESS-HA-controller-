@@ -2048,8 +2048,11 @@ class TestSelfUseCarriesTheEmergencyReserve:
         now = coordinator.plan.slots[0].start + timedelta(minutes=1)
         slot = coordinator.plan.slots[0]
         slot.action = SlotAction.IDLE
-        # Survive the last-line hold sanity check at the write.
+        # Survive the last-line hold sanity check at the write: worth 3p over a
+        # 0.3 kWh shortfall, whatever the clock says the harness's sun is doing.
         slot.hold_value = slot.import_price + 10.0
+        slot.pv_kwh = 0.0
+        slot.load_kwh = 0.3
         coordinator._committed = None
 
         command = coordinator._resolve_command(now)
@@ -2103,6 +2106,53 @@ class TestTheCurrentSlotDoesNotChurn:
     @staticmethod
     def _slot(coordinator, now):
         return coordinator.plan.slot_at(now)
+
+    async def test_a_hold_judged_once_is_not_rejudged_every_cycle(self, hass):
+        """The write-side hold check ran *after* the commitment, so a hold right
+        on the half-penny bar was re-judged every five minutes against a hold
+        value and load forecast that move a little each cycle. A real night
+        went Manual, Self Use, Manual, Self Use inside each held half-hour:
+        sixteen mode writes for holds meant to cost two each."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        slot = self._slot(coordinator, now)
+        slot.action = SlotAction.IDLE
+        slot.pv_kwh = 0.0
+        slot.load_kwh = 0.13
+        # Worth 0.65p: clears the bar, so the first cycle commits a hold.
+        slot.hold_value = slot.import_price + 5.0
+        coordinator._committed = None
+        assert coordinator._resolve_command(now).action is SlotAction.IDLE
+
+        # The next cycle's forecast puts the same hold at 0.39p. Too late: the
+        # half-hour has been decided.
+        slot.load_kwh = 0.078
+        assert coordinator._resolve_command(now + timedelta(minutes=5)).action is (
+            SlotAction.IDLE
+        )
+
+    async def test_a_hold_rejected_once_stays_rejected(self, hass):
+        """...and the other way round, or the same flapping happens in reverse."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        slot = self._slot(coordinator, now)
+        slot.action = SlotAction.IDLE
+        slot.pv_kwh = 0.0
+        slot.load_kwh = 0.078
+        slot.hold_value = slot.import_price + 5.0
+        coordinator._committed = None
+        assert coordinator._resolve_command(now).action is SlotAction.SELF_USE
+
+        slot.load_kwh = 0.13
+        assert coordinator._resolve_command(now + timedelta(minutes=5)).action is (
+            SlotAction.SELF_USE
+        )
 
     async def test_the_action_holds_for_the_rest_of_the_slot(self, hass):
 
@@ -4026,6 +4076,11 @@ class TestAnUnjustifiedHoldNeverReachesTheInverter:
         slot.action = SlotAction.IDLE
         slot.import_price = price
         slot.hold_value = hold_value
+        # A real shortfall, whatever the clock says the harness's sun is doing,
+        # so these tests judge the value of the charge and not the half-penny
+        # bar.
+        slot.pv_kwh = 0.0
+        slot.load_kwh = 0.3
         # The plan committed to the slot's action before the test rewrote it.
         coordinator._committed = None
         return coordinator, slot

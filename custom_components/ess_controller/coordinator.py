@@ -2773,8 +2773,6 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action=SlotAction.SELF_USE, reason="outside plan horizon", **base
             )
 
-        action = self._committed_action(slot)
-
         # Last line of defence before a hold reaches the hardware.
         #
         # A hold raises the inverter's reserve to the current charge, so for the
@@ -2787,13 +2785,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # the damage was done here, at the write. So the test is applied here as
         # well as where the plan is built: whatever produced it, a hold that
         # cannot say the charge is worth more than this half-hour does not go out.
-        if action is SlotAction.IDLE and not hold_is_worthwhile(
+        #
+        # Judged *before* the slot's action is committed, so the judgement is
+        # made once. Applied after, it was re-made every five minutes against a
+        # hold value and a load forecast that move a little each cycle, and a
+        # hold worth 0.6p sat right on the half-penny bar: a real night went
+        # Manual, Self Use, Manual, Self Use inside each held half-hour,
+        # sixteen mode writes for a hold that was meant to cost two.
+        wanted = slot.action
+        if wanted is SlotAction.IDLE and not hold_is_worthwhile(
             slot.import_price,
             slot.hold_value,
             slot.load_kwh - slot.pv_kwh,
             self.hold_min_benefit,
         ):
-            action = SlotAction.SELF_USE
+            wanted = SlotAction.SELF_USE
+
+        action = self._committed_action(slot, wanted)
 
         power = (
             slot.charge_power_kw if slot.charge_ac_kwh > 0 else slot.discharge_power_kw
@@ -2878,8 +2886,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid = self.grid_spec()
         return grid.export_limit_kw if grid.allow_export else 0.0
 
-    def _committed_action(self, slot: PlanSlot) -> SlotAction:
+    def _committed_action(self, slot: PlanSlot, wanted: SlotAction) -> SlotAction:
         """The action for this half-hour, held steady once it has been applied.
+
+        ``wanted`` is what this cycle would do for the slot, after every check
+        that can veto the plan's own label; what is committed is that, so the
+        checks are made once per half-hour rather than once per cycle.
 
         The plan is rebuilt from live readings every cycle, so the *current*
         slot's action could change several times inside one half-hour -- charge at
@@ -2910,16 +2922,16 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._committed is not None:
             start, action = self._committed
             if start == key:
-                if action is not slot.action:
+                if action is not wanted:
                     _LOGGER.debug(
                         "Holding %s for the slot from %s; the plan now prefers %s",
                         action.value,
                         key.isoformat(),
-                        slot.action.value,
+                        wanted.value,
                     )
                 return action
-        self._committed = (key, slot.action)
-        return slot.action
+        self._committed = (key, wanted)
+        return wanted
 
     def _committed_for(self, half_hour: datetime) -> SlotAction | None:
         """The action already committed to this half-hour, if there is one."""
