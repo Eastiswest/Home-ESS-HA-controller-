@@ -4984,3 +4984,61 @@ class TestRolesThatArriveAfterSetupAreStillBound:
         )
         coordinator._rediscover_if_blind()
         assert coordinator.adapter.entities.get("soc") == "sensor.solax_battery_capacity"
+
+
+class TestThePlanSensorCarriesRecentPrices:
+    """The price chart's lookback is read from the plan sensor, so the sensor
+    has to publish the half-hours just behind the plan."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_refresh()
+        return coordinator
+
+    @staticmethod
+    def _series(now):
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff.base import PriceSeries
+
+        start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=24)
+        return PriceSeries(
+            PriceSlot(
+                start=start + timedelta(minutes=30 * i),
+                end=start + timedelta(minutes=30 * (i + 1)),
+                price=10.0 + i,
+            )
+            for i in range(96)
+        )
+
+    async def test_the_lookback_is_whole_half_hours_before_the_plan(self, hass):
+        from datetime import datetime
+
+        coordinator = await self._coordinator(hass)
+        first = coordinator.plan.slots[0].start
+        coordinator._import_prices = self._series(first)
+        recent = coordinator.recent_prices(12.0)
+        assert recent
+        assert all(datetime.fromisoformat(r["end"]) <= first for r in recent)
+        earliest = min(datetime.fromisoformat(r["start"]) for r in recent)
+        assert first - earliest <= timedelta(hours=12, minutes=30)
+        assert 22 <= len(recent) <= 24
+
+    async def test_it_reaches_the_sensor(self, hass):
+        coordinator = await self._coordinator(hass)
+        coordinator._import_prices = self._series(coordinator.plan.slots[0].start)
+        coordinator.async_update_listeners()
+        state = hass.states.get("sensor.ai_ess_controller_planned_horizon_cost")
+        assert state is not None
+        recent = state.attributes.get("recent_prices")
+        assert isinstance(recent, list) and recent
+        assert {"start", "end", "import_price"} <= set(recent[0])
+
+    async def test_no_lookback_when_asked_for_none(self, hass):
+        coordinator = await self._coordinator(hass)
+        assert coordinator.recent_prices(0.0) == []

@@ -38,6 +38,10 @@ SLOT_BOUNDARY_SECONDS: Final = 5
 # decides how quickly "inverter link disconnected" appears and clears.
 DEFAULT_LIVE_INTERVAL: Final = timedelta(seconds=30)
 
+# How far behind now the dashboard's price and battery charts start, so the
+# two share one time axis when read side by side.
+CHART_LOOKBACK_HOURS: Final = 12
+
 STORAGE_VERSION: Final = 1
 STORAGE_KEY_LEARNING: Final = f"{DOMAIN}.learning"
 STORAGE_KEY_RUNTIME: Final = f"{DOMAIN}.runtime"

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .const import DOMAIN
+from .const import CHART_LOOKBACK_HOURS, DOMAIN
 
 DASHBOARD_URL_PATH = "ess-controller"
 DASHBOARD_TITLE = "ESS Controller"
@@ -652,7 +652,10 @@ def _doing_expr(slot: str = "slot") -> str:
 
 # How far forward the charts look. The horizon is at most 48 hours and usually
 # less; anything past the plan simply draws no points.
-CHART_SPAN_HOURS = 48
+# Both charts share one window: the lookback behind now, then the longest
+# horizon the optimiser can plan. Read side by side, their time axes line up.
+CHART_SPAN_HOURS = CHART_LOOKBACK_HOURS + 48
+CHART_SPAN = {"start": "minute", "offset": f"-{CHART_LOOKBACK_HOURS}h"}
 
 # One hue per chart, stepped by value rather than mixed with a second hue: price
 # is a magnitude, so it gets a sequential ramp, and a negative price gets the one
@@ -680,10 +683,10 @@ def _apex_price_chart(plan_entity: str) -> dict[str, Any]:
     return {
         "type": APEX_CARD,
         "graph_span": f"{CHART_SPAN_HOURS}h",
-        # Start the window at the current minute so the chart runs forwards.
         # Left alone, the card plots the graph_span *ending* now and the whole
-        # plan falls off the right-hand edge.
-        "span": {"start": "minute"},
+        # plan falls off the right-hand edge. Anchored at the current minute
+        # with the same lookback as the battery chart beneath it.
+        "span": dict(CHART_SPAN),
         "header": {"show": True, "title": label("import_price"), "show_states": False},
         "now": {"show": True, "label": "now"},
         "experimental": {"color_threshold": True},
@@ -704,8 +707,12 @@ def _apex_price_chart(plan_entity: str) -> dict[str, Any]:
                 "color_threshold": [
                     {"value": value, "color": colour} for value, colour in PRICE_COLOURS
                 ],
+                # The plan's slots start at now; the half-hours behind them
+                # come from the same sensor's recent_prices, so the window's
+                # lookback is not left blank.
                 "data_generator": (
-                    "return (entity.attributes.slots || []).map(s => "
+                    "return (entity.attributes.recent_prices || [])"
+                    ".concat(entity.attributes.slots || []).map(s => "
                     "[new Date(s.start).getTime(), s.import_price]);"
                 ),
             }
@@ -765,8 +772,9 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
         "type": APEX_CARD,
         "graph_span": f"{CHART_SPAN_HOURS}h",
         # Half a day of measured SoC behind the projection is enough context to
-        # see whether the plan is starting from where it thought it would.
-        "span": {"start": "minute", "offset": "-12h"},
+        # see whether the plan is starting from where it thought it would, and
+        # the price chart above shares the window exactly.
+        "span": dict(CHART_SPAN),
         "header": {"show": True, "title": "Battery", "show_states": False},
         "now": {"show": True, "label": "now"},
         "yaxis": [{"min": 0, "max": 100, "decimals": 0}],

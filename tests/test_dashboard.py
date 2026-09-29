@@ -1765,3 +1765,49 @@ class TestPlannedFiguresSayPlanned:
         ]
         assert LABELS["planned_charge_power"] in rows
         assert LABELS["target_soc"] in rows
+
+
+class TestTheTwoChartsShareOneTimeAxis:
+    """Read side by side, the price and battery charts must line up.
+
+    The price chart started at now and ran 48 hours; the battery chart started
+    twelve hours earlier and ran 48 hours. Same width, different windows, so
+    17:00 on one sat under 23:00 on the other.
+    """
+
+    @staticmethod
+    def apex_cards() -> list[dict]:
+        return [
+            c
+            for c in walk_cards(build_dashboard(resolved(), charts=True))
+            if c["type"] == APEX_CARD
+        ]
+
+    def test_both_charts_use_the_same_window(self):
+        cards = self.apex_cards()
+        assert len(cards) >= 2
+        assert len({c["graph_span"] for c in cards}) == 1
+        assert len({repr(c["span"]) for c in cards}) == 1
+
+    def test_the_window_looks_back_before_now(self):
+        from custom_components.ess_controller.const import CHART_LOOKBACK_HOURS
+
+        for card in self.apex_cards():
+            assert card["span"]["offset"] == f"-{CHART_LOOKBACK_HOURS}h"
+
+    def test_the_window_still_holds_the_whole_horizon(self):
+        """Looking back must not push the end of a 48-hour plan off the edge."""
+        from custom_components.ess_controller.const import CHART_LOOKBACK_HOURS
+
+        for card in self.apex_cards():
+            assert card["graph_span"] == f"{CHART_LOOKBACK_HOURS + 48}h"
+
+    def test_the_price_chart_draws_the_lookback_from_recent_prices(self):
+        """The plan's slots start at now, so without this the price chart's
+        first quarter would be blank."""
+        price = next(
+            c for c in self.apex_cards() if c["header"]["title"] == "Import price"
+        )
+        generator = price["series"][0]["data_generator"]
+        assert "recent_prices" in generator
+        assert "slots" in generator

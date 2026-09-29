@@ -2284,6 +2284,29 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"{max(actual - floor, 0.0):.0f} points of the pack are unavailable.{tail}"
         )
 
+    def recent_prices(self, hours: float) -> list[dict[str, Any]]:
+        """Import prices for the half-hours just behind the plan.
+
+        The plan's slots only ever start at now, so a chart drawn from them
+        alone has nothing to show for the past. The price series kept for
+        planning reaches back a day, and the chart's lookback is read off it
+        here: whole half-hours that ended before the plan's first slot began.
+        """
+        if hours <= 0.0:
+            return []
+        first = self.plan.slots[0].start if self.plan and self.plan.slots else None
+        cutoff = first or dt_util.utcnow()
+        since = slot_start_for(cutoff - timedelta(hours=hours))
+        return [
+            {
+                "start": s.start.isoformat(),
+                "end": s.end.isoformat(),
+                "import_price": round(s.price, 3),
+            }
+            for s in self._import_prices.between(since, cutoff)
+            if s.start >= since and s.end <= cutoff
+        ]
+
     @property
     def horizon_reach(self) -> str:
         """Whether the plan is looking as far ahead as its prices allow."""

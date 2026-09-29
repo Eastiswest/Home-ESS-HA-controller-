@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_CURRENCY, DEFAULT_CURRENCY, DOMAIN
+from .const import CHART_LOOKBACK_HOURS, CONF_CURRENCY, DEFAULT_CURRENCY, DOMAIN
 from .coordinator import EssCoordinator
 from .entity import EssEntity
 from .models import SlotAction
@@ -117,6 +117,10 @@ def _plan_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
     return {
         "reason": plan.reason,
         "slots": [s.as_dict() for s in plan.slots],
+        # The half-hours just behind the plan, so the price chart can start
+        # where the battery chart does instead of leaving its first quarter
+        # blank.
+        "recent_prices": coordinator.recent_prices(CHART_LOOKBACK_HOURS),
         "baseline_cost": round(plan.baseline_cost, 2),
         "self_use_cost": round(plan.self_use_cost, 2),
         "saving_vs_self_use": round(plan.saving_vs_self_use, 2),
