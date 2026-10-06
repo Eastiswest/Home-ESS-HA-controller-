@@ -3538,6 +3538,67 @@ class TestTheEveningHedgeAnswersToTheEvenings:
         # 0.2 kWh a slot over six slots is 1.2 kWh an evening, over-forecast.
         assert coordinator.evening_forecast_error_kwh() == pytest.approx(1.2, abs=0.01)
 
+    @staticmethod
+    def _record_evenings(coordinator, actual: float, forecast: float, days: int = 2):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        now = dt_util.utcnow()
+        for day in range(1, days + 1):
+            for half_hour in range(6):
+                start = dt_util.as_local(now).replace(
+                    hour=18, minute=0, second=0, microsecond=0
+                ) - timedelta(days=day)
+                start += timedelta(minutes=30 * half_hour)
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=dt_util.as_utc(start),
+                        load_kwh=actual,
+                        load_forecast_kwh=forecast,
+                        load_measured=True,
+                    )
+                )
+
+    async def test_evenings_that_came_in_heavy_raise_the_plan(self, hass):
+        """A mature model has no hedge of its own, so a house whose evenings
+        shift with the season was planned to the decimal of a forecast the
+        last two nights had beaten by 0.6 and 1.8 kWh."""
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.forecast.confidence import is_evening
+
+        coordinator = await self._coordinator(hass)
+        coordinator.learning_store.model.confidence = lambda: {
+            "load_maturity": 1.0,
+            "solar_maturity": 1.0,
+        }
+        await coordinator.async_refresh()
+        before = sum(
+            s.load_kwh
+            for s in coordinator.plan.slots
+            if is_evening(dt_util.as_local(s.start).hour)
+        )
+        # 0.3 kWh a slot heavier over six slots: 1.8 kWh an evening, two nights.
+        self._record_evenings(coordinator, actual=0.7, forecast=0.4)
+        assert coordinator.evening_forecast_error_kwh() == pytest.approx(-1.8, abs=0.01)
+        await coordinator.async_refresh()
+        after = sum(
+            s.load_kwh
+            for s in coordinator.plan.slots
+            if is_evening(dt_util.as_local(s.start).hour)
+        )
+        # Two evenings in a 48-hour horizon, each lifted by about 1.8 kWh.
+        assert after - before == pytest.approx(3.6, abs=0.3)
+        assert "heavier than forecast" in coordinator.confidence_note()
+
+    async def test_the_window_is_recent(self, hass):
+        """A week's average nets heavy nights against the light ones before
+        them; only the last few evenings can see a shift."""
+        from custom_components.ess_controller.coordinator import RECENT_EVENINGS_DAYS
+
+        assert RECENT_EVENINGS_DAYS <= 3.0
+
 
 class TestAPowerCutStopsTheSteering:
     """During a power cut the inverter carries the house on its EPS output.

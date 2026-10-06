@@ -1635,11 +1635,33 @@ class TestTheEveningHedgeRetiresOnEvidence:
         assert self._allowance(0.0, half) == pytest.approx(half)
         assert self._allowance(0.0, self._allowance(0.0) * 2) == 0.0
 
-    def test_an_under_forecasting_model_keeps_the_whole_hedge(self):
-        """A forecast running light is the case the hedge exists for, so a
-        negative error must not be read as a reason to pad it further either."""
-        full = self._allowance(0.3)
-        assert self._allowance(0.3, -2.0) == pytest.approx(full)
+    def test_an_under_forecasting_model_gets_the_miss_added(self):
+        """Evenings running heavier than forecast add their miss to the hedge.
+
+        A mature model has no hedge of its own, so when a house's evenings
+        shift with the season the plan was sized to the decimal of a forecast
+        the last two nights had beaten by 0.6 and 1.8 kWh, and arrived at the
+        floor halfway through the dear half-hours."""
+        assert self._allowance(1.0) == 0.0
+        assert self._allowance(1.0, -1.2) == pytest.approx(1.2)
+        assert self._allowance(0.3, -0.5) == pytest.approx(self._allowance(0.3) + 0.5)
+
+    def test_the_hedge_never_exceeds_the_untrained_allowance(self):
+        """One wild evening cannot provision more than a young model would."""
+        from custom_components.ess_controller.forecast.confidence import (
+            UNTRAINED_EVENING_KWH,
+        )
+
+        assert self._allowance(1.0, -9.0) == pytest.approx(UNTRAINED_EVENING_KWH)
+        assert self._allowance(0.0, -9.0) == pytest.approx(UNTRAINED_EVENING_KWH)
+
+    def test_the_note_says_what_it_is_hedging(self):
+        from custom_components.ess_controller.forecast.confidence import describe
+
+        assert "heavier than forecast" in describe(1.0, -1.2)
+        assert "1.2 kWh" in describe(1.0, -1.2)
+        assert describe(1.0, 0.0) == "forecasts trusted as they stand"
+        assert "still learning" in describe(0.2, 0.0)
 
     def test_the_uplift_follows_the_allowance_to_nothing(self):
         from custom_components.ess_controller.forecast.confidence import evening_uplift
@@ -1696,3 +1718,33 @@ class TestADaytimeOverCallIsCorrected:
         to be small would invent a house using nothing."""
         trim = self._trim(5.0)
         assert trim[0] == pytest.approx(0.2)  # half of 0.4, no more
+
+
+class TestTheHedgeIsPerEvening:
+    """The allowance is a nightly figure. Spread once over everything a 48-hour
+    horizon holds, it was halved for each of the two evenings in it."""
+
+    @staticmethod
+    def _two_evenings():
+        hours = list(range(16, 24)) + list(range(0, 16)) + list(range(16, 24))
+        return hours, [0.4] * len(hours)
+
+    def test_each_evening_gets_the_whole_allowance(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            evening_allowance_kwh,
+            evening_uplift,
+        )
+
+        hours, loads = self._two_evenings()
+        uplift = evening_uplift(hours, loads, 0.0)
+        first = sum(u for h, u in zip(hours[:8], uplift[:8], strict=True))
+        second = sum(uplift[-8:])
+        assert first == pytest.approx(evening_allowance_kwh(0.0))
+        assert second == pytest.approx(evening_allowance_kwh(0.0))
+
+    def test_nothing_lands_outside_the_evenings(self):
+        from custom_components.ess_controller.forecast.confidence import evening_uplift
+
+        hours, loads = self._two_evenings()
+        uplift = evening_uplift(hours, loads, 0.0)
+        assert all(u == 0.0 for h, u in zip(hours, uplift, strict=True) if h < 16)

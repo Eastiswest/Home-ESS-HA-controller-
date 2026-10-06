@@ -1474,10 +1474,19 @@ class TestARealSummerHorizon:
         from custom_components.ess_controller.forecast.confidence import evening_uplift
 
         slots, _, _, _ = self.load()
-        uplift = evening_uplift(
-            [s.start.hour for s in slots], [s.load_kwh for s in slots], 0.0
+        hours = [s.start.hour for s in slots]
+        uplift = evening_uplift(hours, [s.load_kwh for s in slots], 0.0)
+        # Per evening: the horizon holds two, and each is hedged in full.
+        evenings = sum(
+            1
+            for i, h in enumerate(hours)
+            if 16 <= h <= 23 and (i == 0 or not 16 <= hours[i - 1] <= 23)
         )
-        assert sum(uplift) == pytest.approx(3.0, abs=0.01)
+        assert evenings == 2
+        assert sum(uplift) == pytest.approx(3.0 * evenings, abs=0.01)
+        first = next(i for i, h in enumerate(hours) if 16 <= h <= 23)
+        end = next(i for i in range(first, len(hours)) if not 16 <= hours[i] <= 23)
+        assert sum(uplift[first:end]) == pytest.approx(3.0, abs=0.01)
 
     def test_it_is_far_cheaper_than_marking_up_the_whole_day(self):
         """Measured, because the first attempt was not."""

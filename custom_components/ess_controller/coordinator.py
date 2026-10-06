@@ -207,6 +207,11 @@ _SLOT = timedelta(minutes=SLOT_MINUTES)
 # anything arriving later than this is a reload's job.
 REDISCOVER_WINDOW = timedelta(minutes=30)
 
+# How many evenings back the evening forecast is judged against what happened.
+# Few enough to follow a seasonal shift within days, enough that one odd night
+# does not set the hedge on its own.
+RECENT_EVENINGS_DAYS = 3.0
+
 # How many applies to keep for the diagnostics download. Twenty half-hourly-ish
 # cycles is a couple of hours of behaviour: long enough to show a setting that
 # was written once and never cleared, short enough not to bloat the file.
@@ -745,14 +750,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0, 0
         return sum(errors) / len(errors), len(errors)
 
-    def evening_forecast_error_kwh(self, days: float = 7.0) -> float:
+    def evening_forecast_error_kwh(self, days: float = RECENT_EVENINGS_DAYS) -> float:
         """How wrong the evening load forecast has been, per evening, in kWh.
 
-        Positive means the forecast has been running *high*. Measured against
-        what the plan actually used, so the young-model allowance is included in
-        it -- which is the point: what wants answering is "did the evening turn
-        out heavier than we planned for", and the allowance is part of what we
-        planned for.
+        Positive means the forecast has been running *high*, negative that the
+        evenings came in heavier. Measured against what the plan actually used,
+        so the young-model allowance is included in it -- which is the point:
+        what wants answering is "did the evening turn out heavier than we
+        planned for", and the allowance is part of what we planned for.
+
+        Over the last few evenings only. A house's evenings shift with the
+        season faster than the learned buckets follow, and a week's average
+        nets a run of heavy nights against the light ones before them: on a
+        real install the seven-day bias read zero while the last two evenings
+        had missed by 0.6 and 1.8 kWh.
 
         Maturity says how much the model has seen, never whether it was right.
         A house whose evenings it had already learned went on being provisioned

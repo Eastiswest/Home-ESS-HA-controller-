@@ -56,12 +56,21 @@ def evening_allowance_kwh(confidence: float, measured_error_kwh: float = 0.0) ->
     slot high and the hedge was still adding 1.8 kWh a night on top -- insurance
     against a risk the evidence said had gone, paid for in grid purchases.
 
-    Floored at zero, and a negative error is ignored. A forecast running light is
-    the case the hedge exists for; it is not a reason to pad it further, because
-    the allowance is already sized for exactly that.
+    Symmetric, within the ceiling. A negative error means the evenings have
+    been running *heavier* than forecast, and that adds to the allowance. It
+    used to be ignored on the reasoning that the hedge was already sized for
+    it, which holds only while the hedge exists: on a mature model it is zero,
+    so a house whose evenings shifted in October was planned to the decimal
+    of a forecast that had missed by 0.6 and 1.8 kWh on the two nights before,
+    and the plan arrived at the floor halfway through the dear half-hours.
+    Being short costs several pence a kWh at the evening rate; being long
+    costs the wear on a kWh that displaces the next cheap purchase.
+
+    Floored at zero and capped at the untrained allowance, so a single wild
+    evening cannot provision more than the young-model hedge ever would.
     """
-    allowance = UNTRAINED_EVENING_KWH * doubt(confidence)
-    return max(allowance - max(measured_error_kwh, 0.0), 0.0)
+    allowance = UNTRAINED_EVENING_KWH * doubt(confidence) - measured_error_kwh
+    return min(max(allowance, 0.0), UNTRAINED_EVENING_KWH)
 
 
 def is_evening(hour: int) -> bool:
@@ -87,22 +96,36 @@ def evening_uplift(
     wanted is more charge arriving *at* the evening -- raising the floor would make
     the battery stop discharging sooner, which is the opposite.
 
-    Spread across the evening in proportion to the load already forecast there, so it
-    lands where the demand is rather than smearing evenly over hours nobody is
-    cooking in. If the forecast puts nothing in the evening at all, it is spread flat
-    rather than discarded.
+    Spread across each evening in proportion to the load already forecast there,
+    so it lands where the demand is rather than smearing evenly over hours nobody
+    is cooking in. If the forecast puts nothing in an evening at all, it is spread
+    flat rather than discarded.
+
+    Per evening, not per horizon. The allowance is a nightly figure, and spread
+    once over everything a 48-hour horizon holds it was halved for each of the
+    two evenings in it. Evenings are told apart by the hour falling back: the
+    slots are chronological, so a 16 after a 23 is tomorrow's.
     """
     allowance = evening_allowance_kwh(confidence, measured_error_kwh)
     if allowance <= 0.0:
         return [0.0] * len(loads)
-    evening = [i for i, hour in enumerate(hours) if is_evening(hour)]
-    if not evening:
+    evenings: list[list[int]] = []
+    last_hour: int | None = None
+    for i, hour in enumerate(hours):
+        if not is_evening(hour):
+            continue
+        if not evenings or (last_hour is not None and hour < last_hour):
+            evenings.append([])
+        evenings[-1].append(i)
+        last_hour = hour
+    if not evenings:
         return [0.0] * len(loads)
-    total = sum(loads[i] for i in evening)
     uplift = [0.0] * len(loads)
-    for i in evening:
-        share = (loads[i] / total) if total > 0 else (1.0 / len(evening))
-        uplift[i] = allowance * share
+    for evening in evenings:
+        total = sum(loads[i] for i in evening)
+        for i in evening:
+            share = (loads[i] / total) if total > 0 else (1.0 / len(evening))
+            uplift[i] = allowance * share
     return uplift
 
 
@@ -111,6 +134,11 @@ def describe(confidence: float, measured_error_kwh: float = 0.0) -> str:
     allowance = evening_allowance_kwh(confidence, measured_error_kwh)
     if allowance <= 0.01:
         return "forecasts trusted as they stand"
+    if measured_error_kwh < -0.01 and doubt(confidence) < 0.5:
+        return (
+            f"recent evenings ran {-measured_error_kwh:.1f} kWh heavier than "
+            f"forecast: planning for {allowance:.1f} kWh more evening load"
+        )
     return (
         f"still learning ({confidence * 100:.0f}% of the way): planning for "
         f"{allowance:.1f} kWh more evening load than forecast"
