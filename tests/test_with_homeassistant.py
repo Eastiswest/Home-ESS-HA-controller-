@@ -2022,6 +2022,22 @@ class TestSelfUseCarriesTheEmergencyReserve:
         coordinator.settings.reserve_soc = 15.0
         return coordinator
 
+    async def test_a_solar_only_slot_gets_the_deep_floor_too(self, hass):
+        """Same inverter mode as self-use. Giving it the planning floor flipped
+        the register every time the label changed on a morning when the array
+        hovered around the house load, and withdrew the cushion for the slot."""
+        from custom_components.ess_controller.models import SlotAction
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        coordinator.plan.slots[0].action = SlotAction.CHARGE_SOLAR_ONLY
+        coordinator._committed = None
+
+        command = coordinator._resolve_command(now)
+        assert command.action is SlotAction.CHARGE_SOLAR_ONLY
+        assert command.min_soc == pytest.approx(15.0)
+
     async def test_a_planned_self_use_slot_gets_the_deep_floor(self, hass):
         from custom_components.ess_controller.models import SlotAction
 

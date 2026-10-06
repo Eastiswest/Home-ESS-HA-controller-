@@ -2859,12 +2859,15 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             self._committed_power = (key, power)
 
-        if action is SlotAction.SELF_USE:
+        if action in (SlotAction.SELF_USE, SlotAction.CHARGE_SOLAR_ONLY):
             # Self-use gets the emergency reserve, not the planning floor, so a
             # forecast miss discharges into the cushion instead of buying the
-            # peak. Only self-use: an idle or hold *works* by raising this
-            # floor, and handing it the reserve would turn "house on grid" back
-            # into discharge.
+            # peak. A solar-only charge is the same inverter mode and gets the
+            # same floor; giving it the planning floor flipped the register
+            # every time the label changed and withdrew the cushion for the
+            # slot. Never a hold: an idle *works* by raising this floor, and
+            # handing it the reserve would turn "house on grid" back into
+            # discharge.
             base["min_soc"] = self.discharge_floor
 
         grid = self.grid_spec()
