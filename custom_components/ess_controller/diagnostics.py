@@ -69,6 +69,7 @@ async def async_get_config_entry_diagnostics(
     data["performance"] = {
         "summary_7d": coordinator.performance_summary(7.0),
         "summary_30d": coordinator.performance_summary(30.0),
+        "lifetime": coordinator.lifetime_summary(),
         "recent_slots": coordinator.performance_rows(2.0),
         "records_held": len(coordinator.performance_store.log),
     }

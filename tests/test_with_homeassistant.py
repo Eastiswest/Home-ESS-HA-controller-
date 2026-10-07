@@ -2644,6 +2644,156 @@ class TestTheWeeklySavingIsATotalNotARate:
         assert shadow.soc == pytest.approx(30.0)
 
 
+class TestTheSavingSinceRecordsBegan:
+    """Every money figure was a window over a log that prunes at sixty days, so
+    "how much has this saved me since it was installed?" had no answer. The
+    total is now banked as half-hours close and kept past the pruning."""
+
+    ENTITY = "sensor.ai_ess_controller_total_saving_vs_self_use"
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _slot(start, load_kwh: float = 0.3):
+        from custom_components.ess_controller.sampling import CompletedSlot
+
+        return CompletedSlot(
+            start=start,
+            end=start + timedelta(minutes=30),
+            pv_kwh=0.0,
+            load_kwh=load_kwh,
+            coverage=1.0,
+            grid_measured=True,
+        )
+
+    @staticmethod
+    def _now():
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    async def test_closed_half_hours_feed_the_total(self, hass):
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        for hours in (2, 1):
+            start = now - timedelta(hours=hours)
+            coordinator._slot_marks[start] = {"soc_start": 50.0, "soc_end": 50.0}
+            coordinator._record_completed([self._slot(start)])
+
+        tally = coordinator.performance_store.lifetime
+        assert tally.slots == 2
+        assert tally.since == now - timedelta(hours=2)
+        assert tally.load_kwh == pytest.approx(0.6)
+
+    async def test_the_same_half_hour_closing_twice_counts_once(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 50.0, "soc_end": 50.0}
+        coordinator._record_completed([self._slot(start, load_kwh=0.3)])
+        coordinator._slot_marks[start] = {"soc_start": 50.0, "soc_end": 50.0}
+        coordinator._record_completed([self._slot(start, load_kwh=0.5)])
+
+        assert len(coordinator.performance_store.log) == 1
+        tally = coordinator.performance_store.lifetime
+        assert tally.slots == 1
+        assert tally.load_kwh == pytest.approx(0.5)
+
+    async def test_an_existing_history_seeds_the_total_on_upgrade(self, hass):
+        """An install with two months of records must not start its lifetime
+        figure at zero on the day the figure arrives."""
+        from custom_components.ess_controller.performance import (
+            LifetimeTally,
+            SlotRecord,
+        )
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        store = coordinator.performance_store
+        for hours in range(12, 0, -1):
+            store.log.add(
+                SlotRecord(
+                    start=now - timedelta(hours=hours),
+                    import_price=20.0,
+                    load_kwh=0.3,
+                    grid_import_kwh=0.3,
+                    grid_measured=True,
+                    soc_start=40.0,
+                    soc_end=40.0,
+                )
+            )
+        # As a file written before the totals existed would be.
+        store.lifetime = LifetimeTally()
+        await store.async_save()
+
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        reloaded = hass.data[DOMAIN][entry.entry_id]
+        tally = reloaded.performance_store.lifetime
+        assert tally.slots == 12
+        assert tally.since == now - timedelta(hours=12)
+        # Seeded from the real battery's charge, not from the pack's floor.
+        assert tally.first_soc_start == 40.0
+
+    async def test_the_total_is_saved_alongside_the_log(self, hass):
+        from custom_components.ess_controller.performance_store import (
+            PerformanceStore,
+        )
+
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 50.0, "soc_end": 48.0}
+        coordinator._record_completed([self._slot(start)])
+        await coordinator.performance_store.async_save()
+
+        fresh = PerformanceStore(hass, coordinator.entry.entry_id)
+        await fresh.async_load()
+        assert len(fresh.log) == 1
+        assert fresh.lifetime.slots == 1
+        assert fresh.lifetime.last_soc_end == 48.0
+        assert (
+            fresh.lifetime.as_dict() == coordinator.performance_store.lifetime.as_dict()
+        )
+
+    async def test_clearing_the_log_keeps_the_total(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 50.0, "soc_end": 50.0}
+        coordinator._record_completed([self._slot(start)])
+
+        await coordinator.async_clear_performance()
+        assert len(coordinator.performance_store.log) == 0
+        assert coordinator.performance_store.lifetime.slots == 1
+
+        await coordinator.async_clear_performance(lifetime=True)
+        assert coordinator.performance_store.lifetime.is_empty
+
+    async def test_it_is_in_the_diagnostics(self, hass):
+        from custom_components.ess_controller.diagnostics import (
+            async_get_config_entry_diagnostics,
+        )
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        data = await async_get_config_entry_diagnostics(hass, entry)
+        assert set(data["performance"]["lifetime"]) == {
+            "window",
+            "energy_kwh",
+            "money",
+            "forecast_error_kwh_per_slot",
+            "control",
+            "notes",
+        }
+
+
 class TestHorizonIsReportedInHours:
     """ "horizon_slots: 48" was read as a 48-hour horizon. It is 48 half-hours.
 

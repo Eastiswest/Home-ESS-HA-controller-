@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, STORAGE_VERSION
-from .performance import PerformanceLog
+from .performance import LifetimeTally, PerformanceLog
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,13 +23,19 @@ SAVE_DELAY_SECONDS = 60
 
 
 class PerformanceStore:
-    """Persists the slot history for one config entry."""
+    """Persists the slot history and the lifetime totals for one config entry.
+
+    Both live in one file, saved together: the totals are built from the
+    records as they land, and two files could disagree about which half-hours
+    had been counted.
+    """
 
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}.performance"
         )
         self.log = PerformanceLog()
+        self.lifetime = LifetimeTally()
 
     async def async_load(self, retention_days: int | None = None) -> PerformanceLog:
         try:
@@ -40,16 +46,29 @@ class PerformanceStore:
             _LOGGER.exception("Failed to load performance history; starting fresh")
             data = None
         self.log = PerformanceLog.from_dict(data)
+        self.lifetime = LifetimeTally.from_dict(
+            data.get("lifetime") if isinstance(data, dict) else None
+        )
         if retention_days is not None:
             self.log.retention_days = retention_days
         return self.log
 
+    def _payload(self) -> dict[str, Any]:
+        return {**self.log.as_dict(), "lifetime": self.lifetime.as_dict()}
+
     def async_schedule_save(self) -> None:
-        self._store.async_delay_save(self.log.as_dict, SAVE_DELAY_SECONDS)
+        self._store.async_delay_save(self._payload, SAVE_DELAY_SECONDS)
 
     async def async_save(self) -> None:
-        await self._store.async_save(self.log.as_dict())
+        await self._store.async_save(self._payload())
 
-    async def async_clear(self) -> None:
+    async def async_clear(self, *, lifetime: bool = False) -> None:
+        """Empty the half-hourly log; the lifetime totals only when asked.
+
+        The log is the two-month working set and clearing it is routine
+        housekeeping. The totals are the one figure that cannot be rebuilt.
+        """
         self.log.clear()
-        await self._store.async_save(self.log.as_dict())
+        if lifetime:
+            self.lifetime = LifetimeTally()
+        await self._store.async_save(self._payload())

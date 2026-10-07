@@ -12,6 +12,7 @@ from custom_components.ess_controller.performance import (
     CSV_COLUMNS,
     DEFAULT_RETENTION_DAYS,
     MAX_RECORDS,
+    LifetimeTally,
     PerformanceLog,
     SelfUseShadow,
     SlotRecord,
@@ -676,3 +677,257 @@ class TestGridIntegration:
             )
         assert completed[0].grid_measured is False
         assert completed[0].grid_import_kwh == pytest.approx(0.0)
+
+
+class TestLifetimeTally:
+    """The log keeps two months. The saving since the start has to outlive it.
+
+    Every money figure was computed over a window of surviving records, so
+    nothing could say what the controller had saved since it was installed:
+    the answer pruned itself a slot at a time.
+    """
+
+    @staticmethod
+    def _shadow(soc: float = 50.0) -> SelfUseShadow:
+        return SelfUseShadow(
+            soc=soc,
+            capacity_kwh=10.0,
+            min_soc=10.0,
+            max_soc=90.0,
+            max_charge_kw=3.0,
+            max_discharge_kw=3.0,
+            charge_efficiency=0.95,
+            discharge_efficiency=0.95,
+        )
+
+    @staticmethod
+    def _day(day: int, soc: float = 40.0) -> list[SlotRecord]:
+        """Cheap overnight, dear evening; the pack sits at ``soc`` throughout."""
+        records = []
+        for slot in range(48):
+            hour, minute = divmod(slot * 30, 60)
+            cheap = hour < 5
+            records.append(
+                SlotRecord(
+                    start=datetime(2026, 2, day, hour, minute, tzinfo=UTC),
+                    import_price=5.0 if cheap else 30.0,
+                    pv_kwh=0.4 if 10 <= hour < 15 else 0.0,
+                    load_kwh=0.3,
+                    grid_import_kwh=1.5 if cheap else 0.0,
+                    grid_measured=True,
+                    soc_start=soc,
+                    soc_end=soc,
+                    battery_charge_kwh=1.2 if cheap else 0.0,
+                    battery_discharge_kwh=0.0 if cheap else 0.3,
+                    planned_action="charge" if cheap else "self_use",
+                    applied_action="charge" if cheap or hour > 20 else "hold",
+                    controlling=hour != 12,
+                    pv_forecast_kwh=0.5 if 10 <= hour < 15 else 0.0,
+                    load_forecast_kwh=0.35,
+                )
+            )
+        return records
+
+    def test_the_total_outlives_the_logs_retention(self):
+        log = PerformanceLog(retention_days=1)
+        tally = LifetimeTally()
+        shadow = self._shadow()
+        for day in range(15, 20):
+            for item in self._day(day):
+                log.add(item)
+                tally.add(item, shadow)
+        assert len(log) < 5 * 48
+        assert tally.slots == 5 * 48
+        assert tally.since == dt(0, 0, 15)
+        assert tally.summary().days == pytest.approx(5.0)
+
+    def test_seeding_from_the_log_matches_the_windowed_summary(self):
+        """Adding slots one at a time must give the same answer as summarising
+        them all at once, field for field -- otherwise the two tables on the
+        dashboard would disagree about the same week."""
+        records = [item for day in range(15, 19) for item in self._day(day)]
+        # The real battery sat at 40%; the counterfactual starts there too.
+        windowed = summarise(
+            records, cycle_cost=2.0, usable_kwh=8.0, shadow=self._shadow(soc=40.0)
+        )
+        tally = LifetimeTally()
+        # The template's own charge is irrelevant: the tally starts the
+        # counterfactual where the first record says the real battery was.
+        assert tally.seed(records, self._shadow(soc=85.0)) == len(records)
+        lifetime = tally.summary(
+            cycle_cost=2.0,
+            usable_kwh=8.0,
+            capacity_kwh=10.0,
+            discharge_efficiency=0.95,
+            stored_energy_rate=windowed.stored_energy_rate,
+        )
+        for name in (
+            "slots",
+            "days",
+            "controlled_slots",
+            "grid_measured_slots",
+            "compared_slots",
+            "followed_slots",
+            "pv_kwh",
+            "load_kwh",
+            "grid_import_kwh",
+            "grid_export_kwh",
+            "battery_charge_kwh",
+            "battery_discharge_kwh",
+            "cost",
+            "no_battery_cost",
+            "self_use_cost",
+            "wear_cost",
+            "stored_energy_kwh",
+            "stored_energy_value",
+            "saving_vs_self_use",
+            "net_saving_vs_self_use",
+            "pv_mae",
+            "pv_bias",
+            "load_mae",
+            "load_bias",
+            "plan_fidelity",
+            "round_trip_efficiency",
+            "equivalent_full_cycles",
+        ):
+            assert getattr(lifetime, name) == pytest.approx(getattr(windowed, name)), name
+        assert lifetime.first == windowed.first
+        assert lifetime.last == windowed.last
+        assert set(lifetime.as_dict()) == set(windowed.as_dict())
+
+    def test_the_same_half_hour_recorded_twice_is_swapped_not_doubled(self):
+        """A restart on the slot boundary can close the same half-hour twice.
+        The log replaces the row; the running total has to do the same."""
+        first = record(1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0)
+        provisional = record(
+            2, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0, soc_end=40.0
+        )
+        final = record(
+            2, import_price=10.0, load_kwh=0.5, grid_import_kwh=0.5, soc_end=45.0
+        )
+        tally = LifetimeTally()
+        shadow = self._shadow()
+        tally.add(first, shadow)
+        tally.add(provisional, shadow)
+        assert tally.add(final, shadow) is True
+
+        assert tally.slots == 2
+        assert tally.cost == pytest.approx(10.0 + 5.0)
+        assert tally.last_soc_end == 45.0
+        clean = LifetimeTally()
+        clean.seed([first, final], self._shadow())
+        assert tally.shadow_soc == pytest.approx(clean.shadow_soc)
+        assert tally.self_use_cost == pytest.approx(clean.self_use_cost)
+        assert tally.load_kwh == pytest.approx(clean.load_kwh)
+
+    def test_a_half_hour_arriving_late_is_not_counted(self):
+        """The counterfactual is sequential; a slot from the past cannot be
+        stepped into the middle of it."""
+        tally = LifetimeTally()
+        shadow = self._shadow()
+        tally.add(record(2, load_kwh=0.3), shadow)
+        assert tally.add(record(1, load_kwh=0.3), shadow) is False
+        assert tally.slots == 1
+        assert tally.since == dt(2)
+
+    def test_the_swap_survives_a_restart(self):
+        """The case the swap exists for *is* a restart, so the undo state has
+        to be in the file, not in memory."""
+        import json
+
+        tally = LifetimeTally()
+        shadow = self._shadow()
+        tally.add(record(1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0), shadow)
+        tally.add(record(2, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0), shadow)
+        restored = LifetimeTally.from_dict(json.loads(json.dumps(tally.as_dict())))
+        again = record(2, import_price=10.0, load_kwh=0.5, grid_import_kwh=0.5)
+        assert restored.add(again, self._shadow()) is True
+        assert restored.slots == 2
+        assert isinstance(restored.slots, int)
+        assert restored.cost == pytest.approx(15.0)
+
+    def test_persistence_round_trip(self):
+        import json
+
+        tally = LifetimeTally()
+        tally.seed(self._day(15), self._shadow())
+        restored = LifetimeTally.from_dict(json.loads(json.dumps(tally.as_dict())))
+        assert restored.as_dict() == tally.as_dict()
+        assert restored.since == tally.since
+        # And it carries on from where it was, not from zero.
+        shadow = self._shadow()
+        for item in self._day(16):
+            tally.add(item, shadow)
+            restored.add(item, shadow)
+        assert restored.summary().as_dict() == tally.summary().as_dict()
+
+    def test_swapping_the_only_half_hour_restarts_cleanly(self):
+        tally = LifetimeTally()
+        shadow = self._shadow()
+        tally.add(record(1, soc_start=30.0, soc_end=30.0, load_kwh=0.3), shadow)
+        tally.add(record(1, soc_start=60.0, soc_end=60.0, load_kwh=0.3), shadow)
+        assert tally.slots == 1
+        assert tally.first_soc_start == 60.0
+        # The counterfactual started where the *kept* record says the battery was.
+        clean = LifetimeTally()
+        clean.add(record(1, soc_start=60.0, soc_end=60.0, load_kwh=0.3), self._shadow())
+        assert tally.shadow_soc == pytest.approx(clean.shadow_soc)
+
+    def test_wear_is_charged_at_todays_allowance(self):
+        """Not banked at the allowance of the day: correcting the setting
+        corrects the whole history, as it does for the weekly figure."""
+        tally = LifetimeTally()
+        tally.seed([record(1, battery_discharge_kwh=10.0)], self._shadow())
+        assert tally.summary(cycle_cost=2.0).wear_cost == pytest.approx(20.0)
+        assert tally.summary(cycle_cost=3.0).wear_cost == pytest.approx(30.0)
+
+    def test_leftover_charge_is_credited_against_the_shadow(self):
+        """The same like-for-like rule the weekly report applies: what the real
+        battery holds beyond the counterfactual is bought and still there."""
+        tally = LifetimeTally()
+        # Nothing for the house to draw, so the shadow stays put at 50%.
+        tally.add(record(1, soc_start=50.0, soc_end=90.0), self._shadow())
+        summary = tally.summary(
+            capacity_kwh=10.0, discharge_efficiency=0.95, stored_energy_rate=10.0
+        )
+        assert summary.stored_energy_kwh == pytest.approx(4.0 * 0.95)
+        assert summary.stored_energy_value == pytest.approx(38.0)
+        assert summary.net_saving_vs_self_use == pytest.approx(
+            summary.saving_vs_self_use + 38.0
+        )
+        assert any("holds 3.8 kWh more" in note for note in summary.notes)
+
+    def test_without_a_recorded_charge_nothing_is_invented(self):
+        tally = LifetimeTally()
+        tally.add(record(1, load_kwh=0.3, import_price=10.0), self._shadow())
+        summary = tally.summary(capacity_kwh=10.0, stored_energy_rate=10.0)
+        assert summary.stored_energy_kwh == pytest.approx(0.0)
+
+    def test_an_empty_tally_says_so(self):
+        tally = LifetimeTally()
+        assert tally.is_empty
+        summary = tally.summary()
+        assert summary.slots == 0
+        assert "no records yet" in summary.notes
+        assert summary.net_saving_vs_self_use is None
+
+    def test_unreadable_totals_start_fresh_rather_than_raise(self):
+        assert LifetimeTally.from_dict(None).is_empty
+        assert LifetimeTally.from_dict("junk").is_empty
+        assert LifetimeTally.from_dict({"since": "not a date", "slots": 3}).is_empty
+        assert LifetimeTally.from_dict({"since": dt(1).isoformat()}).is_empty
+        assert LifetimeTally.from_dict({"cost": "a lot"}).is_empty
+
+    def test_the_summary_reports_per_day(self):
+        tally = LifetimeTally()
+        tally.seed(
+            [item for day in range(15, 19) for item in self._day(day)], self._shadow()
+        )
+        summary = tally.summary(cycle_cost=1.0)
+        assert summary.days == pytest.approx(4.0)
+        assert summary.net_saving_per_day == pytest.approx(
+            summary.net_saving_vs_self_use / 4.0
+        )
+        assert summary.as_dict()["money"]["net_saving_per_day"] == pytest.approx(
+            summary.net_saving_per_day, abs=0.01
+        )

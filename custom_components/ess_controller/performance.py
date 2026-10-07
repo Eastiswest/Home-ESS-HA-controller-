@@ -27,6 +27,7 @@ import csv
 import io
 import logging
 import math
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from typing import Any
@@ -362,6 +363,13 @@ class PerformanceSummary:
         return gross - self.wear_cost + self.stored_energy_value
 
     @property
+    def net_saving_per_day(self) -> float | None:
+        net = self.net_saving_vs_self_use
+        if net is None or self.days <= EPS:
+            return None
+        return net / self.days
+
+    @property
     def self_consumption(self) -> float | None:
         """Share of generation used on site rather than exported."""
         if self.pv_kwh <= EPS:
@@ -411,6 +419,7 @@ class PerformanceSummary:
                 "stored_energy_rate": r(self.stored_energy_rate),
                 "stored_energy_value": r(self.stored_energy_value),
                 "net_saving_vs_self_use": r(self.net_saving_vs_self_use),
+                "net_saving_per_day": r(self.net_saving_per_day),
             },
             "forecast_error_kwh_per_slot": {
                 "solar_slots": self.pv_forecast_slots,
@@ -610,16 +619,30 @@ def summarise(
             at_cells = (real_end - shadow.soc) / 100.0 * shadow.capacity_kwh
             summary.stored_energy_kwh = at_cells * shadow.discharge_efficiency
 
-    _add_caveats(summary, ordered)
+    _add_caveats(
+        summary,
+        soc_first=next((r.soc_start for r in ordered if r.soc_start is not None), None),
+        soc_last=next(
+            (r.soc_end for r in reversed(ordered) if r.soc_end is not None), None
+        ),
+    )
     return summary
 
 
-def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None:
+def _add_caveats(
+    summary: PerformanceSummary,
+    *,
+    soc_first: float | None,
+    soc_last: float | None,
+    lifetime: bool = False,
+) -> None:
     """Say out loud what would otherwise be misread.
 
     A summary that quietly reports a saving from three hours of advisory-mode
     data invites exactly the wrong conclusion, so the caveats travel with the
     numbers rather than living in documentation nobody reads.
+
+    ``lifetime`` only changes the tense: a running total has not "ended" anything.
     """
     if summary.days < 3:
         summary.notes.append(
@@ -647,12 +670,17 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
         # be told which of the two facts is carrying it rather than left to
         # reconcile a minus and a plus on their own.
         held = "more" if summary.stored_energy_kwh > 0 else "less"
+        opening = (
+            f"holds {abs(summary.stored_energy_kwh):.1f} kWh {held} in the battery "
+            "than plain self-use would"
+            if lifetime
+            else f"ended the week with {abs(summary.stored_energy_kwh):.1f} kWh "
+            f"{held} in the battery than plain self-use would have"
+        )
         note = (
-            f"ended the week with {abs(summary.stored_energy_kwh):.1f} kWh {held} "
-            "in the battery than plain self-use would have -- measured against "
-            "the self-use counterfactual, and valued at "
-            f"{summary.stored_energy_rate:.1f}p/kWh -- the cheap end of this "
-            "week's prices, which is what it would cost to put back"
+            f"{opening} -- measured against the self-use counterfactual, and "
+            f"valued at {summary.stored_energy_rate:.1f}p/kWh -- the cheap end of "
+            "this week's prices, which is what it would cost to put back"
         )
         if (
             summary.saving_vs_self_use is not None
@@ -660,13 +688,12 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
             and summary.net_saving_vs_self_use is not None
             and summary.net_saving_vs_self_use > 0
         ):
+            whose = "the" if lifetime else "this week's"
             note += (
-                ". That credit is the whole of this week's net saving: the "
+                f". That credit is the whole of {whose} net saving: the "
                 "electricity itself cost more than self-use would have"
             )
         summary.notes.append(note)
-    soc_first = next((r.soc_start for r in records if r.soc_start is not None), None)
-    soc_last = next((r.soc_end for r in reversed(records) if r.soc_end is not None), None)
     if soc_first is not None and soc_last is not None:
         drift = soc_last - soc_first
         if abs(drift) > 5:
@@ -678,3 +705,294 @@ def _add_caveats(summary: PerformanceSummary, records: list[SlotRecord]) -> None
                 f"the battery ended {drift:+.0f}% from where it started, so "
                 '"Spent" includes electricity bought and not yet used'
             )
+
+
+# The running totals a lifetime figure needs, named as the summary names them.
+# Counts first, so the undo arithmetic can keep them whole numbers.
+_TALLY_COUNTS: tuple[str, ...] = (
+    "slots",
+    "controlled_slots",
+    "grid_measured_slots",
+    "compared_slots",
+    "followed_slots",
+    "pv_forecast_slots",
+    "load_forecast_slots",
+)
+_TALLY_SUMS: tuple[str, ...] = (
+    *_TALLY_COUNTS,
+    "pv_kwh",
+    "load_kwh",
+    "grid_import_kwh",
+    "grid_export_kwh",
+    "battery_charge_kwh",
+    "battery_discharge_kwh",
+    "cost",
+    "no_battery_cost",
+    "self_use_cost",
+    "pv_abs_error",
+    "pv_error",
+    "load_abs_error",
+    "load_error",
+)
+
+
+@dataclass(slots=True)
+class LifetimeTally:
+    """Every recorded half-hour added up as it closed, kept past the log's retention.
+
+    The log holds two months and prunes, so a saving "since the start" cannot be
+    computed from it; it has to be banked as slots close and carried. The
+    self-use counterfactual is carried the same way: one shadow battery, started
+    where the real one was on the first recorded half-hour and stepped through
+    every slot since, so its charge is the only state it needs.
+
+    Wear is charged on the total discharge at *today's* allowance, as the
+    windowed report does, so correcting the wear setting corrects the whole
+    history rather than only what follows.
+    """
+
+    since: datetime | None = None
+    last_start: datetime | None = None
+    first_soc_start: float | None = None
+    last_soc_end: float | None = None
+    shadow_soc: float | None = None
+
+    slots: int = 0
+    controlled_slots: int = 0
+    grid_measured_slots: int = 0
+    compared_slots: int = 0
+    followed_slots: int = 0
+    pv_forecast_slots: int = 0
+    load_forecast_slots: int = 0
+    pv_kwh: float = 0.0
+    load_kwh: float = 0.0
+    grid_import_kwh: float = 0.0
+    grid_export_kwh: float = 0.0
+    battery_charge_kwh: float = 0.0
+    battery_discharge_kwh: float = 0.0
+    cost: float = 0.0
+    no_battery_cost: float = 0.0
+    self_use_cost: float = 0.0
+    pv_abs_error: float = 0.0
+    pv_error: float = 0.0
+    load_abs_error: float = 0.0
+    load_error: float = 0.0
+
+    # What the newest half-hour contributed and what the carried state was
+    # before it, so the same half-hour recorded again -- a restart on the slot
+    # boundary -- is swapped rather than counted twice, even across a restart.
+    last_delta: dict[str, float] | None = None
+    shadow_before_last: float | None = None
+    soc_end_before_last: float | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.since is None
+
+    def add(self, record: SlotRecord, shadow: SelfUseShadow) -> bool:
+        """Count one closed half-hour; return whether it was counted.
+
+        ``shadow`` supplies the battery's parameters; its charge is replaced
+        with the carried one before stepping. A half-hour older than the newest
+        one counted cannot be slotted into a sequential counterfactual and is
+        ignored. The newest one itself is swapped.
+        """
+        if self.last_start is not None:
+            if record.start < self.last_start:
+                return False
+            if record.start == self.last_start:
+                if self.last_delta is None:
+                    return False
+                self._undo_last()
+        if self.since is None:
+            self.since = record.start
+            self.first_soc_start = record.soc_start
+        if self.shadow_soc is None:
+            self.shadow_soc = (
+                record.soc_start if record.soc_start is not None else shadow.min_soc
+            )
+        shadow_before = self.shadow_soc
+        soc_end_before = self.last_soc_end
+
+        shadow.soc = self.shadow_soc
+        shadow.cost = 0.0
+        self_use_cost = shadow.step(record)
+        followed = record.followed_plan
+        pv_error = record.pv_error
+        load_error = record.load_error
+        delta: dict[str, float] = {
+            "slots": 1,
+            "controlled_slots": int(record.controlling),
+            "grid_measured_slots": int(record.grid_measured),
+            "compared_slots": int(followed is not None),
+            "followed_slots": int(bool(followed)),
+            "pv_forecast_slots": int(pv_error is not None),
+            "load_forecast_slots": int(load_error is not None),
+            "pv_kwh": record.pv_kwh,
+            "load_kwh": record.load_kwh,
+            "grid_import_kwh": record.grid_import_kwh,
+            "grid_export_kwh": record.grid_export_kwh,
+            "battery_charge_kwh": record.battery_charge_kwh,
+            "battery_discharge_kwh": record.battery_discharge_kwh,
+            "cost": record.cost,
+            "no_battery_cost": record.no_battery_cost,
+            "self_use_cost": self_use_cost,
+            "pv_abs_error": abs(pv_error) if pv_error is not None else 0.0,
+            "pv_error": pv_error if pv_error is not None else 0.0,
+            "load_abs_error": abs(load_error) if load_error is not None else 0.0,
+            "load_error": load_error if load_error is not None else 0.0,
+        }
+        for name, value in delta.items():
+            setattr(self, name, getattr(self, name) + value)
+
+        self.shadow_soc = shadow.soc
+        if record.soc_end is not None:
+            self.last_soc_end = record.soc_end
+        self.last_start = record.start
+        self.last_delta = delta
+        self.shadow_before_last = shadow_before
+        self.soc_end_before_last = soc_end_before
+        return True
+
+    def _undo_last(self) -> None:
+        if self.last_delta is None:
+            return
+        for name, value in self.last_delta.items():
+            setattr(self, name, getattr(self, name) - value)
+        self.shadow_soc = self.shadow_before_last
+        self.last_soc_end = self.soc_end_before_last
+        self.last_delta = None
+        if self.slots <= 0:
+            self.since = None
+            self.last_start = None
+            self.first_soc_start = None
+            self.shadow_soc = None
+
+    def seed(self, records: Iterable[SlotRecord], shadow: SelfUseShadow) -> int:
+        """Start the tally from history that already exists; return slots counted."""
+        counted = 0
+        for record in sorted(records, key=lambda item: item.start):
+            counted += int(self.add(record, shadow))
+        return counted
+
+    def summary(
+        self,
+        *,
+        cycle_cost: float = 0.0,
+        usable_kwh: float = 0.0,
+        capacity_kwh: float = 0.0,
+        discharge_efficiency: float = 1.0,
+        stored_energy_rate: float = 0.0,
+    ) -> PerformanceSummary:
+        """The totals in the same shape as a windowed summary.
+
+        ``stored_energy_rate`` is supplied rather than kept: leftover charge is
+        worth what it would cost to put back *now*, which is a question about
+        recent prices and not about the whole history.
+        """
+        summary = PerformanceSummary(cycle_cost=cycle_cost, usable_kwh=usable_kwh)
+        if self.since is None or self.last_start is None:
+            summary.notes.append("no records yet")
+            return summary
+
+        summary.first = self.since
+        summary.last = self.last_start
+        summary.days = ((self.last_start - self.since).total_seconds() + 1800) / 86400.0
+        for name in (
+            "slots",
+            "controlled_slots",
+            "grid_measured_slots",
+            "compared_slots",
+            "followed_slots",
+            "pv_forecast_slots",
+            "load_forecast_slots",
+            "pv_kwh",
+            "load_kwh",
+            "grid_import_kwh",
+            "grid_export_kwh",
+            "battery_charge_kwh",
+            "battery_discharge_kwh",
+            "cost",
+            "no_battery_cost",
+            "self_use_cost",
+        ):
+            setattr(summary, name, getattr(self, name))
+        if self.pv_forecast_slots:
+            summary.pv_mae = self.pv_abs_error / self.pv_forecast_slots
+            summary.pv_bias = self.pv_error / self.pv_forecast_slots
+        if self.load_forecast_slots:
+            summary.load_mae = self.load_abs_error / self.load_forecast_slots
+            summary.load_bias = self.load_error / self.load_forecast_slots
+
+        summary.stored_energy_rate = stored_energy_rate
+        if (
+            self.last_soc_end is not None
+            and self.shadow_soc is not None
+            and capacity_kwh > 0
+        ):
+            at_cells = (self.last_soc_end - self.shadow_soc) / 100.0 * capacity_kwh
+            summary.stored_energy_kwh = at_cells * discharge_efficiency
+
+        _add_caveats(
+            summary,
+            soc_first=self.first_soc_start,
+            soc_last=self.last_soc_end,
+            lifetime=True,
+        )
+        return summary
+
+    # -- persistence -------------------------------------------------------
+
+    def as_dict(self) -> dict[str, Any]:
+        def stamp(value: datetime | None) -> str | None:
+            return None if value is None else value.isoformat()
+
+        data: dict[str, Any] = {name: getattr(self, name) for name in _TALLY_SUMS}
+        data.update(
+            since=stamp(self.since),
+            last_start=stamp(self.last_start),
+            first_soc_start=self.first_soc_start,
+            last_soc_end=self.last_soc_end,
+            shadow_soc=self.shadow_soc,
+            last_delta=self.last_delta,
+            shadow_before_last=self.shadow_before_last,
+            soc_end_before_last=self.soc_end_before_last,
+        )
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Any) -> LifetimeTally:
+        """Read a saved tally; anything unreadable starts a fresh one."""
+        tally = cls()
+        if not isinstance(data, dict):
+            return tally
+        try:
+            for name in _TALLY_SUMS:
+                value = data.get(name, 0)
+                setattr(
+                    tally, name, int(value) if name in _TALLY_COUNTS else float(value)
+                )
+            for name in ("since", "last_start"):
+                raw = data.get(name)
+                setattr(tally, name, datetime.fromisoformat(str(raw)) if raw else None)
+            for name in (
+                "first_soc_start",
+                "last_soc_end",
+                "shadow_soc",
+                "shadow_before_last",
+                "soc_end_before_last",
+            ):
+                raw = data.get(name)
+                setattr(tally, name, None if raw is None else float(raw))
+            delta = data.get("last_delta")
+            if isinstance(delta, dict):
+                tally.last_delta = {
+                    str(key): (int(value) if key in _TALLY_COUNTS else float(value))
+                    for key, value in delta.items()
+                }
+        except (TypeError, ValueError):
+            _LOGGER.warning("Discarded unreadable lifetime totals; starting fresh")
+            return cls()
+        if tally.since is None or tally.last_start is None or tally.slots <= 0:
+            return cls()
+        return tally

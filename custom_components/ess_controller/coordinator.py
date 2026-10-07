@@ -383,6 +383,21 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._setup_at = dt_util.utcnow()
         self._build_adapters()
         self._build_tariffs()
+        self._seed_lifetime()
+
+    def _seed_lifetime(self) -> None:
+        """Start the lifetime totals from whatever history already survives.
+
+        Runs once, on the first start after the totals existed: an install with
+        two months of records should not begin its "since the start" figure at
+        zero today.
+        """
+        store = self.performance_store
+        if not store.lifetime.is_empty or not len(store.log):
+            return
+        counted = store.lifetime.seed(store.log.records, self._shadow_template())
+        _LOGGER.info("Started the lifetime saving total from %d half-hours", counted)
+        store.async_schedule_save()
 
     @callback
     def async_start_live_polling(self) -> CALLBACK_TYPE:
@@ -1450,6 +1465,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not completed:
             return
         capacity = self.nominal_capacity_kwh()
+        shadow = self._shadow_template()
         for slot in completed:
             mark = self._slot_marks.pop(slot.start, {})
             # A slot that closed without ever being marked -- the first slot
@@ -1506,8 +1522,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else:
                     record.battery_discharge_kwh = -delta
             self.performance_store.log.add(record)
+            self.performance_store.lifetime.add(record, shadow)
         self._report_cache = {}
         self.performance_store.async_schedule_save()
+
+    def _shadow_template(self) -> SelfUseShadow:
+        """A self-use battery with today's parameters and no particular charge."""
+        battery = self.battery_spec()
+        return SelfUseShadow(
+            soc=battery.min_soc,
+            capacity_kwh=battery.capacity_kwh,
+            min_soc=battery.min_soc,
+            max_soc=battery.max_soc,
+            max_charge_kw=self.settings.max_charge_kw,
+            max_discharge_kw=self.settings.max_discharge_kw,
+            charge_efficiency=battery.charge_efficiency,
+            discharge_efficiency=battery.discharge_efficiency,
+        )
 
     def _self_use_shadow(self, records: list[SlotRecord]) -> SelfUseShadow:
         """A self-use battery starting where the window does.
@@ -1519,20 +1550,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         even started from the same place, and the difference between them was
         partly just that.
         """
-        battery = self.battery_spec()
-        start_soc = next(
-            (r.soc_start for r in records if r.soc_start is not None), battery.min_soc
+        shadow = self._shadow_template()
+        shadow.soc = next(
+            (r.soc_start for r in records if r.soc_start is not None), shadow.min_soc
         )
-        return SelfUseShadow(
-            soc=start_soc,
-            capacity_kwh=battery.capacity_kwh,
-            min_soc=battery.min_soc,
-            max_soc=battery.max_soc,
-            max_charge_kw=self.settings.max_charge_kw,
-            max_discharge_kw=self.settings.max_discharge_kw,
-            charge_efficiency=battery.charge_efficiency,
-            discharge_efficiency=battery.discharge_efficiency,
-        )
+        return shadow
 
     def performance_report(self, days: float = 7.0) -> PerformanceSummary:
         """The metrics for a window, as an object entities can read fields off.
@@ -1555,6 +1577,22 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def performance_summary(self, days: float = 7.0) -> dict[str, Any]:
         return self.performance_report(days).as_dict()
+
+    def lifetime_report(self) -> PerformanceSummary:
+        """Every recorded half-hour, banked as it closed and kept past retention."""
+        battery = self.battery_spec()
+        return self.performance_store.lifetime.summary(
+            cycle_cost=self.wear_estimate().cycle_cost,
+            usable_kwh=self.usable_kwh(),
+            capacity_kwh=battery.capacity_kwh,
+            discharge_efficiency=battery.discharge_efficiency,
+            # Leftover charge is worth what it costs to put back today, so the
+            # rate is this week's -- the same one the weekly table values it at.
+            stored_energy_rate=self.performance_report(7.0).stored_energy_rate,
+        )
+
+    def lifetime_summary(self) -> dict[str, Any]:
+        return self.lifetime_report().as_dict()
 
     def performance_rows(self, days: float = 7.0) -> list[dict[str, Any]]:
         return [r.as_dict() for r in self.performance_store.log.window(days)]
@@ -1597,8 +1635,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.runtime_store.async_schedule_save()
         return outcome
 
-    async def async_clear_performance(self) -> None:
-        await self.performance_store.async_clear()
+    async def async_clear_performance(self, *, lifetime: bool = False) -> None:
+        await self.performance_store.async_clear(lifetime=lifetime)
         self._slot_marks = {}
         self._report_cache = {}
 
