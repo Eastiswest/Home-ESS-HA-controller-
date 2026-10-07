@@ -2679,6 +2679,15 @@ class TestTheSavingSinceRecordsBegan:
 
         return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
 
+    async def test_the_sensor_is_money(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_refresh()
+        state = hass.states.get(self.ENTITY)
+        assert state is not None
+        assert state.attributes.get("unit_of_measurement") == "GBP"
+        assert state.attributes.get("device_class") == "monetary"
+        assert state.attributes["window"]["slots"] == 0
+
     async def test_closed_half_hours_feed_the_total(self, hass):
         coordinator = await self._coordinator(hass)
         now = self._now()
@@ -2691,6 +2700,10 @@ class TestTheSavingSinceRecordsBegan:
         assert tally.slots == 2
         assert tally.since == now - timedelta(hours=2)
         assert tally.load_kwh == pytest.approx(0.6)
+        await coordinator.async_refresh()
+        attributes = hass.states.get(self.ENTITY).attributes
+        assert attributes["window"]["slots"] == 2
+        assert attributes["money"]["if_self_use_only"] is not None
 
     async def test_the_same_half_hour_closing_twice_counts_once(self, hass):
         coordinator = await self._coordinator(hass)

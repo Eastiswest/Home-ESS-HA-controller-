@@ -664,6 +664,9 @@
       "weekly_saving": {
         "name": "Saving vs self use this week"
       },
+      "total_saving": {
+        "name": "Total saving vs self use"
+      },
       "battery_energy": {
         "name": "Energy in the battery"
       }

@@ -566,6 +566,16 @@ def _performance_state(coordinator: EssCoordinator) -> float | None:
     return _major(net)
 
 
+def _lifetime_attributes(coordinator: EssCoordinator) -> dict[str, Any]:
+    """Every half-hour since records began, kept past the log's retention."""
+    return coordinator.lifetime_summary()
+
+
+def _lifetime_state(coordinator: EssCoordinator) -> float | None:
+    """Net saving against a self-use battery since records began, after wear."""
+    return _major(coordinator.lifetime_report().net_saving_vs_self_use)
+
+
 def _recommendation_state(coordinator: EssCoordinator) -> str | None:
     """Never ``None``. "Unknown" is what Home Assistant shows for a sensor with
     no state, and it reads as a broken feature rather than as one that has not
@@ -629,6 +639,17 @@ SESSION_SENSORS: tuple[EssSensorDescription, ...] = (
         suggested_display_precision=2,
         value=_performance_state,
         attributes=_performance_attributes,
+    ),
+    EssSensorDescription(
+        key="total_saving",
+        translation_key="total_saving",
+        name="Total saving vs self use",
+        icon="mdi:piggy-bank-outline",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        value=_lifetime_state,
+        attributes=_lifetime_attributes,
     ),
     EssSensorDescription(
         key="tariff_recommendation",
