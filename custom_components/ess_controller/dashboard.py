@@ -103,6 +103,7 @@ LABELS: dict[str, str] = {
     "plan_cost": "Cost over the horizon",
     "plan_saving": "Saving vs self-use",
     "weekly_saving": "Saving this week",
+    "total_saving": "Total saving",
     "tariff_recommendation": "Best tariff for you",
     # Energy
     "planned_grid_import": "Planned grid import",
@@ -1198,6 +1199,38 @@ def _performance_report(saving_entity: str, symbol: str = "\u00a3") -> str:
     )
 
 
+def _lifetime_report(total_entity: str, symbol: str = "\u00a3") -> str:
+    """The running total since records began, laid out like the weekly table.
+
+    Money only. Forecast error and plan fidelity are questions about the model
+    as it is now, and a lifetime average of them answers nothing.
+    """
+    return (
+        _money_macro(symbol) + "{% set e = '" + total_entity + "' %}"
+        "{% set m = state_attr(e, 'money') %}"
+        "{% set window = state_attr(e, 'window') %}"
+        "{% if not m or not window or not window.slots %}"
+        "Nothing recorded yet -- this fills in as half-hours complete."
+        "{% else %}"
+        "| | |\n|---|--:|\n"
+        "| Spent | {{ money(m.actual) }} |\n"
+        "| With no battery | {{ money(m.if_no_battery) }} |\n"
+        "| With self-use only | {{ money(m.if_self_use_only) }} |\n"
+        "| Saving vs self-use | {{ money(m.saving_vs_self_use) }} |\n"
+        "| Wear charged | {{ money(0 - (m.wear_cost | float(0))) }} |\n"
+        "| Charge left in the battery | "
+        "{{ money(m.stored_energy_value, true) }} |\n"
+        "| **Net saving** | **{{ money(m.net_saving_vs_self_use) }}** |\n"
+        "| Per day | {{ money(m.net_saving_per_day) }} |\n"
+        "| Recording since | "
+        "{{ as_timestamp(window.first) | timestamp_custom('%d %b %Y', true) }} |\n"
+        "| Half-hours counted | {{ window.slots }} over "
+        "{{ window.days | round | int }} days |\n"
+        "{% for note in state_attr(e, 'notes') or [] %}\n> {{ note }}\n{% endfor %}"
+        "{% endif %}"
+    )
+
+
 def _flexible_loads(shifted_entity: str, symbol: str = "\u00a3") -> str:
     return (
         _money_macro(symbol) + "{% set e = '" + shifted_entity + "' %}"
@@ -1423,6 +1456,7 @@ def _plan_view(resolved: dict[str, str], charts: bool = False) -> dict[str, Any]
 
 def _performance_view(resolved: dict[str, str], symbol: str = "\u00a3") -> dict[str, Any]:
     weekly = resolved.get("weekly_saving")
+    total = resolved.get("total_saving")
     wear = resolved.get("wear_allowance")
     return _view(
         "Performance",
@@ -1433,6 +1467,11 @@ def _performance_view(resolved: dict[str, str], symbol: str = "\u00a3") -> dict[
                 "This week",
                 "mdi:cash-multiple",
                 [_markdown(_performance_report(weekly, symbol)) if weekly else None],
+            ),
+            _section(
+                "Since records began",
+                "mdi:piggy-bank-outline",
+                [_markdown(_lifetime_report(total, symbol)) if total else None],
             ),
             _section(
                 "Wear",
@@ -1481,6 +1520,7 @@ def _performance_view(resolved: dict[str, str], symbol: str = "\u00a3") -> dict[
         ],
         badges=[
             _badge("weekly_saving", resolved),
+            _badge("total_saving", resolved),
             _badge("wear_allowance", resolved),
             _badge("learning_progress", resolved),
         ],

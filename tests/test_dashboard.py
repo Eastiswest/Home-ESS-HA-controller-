@@ -50,6 +50,7 @@ ALL_KEYS = (
     "tariff_recommendation",
     "wear_allowance",
     "weekly_saving",
+    "total_saving",
     # binary sensors
     "charging_planned",
     "discharging_planned",
@@ -494,6 +495,12 @@ class TestTemplates:
         content = self._markdown(build_dashboard(resolved("weekly_saving")))
         assert "Nothing recorded yet" in content
 
+    def test_the_lifetime_table_sits_beside_the_weekly_one(self):
+        content = self._markdown(build_dashboard(resolved("total_saving")))
+        assert f"'{entity_id('total_saving')}'" in content
+        assert "Recording since" in content
+        assert "Nothing recorded yet" in content
+
     def test_flexible_loads_template_handles_no_loads(self):
         content = self._markdown(build_dashboard(resolved("shifted_loads")))
         assert "No loads defined" in content
@@ -791,6 +798,60 @@ class TestTemplatesRender:
         assert "| Wear charged | -\u00a30.59 |" in table
         # -1.60 - 0.59 + 2.83 = 0.65 (rounded per row), which is now visibly the case.
         assert "**\u00a30.65**" in table
+
+    def test_the_lifetime_table_renders_the_running_total(self):
+        from custom_components.ess_controller.dashboard import _lifetime_report
+
+        total = entity_id("total_saving")
+        attributes = {
+            total: {
+                "money": {
+                    "actual": 9876.54,
+                    "if_no_battery": 15000.0,
+                    "if_self_use_only": 12000.0,
+                    "saving_vs_self_use": 2123.46,
+                    "wear_cost": 300.0,
+                    "stored_energy_value": 150.0,
+                    "net_saving_vs_self_use": 1973.46,
+                    "net_saving_per_day": 29.45,
+                },
+                "window": {
+                    "slots": 3216,
+                    "days": 67.0,
+                    "first": "2026-08-01T00:00:00+00:00",
+                    "last": "2026-10-06T23:30:00+00:00",
+                },
+                "notes": ["armed for 3000 of 3216 slots"],
+            }
+        }
+        table = self._render(_lifetime_report(total), attributes)
+        assert "| Spent | £98.77 |" in table
+        assert "| Wear charged | -£3.00 |" in table
+        assert "| Charge left in the battery | +£1.50 |" in table
+        assert "| **Net saving** | **£19.73** |" in table
+        assert "| Per day | £0.29 |" in table
+        assert "| Recording since | 01 Aug 2026 |" in table
+        assert "| Half-hours counted | 3216 over 67 days |" in table
+        assert "> armed for 3000 of 3216 slots" in table
+        assert "None" not in table
+
+    def test_the_lifetime_table_says_so_before_anything_is_counted(self):
+        """The sensor exists from the first boot with an empty summary, so the
+        attributes are there but say nothing; that must not render as a table
+        of "not yet"."""
+        from custom_components.ess_controller.dashboard import _lifetime_report
+
+        total = entity_id("total_saving")
+        attributes = {
+            total: {
+                "money": {"actual": 0.0, "net_saving_vs_self_use": None},
+                "window": {"slots": 0, "days": 0.0, "first": None, "last": None},
+                "notes": ["no records yet"],
+            }
+        }
+        table = self._render(_lifetime_report(total), attributes)
+        assert "Nothing recorded yet" in table
+        assert "|" not in table
 
     def test_a_week_with_nothing_stored_still_renders(self):
         from custom_components.ess_controller.dashboard import _performance_report
