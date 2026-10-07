@@ -2701,9 +2701,12 @@ class TestTheSavingSinceRecordsBegan:
         assert tally.since == now - timedelta(hours=2)
         assert tally.load_kwh == pytest.approx(0.6)
         await coordinator.async_refresh()
-        attributes = hass.states.get(self.ENTITY).attributes
-        assert attributes["window"]["slots"] == 2
-        assert attributes["money"]["if_self_use_only"] is not None
+        state = hass.states.get(self.ENTITY)
+        assert state.attributes["window"]["slots"] == 2
+        assert state.attributes["money"]["if_self_use_only"] is not None
+        net = coordinator.lifetime_report().net_saving_vs_self_use
+        assert net is not None
+        assert float(state.state) == pytest.approx(round(net / 100.0, 2))
 
     async def test_the_same_half_hour_closing_twice_counts_once(self, hass):
         coordinator = await self._coordinator(hass)
@@ -2784,9 +2787,45 @@ class TestTheSavingSinceRecordsBegan:
         await coordinator.async_clear_performance()
         assert len(coordinator.performance_store.log) == 0
         assert coordinator.performance_store.lifetime.slots == 1
+        await coordinator.async_refresh()
+        assert hass.states.get(self.ENTITY).attributes["window"]["slots"] == 1
+        weekly = hass.states.get("sensor.ai_ess_controller_saving_vs_self_use_this_week")
+        assert weekly.attributes["window"]["slots"] == 0
 
         await coordinator.async_clear_performance(lifetime=True)
         assert coordinator.performance_store.lifetime.is_empty
+
+    async def test_leftover_charge_is_not_valued_at_nothing_after_a_clear(self, hass):
+        """The credit is priced from this week's log; an empty week must fall
+        back to the month rather than value a full battery at 0p."""
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        for days in (20, 19):
+            coordinator.performance_store.log.add(
+                SlotRecord(start=now - timedelta(days=days), import_price=12.0)
+            )
+        coordinator._report_cache = {}
+        start = now - timedelta(hours=1)
+        coordinator._slot_marks[start] = {
+            "soc_start": 50.0,
+            "soc_end": 90.0,
+            "import_price": 25.0,
+        }
+        coordinator._record_completed([self._slot(start)])
+        assert coordinator.lifetime_report().stored_energy_rate == pytest.approx(25.0)
+
+        # The week empties; the month still knows what a kWh costs to put back.
+        coordinator.performance_store.log.clear()
+        for days in (20, 19):
+            coordinator.performance_store.log.add(
+                SlotRecord(start=now - timedelta(days=days), import_price=12.0)
+            )
+        coordinator._report_cache = {}
+        report = coordinator.lifetime_report()
+        assert report.stored_energy_kwh > 0
+        assert report.stored_energy_rate == pytest.approx(12.0)
 
     async def test_it_is_in_the_diagnostics(self, hass):
         from custom_components.ess_controller.diagnostics import (

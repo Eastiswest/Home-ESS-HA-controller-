@@ -1586,10 +1586,21 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             usable_kwh=self.usable_kwh(),
             capacity_kwh=battery.capacity_kwh,
             discharge_efficiency=battery.discharge_efficiency,
-            # Leftover charge is worth what it costs to put back today, so the
-            # rate is this week's -- the same one the weekly table values it at.
-            stored_energy_rate=self.performance_report(7.0).stored_energy_rate,
+            stored_energy_rate=self._stored_energy_rate(),
         )
+
+    def _stored_energy_rate(self) -> float:
+        """What a kWh left in the battery costs to put back now.
+
+        This week's cheap end, the same rate the weekly table values it at, so
+        the two tables agree; a cleared log falls back to the month rather
+        than valuing the charge at nothing.
+        """
+        for days in (7.0, 30.0):
+            report = self.performance_report(days)
+            if report.slots:
+                return report.stored_energy_rate
+        return 0.0
 
     def lifetime_summary(self) -> dict[str, Any]:
         return self.lifetime_report().as_dict()
