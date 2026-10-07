@@ -784,6 +784,7 @@ class LifetimeTally:
     last_delta: dict[str, float] | None = None
     shadow_before_last: float | None = None
     soc_end_before_last: float | None = None
+    first_soc_before_last: float | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -806,13 +807,21 @@ class LifetimeTally:
                 self._undo_last()
         if self.since is None:
             self.since = record.start
-            self.first_soc_start = record.soc_start
-        if self.shadow_soc is None:
-            self.shadow_soc = (
-                record.soc_start if record.soc_start is not None else shadow.min_soc
-            )
         shadow_before = self.shadow_soc
         soc_end_before = self.last_soc_end
+        first_soc_before = self.first_soc_start
+        # The counterfactual starts where the real battery was first seen, as
+        # the windowed report does. The first slot after a boot often closes
+        # before the inverter reports, so its closing reading will do; until
+        # some reading arrives the shadow sits at the floor provisionally and
+        # the first reading re-bases it, so unread slots cannot pin it there.
+        if self.first_soc_start is None:
+            seen = record.soc_start if record.soc_start is not None else record.soc_end
+            if seen is not None:
+                self.first_soc_start = seen
+                self.shadow_soc = seen
+        if self.shadow_soc is None:
+            self.shadow_soc = shadow.min_soc
 
         shadow.soc = self.shadow_soc
         shadow.cost = 0.0
@@ -852,6 +861,7 @@ class LifetimeTally:
         self.last_delta = delta
         self.shadow_before_last = shadow_before
         self.soc_end_before_last = soc_end_before
+        self.first_soc_before_last = first_soc_before
         return True
 
     def _undo_last(self) -> None:
@@ -861,17 +871,28 @@ class LifetimeTally:
             setattr(self, name, getattr(self, name) - value)
         self.shadow_soc = self.shadow_before_last
         self.last_soc_end = self.soc_end_before_last
+        self.first_soc_start = self.first_soc_before_last
         self.last_delta = None
         if self.slots <= 0:
             self.since = None
             self.last_start = None
-            self.first_soc_start = None
-            self.shadow_soc = None
 
     def seed(self, records: Iterable[SlotRecord], shadow: SelfUseShadow) -> int:
-        """Start the tally from history that already exists; return slots counted."""
+        """Start the tally from history that already exists; return slots counted.
+
+        With the whole history in hand the counterfactual can start exactly
+        where the windowed report would: at the first recorded charge.
+        """
+        ordered = sorted(records, key=lambda item: item.start)
+        if self.is_empty:
+            first_soc = next(
+                (r.soc_start for r in ordered if r.soc_start is not None), None
+            )
+            if first_soc is not None:
+                self.first_soc_start = first_soc
+                self.shadow_soc = first_soc
         counted = 0
-        for record in sorted(records, key=lambda item: item.start):
+        for record in ordered:
             counted += int(self.add(record, shadow))
         return counted
 
@@ -957,6 +978,7 @@ class LifetimeTally:
             last_delta=self.last_delta,
             shadow_before_last=self.shadow_before_last,
             soc_end_before_last=self.soc_end_before_last,
+            first_soc_before_last=self.first_soc_before_last,
         )
         return data
 
@@ -981,6 +1003,7 @@ class LifetimeTally:
                 "shadow_soc",
                 "shadow_before_last",
                 "soc_end_before_last",
+                "first_soc_before_last",
             ):
                 raw = data.get(name)
                 setattr(tally, name, None if raw is None else float(raw))

@@ -797,10 +797,13 @@ class TestLifetimeTally:
 
     def test_the_same_half_hour_recorded_twice_is_swapped_not_doubled(self):
         """A restart on the slot boundary can close the same half-hour twice.
-        The log replaces the row; the running total has to do the same."""
-        first = record(1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0)
+        The log replaces the row; the running total has to do the same --
+        including winding the shadow battery back before re-stepping it."""
+        first = record(
+            1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0, soc_start=50.0
+        )
         provisional = record(
-            2, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0, soc_end=40.0
+            2, import_price=10.0, load_kwh=1.5, grid_import_kwh=1.5, soc_end=40.0
         )
         final = record(
             2, import_price=10.0, load_kwh=0.5, grid_import_kwh=0.5, soc_end=45.0
@@ -809,6 +812,7 @@ class TestLifetimeTally:
         shadow = self._shadow()
         tally.add(first, shadow)
         tally.add(provisional, shadow)
+        drained = tally.shadow_soc
         assert tally.add(final, shadow) is True
 
         assert tally.slots == 2
@@ -816,6 +820,9 @@ class TestLifetimeTally:
         assert tally.last_soc_end == 45.0
         clean = LifetimeTally()
         clean.seed([first, final], self._shadow())
+        # The shadow covered 1.5 kWh provisionally and only 0.5 kWh finally,
+        # so it must end fuller than it did after the provisional slot.
+        assert tally.shadow_soc > drained
         assert tally.shadow_soc == pytest.approx(clean.shadow_soc)
         assert tally.self_use_cost == pytest.approx(clean.self_use_cost)
         assert tally.load_kwh == pytest.approx(clean.load_kwh)
@@ -832,19 +839,54 @@ class TestLifetimeTally:
 
     def test_the_swap_survives_a_restart(self):
         """The case the swap exists for *is* a restart, so the undo state has
-        to be in the file, not in memory."""
+        to be in the file, not in memory: the totals, the shadow's charge and
+        the real battery's last reading all wind back."""
         import json
 
+        first = record(
+            1,
+            import_price=10.0,
+            load_kwh=1.0,
+            grid_import_kwh=1.0,
+            soc_start=50.0,
+            soc_end=50.0,
+        )
         tally = LifetimeTally()
         shadow = self._shadow()
-        tally.add(record(1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0), shadow)
-        tally.add(record(2, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0), shadow)
+        tally.add(first, shadow)
+        tally.add(
+            record(2, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0, soc_end=48.0),
+            shadow,
+        )
         restored = LifetimeTally.from_dict(json.loads(json.dumps(tally.as_dict())))
+        # After a restart the slot closes with no marks at all: no soc_end.
         again = record(2, import_price=10.0, load_kwh=0.5, grid_import_kwh=0.5)
         assert restored.add(again, self._shadow()) is True
         assert restored.slots == 2
         assert isinstance(restored.slots, int)
         assert restored.cost == pytest.approx(15.0)
+        assert restored.last_soc_end == 50.0
+        clean = LifetimeTally()
+        clean.seed([first, again], self._shadow())
+        assert restored.shadow_soc == pytest.approx(clean.shadow_soc)
+        assert restored.self_use_cost == pytest.approx(clean.self_use_cost)
+
+    def test_a_same_half_hour_with_no_undo_state_is_left_alone(self):
+        """Counting it again would be worse than keeping the old row."""
+        import json
+
+        tally = LifetimeTally()
+        tally.add(
+            record(1, import_price=10.0, load_kwh=1.0, grid_import_kwh=1.0),
+            self._shadow(),
+        )
+        data = json.loads(json.dumps(tally.as_dict()))
+        del data["last_delta"]
+        restored = LifetimeTally.from_dict(data)
+        again = record(1, import_price=10.0, load_kwh=2.0, grid_import_kwh=2.0)
+        assert restored.add(again, self._shadow()) is False
+        assert restored.slots == 1
+        assert restored.cost == pytest.approx(10.0)
 
     def test_persistence_round_trip(self):
         import json
@@ -931,3 +973,50 @@ class TestLifetimeTally:
         assert summary.as_dict()["money"]["net_saving_per_day"] == pytest.approx(
             summary.net_saving_per_day, abs=0.01
         )
+
+    def test_a_first_slot_without_a_reading_does_not_pin_the_shadow_to_the_floor(
+        self,
+    ):
+        """The first slot after a boot often closes before the inverter has
+        reported, so it carries no opening charge. Starting the counterfactual
+        at the floor from that one slot banked the real battery's whole
+        pre-existing charge as a saving, for ever."""
+        unread = record(0, load_kwh=1.4, import_price=30.0, soc_end=80.0)
+        rest = [
+            record(h, load_kwh=1.4, import_price=30.0, soc_start=80.0, soc_end=80.0)
+            for h in range(1, 8)
+        ]
+        records = [unread, *rest]
+        windowed = summarise(records, shadow=self._shadow(soc=80.0))
+
+        seeded = LifetimeTally()
+        seeded.seed(records, self._shadow(soc=10.0))
+        assert seeded.first_soc_start == 80.0
+        assert seeded.self_use_cost == pytest.approx(windowed.self_use_cost)
+
+        live = LifetimeTally()
+        shadow = self._shadow(soc=10.0)
+        for item in records:
+            live.add(item, shadow)
+        assert live.first_soc_start == 80.0
+        assert live.self_use_cost == pytest.approx(windowed.self_use_cost)
+        assert live.shadow_soc == pytest.approx(seeded.shadow_soc)
+
+    def test_a_swapped_baseline_slot_re_bases_the_shadow(self):
+        def reading(soc: float) -> SlotRecord:
+            return record(1, load_kwh=0.3, import_price=20.0, soc_start=soc, soc_end=soc)
+
+        tally = LifetimeTally()
+        shadow = self._shadow(soc=10.0)
+        tally.add(record(0, load_kwh=0.3, import_price=20.0), shadow)
+        tally.add(reading(60.0), shadow)
+        assert tally.first_soc_start == 60.0
+        tally.add(reading(70.0), shadow)
+        assert tally.first_soc_start == 70.0
+        # Live, slot by slot, as the controller itself would have counted it.
+        clean = LifetimeTally()
+        fresh = self._shadow(soc=10.0)
+        clean.add(record(0, load_kwh=0.3, import_price=20.0), fresh)
+        clean.add(reading(70.0), fresh)
+        assert tally.shadow_soc == pytest.approx(clean.shadow_soc)
+        assert tally.self_use_cost == pytest.approx(clean.self_use_cost)
