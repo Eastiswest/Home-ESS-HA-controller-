@@ -657,6 +657,12 @@ def _doing_expr(slot: str = "slot") -> str:
 # horizon the optimiser can plan. Read side by side, their time axes line up.
 CHART_SPAN_HOURS = CHART_LOOKBACK_HOURS + 48
 CHART_SPAN = {"start": "minute", "offset": f"-{CHART_LOOKBACK_HOURS}h"}
+# Past two days ApexCharts labels the axis by date alone, and a plan is read by
+# the hour. One label every six hours, always as a time of day.
+CHART_XAXIS = {
+    "tickAmount": CHART_SPAN_HOURS // 6,
+    "labels": {"datetimeUTC": False, "format": "HH:mm"},
+}
 
 # One hue per chart, stepped by value rather than mixed with a second hue: price
 # is a magnitude, so it gets a sequential ramp, and a negative price gets the one
@@ -696,7 +702,7 @@ def _apex_price_chart(plan_entity: str) -> dict[str, Any]:
             "chart": {"height": 260},
             "legend": {"show": False},
             "grid": {"borderColor": "rgba(127,127,127,0.25)"},
-            "xaxis": {"labels": {"datetimeUTC": False}},
+            "xaxis": dict(CHART_XAXIS),
         },
         "series": [
             {
@@ -782,7 +788,7 @@ def _apex_soc_chart(plan_entity: str, soc_entity: str | None) -> dict[str, Any]:
         "apex_config": {
             "chart": {"height": 220},
             "grid": {"borderColor": "rgba(127,127,127,0.25)"},
-            "xaxis": {"labels": {"datetimeUTC": False}},
+            "xaxis": dict(CHART_XAXIS),
         },
         "series": series,
         "grid_options": {"columns": "full"},

@@ -1863,6 +1863,15 @@ class TestTheTwoChartsShareOneTimeAxis:
         for card in self.apex_cards():
             assert card["graph_span"] == f"{CHART_LOOKBACK_HOURS + 48}h"
 
+    def test_the_axes_show_the_time_of_day(self):
+        """Sixty hours tipped ApexCharts into labelling by date alone, so the
+        axis read "07 Oct ... 08 Oct" and a plan could not be read by the hour."""
+        for card in self.apex_cards():
+            labels = card["apex_config"]["xaxis"]["labels"]
+            assert labels["format"] == "HH:mm"
+            assert labels["datetimeUTC"] is False
+            assert card["apex_config"]["xaxis"]["tickAmount"] >= 8
+
     def test_the_price_chart_draws_the_lookback_from_recent_prices(self):
         """The plan's slots start at now, so without this the price chart's
         first quarter would be blank."""
