@@ -94,10 +94,24 @@ class SlotRecord:
     measured" would report every historic half-hour as a fault.
     """
 
+    pv_measured: bool = True
+    """Whether a solar reading was actually arriving for this half-hour.
+
+    Defaults true, like ``load_measured``, so records written before the field
+    existed are not read as sensor outages.
+    """
+
     coverage: float = 1.0
 
     # -- forecasts made for this slot, before it happened -----------------
     pv_forecast_kwh: float | None = None
+    """The solar forecast the plan was built on, after any recent-form trim."""
+    pv_forecast_raw_kwh: float | None = None
+    """The forecast before the trim: what the sun's recent form is judged on.
+
+    Judged against the trimmed figure the shortfall measures itself away and
+    settles at the square root of the real one.
+    """
     load_forecast_kwh: float | None = None
 
     # -- battery ------------------------------------------------------------

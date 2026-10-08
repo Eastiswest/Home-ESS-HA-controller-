@@ -354,6 +354,7 @@ class SiteState:
     outdoor_temperature: float | None = None
     soc_valid: bool = True
     grid_valid: bool = True
+    pv_valid: bool = True
     """False when no grid power sensor is available, so the zero above means
     "unknown" rather than "balanced". The performance log needs the difference:
     unmetered slots must not be reported as having cost nothing."""

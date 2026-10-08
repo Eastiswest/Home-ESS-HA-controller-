@@ -3922,15 +3922,17 @@ class TestTheDaytimeHedgeAnswersToTheMornings:
 
         now = dt_util.utcnow()
         for day in range(1, days + 1):
-            for half_hour in range(4):
-                start = dt_util.as_local(now).replace(
-                    hour=7, minute=0, second=0, microsecond=0
-                ) - timedelta(days=day)
-                start += timedelta(minutes=30 * half_hour)
+            midnight = dt_util.as_local(now).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=day)
+            # The whole day outside the evening, with the miss at breakfast.
+            for half_hour in range(32):
+                start = midnight + timedelta(minutes=30 * half_hour)
+                heavy = 14 <= half_hour < 18  # 07:00-08:30
                 coordinator.performance_store.log.add(
                     SlotRecord(
                         start=dt_util.as_utc(start),
-                        load_kwh=actual,
+                        load_kwh=actual if heavy else forecast,
                         load_forecast_kwh=forecast,
                         load_measured=True,
                     )
@@ -3992,14 +3994,22 @@ class TestTheSunRunningShortTrimsThePlan:
         return hass.data[DOMAIN][entry.entry_id]
 
     @staticmethod
-    def _record_days(coordinator, actual: float, forecast: float, days: int = 3):
+    def _record_days(
+        coordinator,
+        actual: float,
+        forecast: float,
+        days: int = 3,
+        slots: int = 8,
+        measured: bool = True,
+        raw: float | None = None,
+    ):
         from homeassistant.util import dt as dt_util
 
         from custom_components.ess_controller.performance import SlotRecord
 
         now = dt_util.utcnow()
         for day in range(1, days + 1):
-            for half_hour in range(8):
+            for half_hour in range(slots):
                 start = dt_util.as_local(now).replace(
                     hour=10, minute=0, second=0, microsecond=0
                 ) - timedelta(days=day)
@@ -4009,6 +4019,8 @@ class TestTheSunRunningShortTrimsThePlan:
                         start=dt_util.as_utc(start),
                         pv_kwh=actual,
                         pv_forecast_kwh=forecast,
+                        pv_forecast_raw_kwh=raw,
+                        pv_measured=measured,
                     )
                 )
 
@@ -4026,6 +4038,82 @@ class TestTheSunRunningShortTrimsThePlan:
         coordinator = await self._coordinator(hass)
         self._record_days(coordinator, actual=0.5, forecast=0.4)
         assert coordinator.solar_shortfall_ratio() == 1.0
+
+    async def test_a_sensor_outage_is_not_a_dull_day(self, hass):
+        """Half-hours with no solar reading are left out, not counted as dark."""
+        coordinator = await self._coordinator(hass)
+        self._record_days(coordinator, actual=0.4, forecast=0.4, days=2)
+        self._record_days(coordinator, actual=0.0, forecast=0.4, days=3, measured=False)
+        assert coordinator.solar_shortfall_ratio() == 1.0
+
+    async def test_the_form_is_judged_on_the_untrimmed_forecast(self, hass):
+        """Judged on the trimmed figure the trim measures itself away."""
+        coordinator = await self._coordinator(hass)
+        # The plan carried 0.3 after a trim; the forecaster said 0.4; 0.3 arrived.
+        self._record_days(coordinator, actual=0.3, forecast=0.3, raw=0.4)
+        assert coordinator.solar_shortfall_ratio() == pytest.approx(0.75)
+        assert coordinator.solar_shortfall_share() == pytest.approx(0.75)
+
+    async def test_one_cloudy_half_hour_is_not_a_form(self, hass):
+        from custom_components.ess_controller.forecast.confidence import (
+            MIN_SOLAR_SHORTFALL_SLOTS,
+        )
+
+        coordinator = await self._coordinator(hass)
+        self._record_days(coordinator, actual=0.5, forecast=1.5, days=1, slots=3)
+        assert coordinator.solar_shortfall_ratio() == 1.0
+        self._record_days(
+            coordinator, actual=0.5, forecast=1.5, days=1, slots=MIN_SOLAR_SHORTFALL_SLOTS
+        )
+        assert coordinator.solar_shortfall_ratio() == pytest.approx(0.5)
+
+    async def test_the_plan_records_the_forecast_before_the_trim(self, hass):
+        """So tomorrow's form is judged on what the sun was asked for."""
+        from custom_components.ess_controller import coordinator as coordinator_mod
+        from custom_components.ess_controller.forecast.solar import SolarPrediction
+
+        coordinator = await self._coordinator(hass)
+        self._record_days(coordinator, actual=0.3, forecast=0.4)
+        assert coordinator.solar_shortfall_ratio() == pytest.approx(0.75)
+
+        def _sunny(self_, boundaries, *args, **kwargs):
+            return [SolarPrediction(kwh=0.4, source="test") for _ in boundaries]
+
+        original = coordinator_mod.SolarForecaster.predict_series
+        coordinator_mod.SolarForecaster.predict_series = _sunny
+        try:
+            # Marks for the slots ahead are taken from the plan in hand, so
+            # the first cycle builds it and the second records from it.
+            await coordinator.async_refresh()
+            await coordinator.async_refresh()
+        finally:
+            coordinator_mod.SolarForecaster.predict_series = original
+
+        assert all(s.pv_kwh == pytest.approx(0.3) for s in coordinator.plan.slots)
+        marks = [
+            m for m in coordinator._slot_marks.values() if "pv_forecast_raw_kwh" in m
+        ]
+        assert marks
+        for mark in marks:
+            assert mark["pv_forecast_raw_kwh"] == pytest.approx(0.4)
+            assert mark["pv_forecast_kwh"] == pytest.approx(0.3)
+
+    async def test_an_unavailable_solar_reading_is_not_sampled_as_zero(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        seen: list = []
+        original = coordinator.accumulator.add_sample
+
+        def _spy(now, pv, load, **kwargs):
+            seen.append(pv)
+            return original(now, pv, load, **kwargs)
+
+        coordinator.accumulator.add_sample = _spy
+        site = coordinator._read_site_state(dt_util.utcnow())
+        site.pv_valid = False
+        coordinator._train_from_samples(dt_util.utcnow(), site)
+        assert seen == [None]
 
 
 class TestAPowerCutStopsTheSteering:

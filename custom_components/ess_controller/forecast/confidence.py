@@ -198,6 +198,10 @@ SOLAR_SHORTFALL_FLOOR = 0.5
 # Less forecast sun than this over the window says nothing about the forecast.
 MIN_SOLAR_SHORTFALL_FORECAST_KWH = 1.0
 
+# Daylight half-hours needed before the sun's form is a form rather than one
+# cloud: a fresh log's first midday half-hour can forecast over a kWh alone.
+MIN_SOLAR_SHORTFALL_SLOTS = 12
+
 
 def solar_shortfall_ratio(actual_kwh: float, forecast_kwh: float) -> float:
     """What fraction of its forecast the sun has recently delivered, at most 1.
@@ -220,8 +224,14 @@ def describe(
     measured_error_kwh: float = 0.0,
     daytime_error_kwh: float = 0.0,
     solar_ratio: float = 1.0,
+    solar_share: float | None = None,
 ) -> str:
-    """One line for the diagnostics and the dashboard."""
+    """One line for the diagnostics and the dashboard.
+
+    ``solar_share`` is what the sun actually delivered of its forecast;
+    ``solar_ratio`` is the clipped figure the plan uses. Both are said when
+    they differ, so a sun at 20% is not reported as a sun at 50%.
+    """
     parts: list[str] = []
     allowance = evening_allowance_kwh(confidence, measured_error_kwh)
     if allowance > 0.01:
@@ -238,13 +248,14 @@ def describe(
     daytime = daytime_allowance_kwh(daytime_error_kwh)
     if daytime > 0.01:
         parts.append(
-            f"recent days ran {daytime:.1f} kWh heavier than forecast outside the "
-            f"evening: planning for that much more daytime load"
+            f"recent days ran {-daytime_error_kwh:.1f} kWh heavier than forecast "
+            f"outside the evening: planning for {daytime:.1f} kWh more daytime load"
         )
     if solar_ratio < 0.99:
+        share = solar_ratio if solar_share is None else solar_share
         parts.append(
-            f"the sun has delivered {solar_ratio * 100:.0f}% of its forecast "
-            f"lately: planning for that share of it"
+            f"the sun has delivered {share * 100:.0f}% of its forecast lately: "
+            f"planning for {solar_ratio * 100:.0f}% of it"
         )
     if not parts:
         return "forecasts trusted as they stand"

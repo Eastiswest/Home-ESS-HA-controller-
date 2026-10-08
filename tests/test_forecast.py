@@ -1859,7 +1859,18 @@ class TestTheSunRunningShortTrimsTheForecast:
 
         note = describe(1.0, 0.0, -1.3, 0.74)
         assert "1.3 kWh heavier than forecast outside the evening" in note
-        assert "delivered 74% of its forecast" in note
+        assert "planning for 1.3 kWh more daytime load" in note
+        assert "delivered 74% of its forecast lately: planning for 74% of it" in note
         assert describe(1.0, 0.0, 0.0, 1.0) == "forecasts trusted as they stand"
+
+    def test_the_note_separates_what_was_measured_from_what_is_planned(self):
+        """A house 4.5 kWh heavier is not reported as 3.0 heavier because the
+        hedge is capped at 3.0, and a sun at 20% is not reported as 50%."""
+        from custom_components.ess_controller.forecast.confidence import describe
+
+        note = describe(1.0, 0.0, -4.5, 0.5, solar_share=0.2)
+        assert "ran 4.5 kWh heavier" in note
+        assert "planning for 3.0 kWh more daytime load" in note
+        assert "delivered 20% of its forecast lately: planning for 50% of it" in note
         # The evening wording is unchanged.
         assert "heavier than forecast: planning for" in describe(1.0, -1.2)

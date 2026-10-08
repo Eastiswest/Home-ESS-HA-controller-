@@ -135,6 +135,9 @@ from .const import (
 )
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import (
+    DAYTIME_SLOTS,
+    MIN_SOLAR_SHORTFALL_FORECAST_KWH,
+    MIN_SOLAR_SHORTFALL_SLOTS,
     daytime_correction,
     daytime_uplift,
     evening_uplift,
@@ -352,6 +355,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Per-slot climate uplift, so the temperature dials' contribution can be
         # read off rather than inferred from the size of the bill.
         self._climate_uplift: dict[datetime, float] = {}
+        self._solar_raw: dict[datetime, float] = {}
         self._climate_note: str = ""
         self._plan_error: str | None = None
         self.sessions: list[SessionEvent] = []
@@ -702,16 +706,43 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cushion = min(max(self.settings.cushion_soc, 0.0), room)
         return cushion / 100.0 * max(self.nominal_capacity_kwh(), 0.0)
 
-    def solar_shortfall_ratio(self, days: float = RECENT_EVENINGS_DAYS) -> float:
-        """What share of its forecast the sun has delivered over recent days."""
+    def _solar_form(self, days: float = RECENT_EVENINGS_DAYS) -> tuple[float, float]:
+        """Sun delivered and sun forecast over recent days, in kWh.
+
+        Against the forecast before any trim, or the trim would measure
+        itself. Only half-hours whose solar reading was actually arriving: a
+        sensor outage is not a cloudy day. ``(0, 0)`` until there is a body
+        of daylight to judge from.
+        """
         actual = 0.0
         forecast = 0.0
+        daylight = 0
         for record in self.performance_store.log.window(days):
-            if record.pv_forecast_kwh is None:
+            if not record.pv_measured:
+                continue
+            raw = record.pv_forecast_raw_kwh
+            if raw is None:
+                raw = record.pv_forecast_kwh
+            if raw is None:
                 continue
             actual += record.pv_kwh
-            forecast += record.pv_forecast_kwh
-        return solar_shortfall_ratio(actual, forecast)
+            forecast += raw
+            if raw > 0.0:
+                daylight += 1
+        if daylight < MIN_SOLAR_SHORTFALL_SLOTS:
+            return 0.0, 0.0
+        return actual, forecast
+
+    def solar_shortfall_ratio(self, days: float = RECENT_EVENINGS_DAYS) -> float:
+        """The share of its forecast the plan counts on, after the sun's recent form."""
+        return solar_shortfall_ratio(*self._solar_form(days))
+
+    def solar_shortfall_share(self, days: float = RECENT_EVENINGS_DAYS) -> float | None:
+        """What the sun actually delivered of its forecast, unclipped."""
+        actual, forecast = self._solar_form(days)
+        if forecast < MIN_SOLAR_SHORTFALL_FORECAST_KWH:
+            return None
+        return max(actual, 0.0) / forecast
 
     def solar_forecast_error_kwh(self, days: float = 7.0) -> float:
         """Per-daylight-slot solar forecast error, calibrated at the day level.
@@ -737,7 +768,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         by_day: dict[Any, tuple[float, int]] = {}
         measured = 0
         for record in self.performance_store.log.window(days):
-            if record.pv_error is None:
+            if record.pv_error is None or not record.pv_measured:
                 continue
             if record.pv_kwh <= 0.0 and (record.pv_forecast_kwh or 0.0) <= 0.0:
                 # A dark half-hour agrees with its forecast trivially and says
@@ -829,12 +860,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def daytime_forecast_error_kwh(self, days: float = RECENT_EVENINGS_DAYS) -> float:
         """How wrong the load forecast has been outside the evening, per day.
 
-        The evening's counterpart, measured the same way over the same few
-        days. A heating season starts in the mornings, and a miss there drains
-        the pack before the evening it was provisioned for.
+        The evening's counterpart, measured over the same few days and, like
+        it, against the load the plan was built on -- so the figure is what
+        arrived beyond the hedge, and a persistent miss settles at about half.
+        A heating season starts in the mornings, and a miss there drains the
+        pack before the evening it was provisioned for.
+
+        Per slot and scaled to a day, rather than divided by the days seen:
+        a window measured back from the newest record holds a partial day at
+        each end, and counting those as whole days read a 1.3 kWh miss as 1.0
+        for two thirds of every day.
         """
         errors: list[float] = []
-        days_seen: set[Any] = set()
         for record in self.performance_store.log.window(days):
             local = dt_util.as_local(record.start)
             if is_evening(local.hour) or not record.load_measured:
@@ -843,10 +880,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if error is None:
                 continue
             errors.append(error)
-            days_seen.add(local.date())
-        if not errors or not days_seen:
+        if not errors:
             return 0.0
-        return sum(errors) / len(days_seen)
+        return sum(errors) / len(errors) * DAYTIME_SLOTS
 
     @property
     def horizon_hours(self) -> int:
@@ -1097,6 +1133,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc=soc if soc is not None else 50.0,
             timestamp=now,
             pv_power_kw=pv or 0.0,
+            pv_valid=pv is not None,
             load_power_kw=load or 0.0,
             grid_power_kw=grid or 0.0,
             grid_valid=grid is not None,
@@ -1131,7 +1168,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         completed = self.accumulator.add_sample(
             now,
-            site.pv_power_kw,
+            # Unavailable is not zero: a sensor outage must not teach the
+            # model a dark day or read as the sun failing its forecast.
+            site.pv_power_kw if site.pv_valid else None,
             site.load_power_kw,
             cloud_cover=cloud,
             temperature=site.outdoor_temperature,
@@ -1229,6 +1268,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 future = self._slot_marks.setdefault(slot.start, {})
                 future["pv_forecast_kwh"] = slot.pv_kwh
+                future["pv_forecast_raw_kwh"] = self._solar_raw.get(
+                    slot.start, slot.pv_kwh
+                )
                 future["load_forecast_kwh"] = slot.load_kwh
 
         # Marks are only needed until their slot closes; a few hours is ample.
@@ -1534,8 +1576,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 grid_export_kwh=slot.grid_export_kwh,
                 grid_measured=slot.grid_measured,
                 load_measured=slot.load_measured,
+                pv_measured=slot.pv_measured,
                 coverage=slot.coverage,
                 pv_forecast_kwh=mark.get("pv_forecast_kwh"),
+                pv_forecast_raw_kwh=mark.get("pv_forecast_raw_kwh"),
                 load_forecast_kwh=mark.get("load_forecast_kwh"),
                 soc_start=mark.get("soc_start"),
                 soc_end=mark.get("soc_end"),
@@ -2262,6 +2306,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._climate_uplift = {
             start: demand.climate_uplift_kwh
             for (start, _), demand in zip(boundaries, load_predictions, strict=True)
+        }
+        self._solar_raw = {
+            start: sun.kwh
+            for (start, _), sun in zip(boundaries, solar_predictions, strict=True)
         }
         climate_kwh = sum(self._climate_uplift.values())
         self._climate_note = describe_climate_uplift(
@@ -3261,6 +3309,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.evening_forecast_error_kwh(),
             self.daytime_forecast_error_kwh(),
             self.solar_shortfall_ratio(),
+            self.solar_shortfall_share(),
         )
 
     def solar_learning(self) -> dict[str, Any]:

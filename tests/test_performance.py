@@ -102,6 +102,21 @@ class TestSlotRecordArithmetic:
         assert restored.planned_action == "charge"
         assert restored.controlling is True
 
+    def test_a_solar_outage_is_recorded_as_unmeasured_not_dark(self):
+        data = record(12, pv_kwh=0.0, pv_forecast_kwh=0.8, pv_measured=False).as_dict()
+        loaded = SlotRecord.from_dict(data)
+        assert loaded is not None
+        assert loaded.pv_measured is False
+        # Records from before the field existed were measured as far as anyone knows.
+        del data["pv_measured"]
+        assert SlotRecord.from_dict(data).pv_measured is True
+
+    def test_the_untrimmed_solar_forecast_travels_with_the_record(self):
+        data = record(12, pv_forecast_kwh=0.6, pv_forecast_raw_kwh=0.8).as_dict()
+        loaded = SlotRecord.from_dict(data)
+        assert loaded.pv_forecast_raw_kwh == pytest.approx(0.8)
+        assert loaded.pv_error == pytest.approx(0.6)  # judged on what the plan used
+
     def test_a_record_written_before_the_field_existed_still_loads(self):
         """History outlives the schema, and the upgrade has to survive it.
 
