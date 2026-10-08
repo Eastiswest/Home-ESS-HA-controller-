@@ -2151,3 +2151,156 @@ class TestLeftoverEnergyPaysItsWear:
             OptimiserSettings(),
         )
         assert value == 0.0
+
+
+class TestThePlanKeepsACushion:
+    """Two nights running the plan arrived at its floor hours early.
+
+    Neither was a plan choice: a 2.1 kWh evening and a 2.6 kWh day of unforecast
+    load, against a floor five points above the inverter's reserve. The plan is
+    risk-neutral on a median forecast, and on a tariff with cheap nights a
+    cushion above the floor is nearly free insurance: bought once, carried
+    uncycled, refilled with everything else. It is priced as insurance rather
+    than enforced as a floor, so a dear evening still spends it and the next
+    cheap slot buys it back, and it is released ahead of free electricity.
+    """
+
+    CAPACITY = 22.0
+    MIN_SOC = 20.0
+    CUSHION = 2.2  # ten points of the pack
+
+    @staticmethod
+    def _slots(start_hour: int = 12, free_at: int | None = None) -> list[HorizonSlot]:
+        """Two days from ``start_hour``: 5p nights, 30p evenings, a flat house."""
+        slots = []
+        for index in range(96):
+            start = datetime(2026, 1, 15, start_hour, 0) + timedelta(minutes=30 * index)
+            hour = start.hour
+            if 16 <= hour < 22:
+                price, load = 30.0, 0.4
+            elif hour < 5:
+                price, load = 5.0, 0.2
+            else:
+                price, load = 15.0, 0.2
+            if free_at is not None and index in (free_at, free_at + 1):
+                price = -2.0
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=0.0,
+                    load_kwh=load,
+                )
+            )
+        return slots
+
+    def _plan(self, cushion_kwh: float, slots=None, start_soc: float = 40.0):
+        return optimise(
+            slots if slots is not None else self._slots(),
+            start_soc,
+            make_battery(
+                capacity_kwh=self.CAPACITY,
+                min_soc=self.MIN_SOC,
+                max_charge_kw=6.0,
+                max_discharge_kw=6.0,
+                cycle_cost_per_kwh=1.15,
+            ),
+            make_grid(allow_export=False),
+            OptimiserSettings(floor_cushion_kwh=cushion_kwh),
+        )
+
+    @staticmethod
+    def _evening(plan, day: int) -> list[float]:
+        """Closing charges through 16:00-22:00 of ``day`` (0 or 1) of a noon start."""
+        offset = 8 + 48 * day
+        return [s.soc_end for s in plan.slots[offset : offset + 12]]
+
+    def test_without_a_cushion_the_plan_drains_to_the_floor(self):
+        plan = self._plan(0.0)
+        assert not plan.infeasible
+        assert min(self._evening(plan, 1)) < self.MIN_SOC + 4.0
+
+    def test_an_evening_after_a_cheap_night_is_entered_with_the_cushion(self):
+        plan = self._plan(self.CUSHION)
+        assert not plan.infeasible
+        assert min(self._evening(plan, 1)) >= self.MIN_SOC + 10.0 - 0.5
+        assert any(s.action is SlotAction.CHARGE for s in plan.slots)
+
+    def test_a_dear_evening_is_served_from_the_cushion_not_the_grid(self):
+        """Insurance, not a reserve. With no cheap slot before the evening the
+        cushion is spent on the house -- without a single hold -- and bought
+        back at the night rate for the evening after."""
+        slots = self._slots(start_hour=17)
+        plan = self._plan(self.CUSHION, slots, start_soc=36.0)
+        assert not plan.infeasible
+        evening = plan.slots[:10]
+        assert min(s.soc_end for s in evening) < self.MIN_SOC + 1.0
+        assert not any(s.action is SlotAction.IDLE for s in evening)
+        # Nothing is bought while the battery still has charge above the floor.
+        assert all(
+            s.grid_import_kwh < 0.01 or s.soc_end <= self.MIN_SOC + 0.5 for s in evening
+        )
+        tomorrow = [s.soc_end for s in plan.slots[46:58]]
+        assert min(tomorrow) >= self.MIN_SOC + 10.0 - 0.5
+
+    def test_the_cushion_is_released_ahead_of_free_electricity(self):
+        """Carried into a paid-to-fill window the cushion occupies room worth
+        money, so the half-day before it plans to the bare floor."""
+        slots = self._slots(free_at=76)  # 02:00 on the second night
+        plan = self._plan(self.CUSHION, slots)
+        assert not plan.infeasible
+        # From the second evening up to the window: drained to the floor.
+        into_window = [s.soc_end for s in plan.slots[56:76]]
+        assert min(into_window) < self.MIN_SOC + 1.0
+        kept = self._plan(self.CUSHION)
+        assert min(s.soc_end for s in kept.slots[56:76]) >= self.MIN_SOC + 10.0 - 0.5
+
+    def test_a_pack_below_the_cushion_is_not_made_to_buy_dear(self):
+        """The plan is rebuilt from wherever the battery really is. Below the
+        line, at the evening price, it must wait for the cheap slot like
+        anything else -- the cushion is insurance, not a debt."""
+        slots = self._slots(start_hour=17)
+        plan = self._plan(self.CUSHION, slots, start_soc=self.MIN_SOC + 1.0)
+        assert not plan.infeasible
+        assert plan.slots[0].action is not SlotAction.CHARGE
+        first_charge = next(s for s in plan.slots if s.action is SlotAction.CHARGE)
+        assert first_charge.import_price < 10.0
+
+    def test_on_a_flat_tariff_the_cushion_is_kept(self):
+        """Nothing to buy it back with, so what is there stays."""
+        slots = build_slots([15.0] * 48, load=0.3)
+        plan = self._plan(self.CUSHION, slots, start_soc=40.0)
+        assert not plan.infeasible
+        assert min(s.soc_end for s in plan.slots) >= self.MIN_SOC + 10.0 - 0.5
+        bare = self._plan(0.0, slots, start_soc=40.0)
+        assert min(s.soc_end for s in bare.slots) < self.MIN_SOC + 1.0
+
+    def test_the_price_of_the_cushion_is_not_charged_to_the_plan(self):
+        """A risk price shapes the decision; it is not money spent."""
+        plan = self._plan(self.CUSHION)
+        assert plan.total_cost == pytest.approx(sum(s.cost for s in plan.slots))
+
+    def test_the_floors_follow_the_free_window(self):
+        from custom_components.ess_controller.optimiser.dp import (
+            CUSHION_RELEASE_HOURS,
+            _cushion_levels,
+        )
+
+        slots = self._slots(free_at=40)  # 08:00 on day two
+        floors = _cushion_levels(
+            slots, OptimiserSettings(floor_cushion_kwh=2.2), 100, 0.165
+        )
+        assert floors[0] == 14  # 2.2 kWh in 0.165 kWh steps, rounded up
+        # Released strictly within the lookahead: twelve hours out is not yet.
+        released = int(CUSHION_RELEASE_HOURS * 2)
+        assert floors[40 - released + 1] == 0
+        assert floors[40 - released] == 14
+        assert floors[40] == 0 and floors[41] == 0
+        assert floors[42] == 14
+
+    def test_no_cushion_means_no_floors(self):
+        from custom_components.ess_controller.optimiser.dp import _cushion_levels
+
+        assert _cushion_levels(self._slots(), OptimiserSettings(), 100, 0.165) == [0] * 96

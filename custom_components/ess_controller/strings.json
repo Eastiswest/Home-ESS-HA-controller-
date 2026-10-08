@@ -751,6 +751,9 @@
       "reserve_soc": {
         "name": "Emergency reserve"
       },
+      "cushion_soc": {
+        "name": "Planning cushion"
+      },
       "max_charge_power": {
         "name": "Maximum charge power"
       },

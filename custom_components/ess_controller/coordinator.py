@@ -682,6 +682,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
             solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
+            floor_cushion_kwh=self.cushion_kwh(),
             hold_min_benefit=self.hold_min_benefit,
             min_grid_charge_kwh=float(
                 options.get(CONF_MIN_GRID_CHARGE_KWH, DEFAULT_MIN_GRID_CHARGE_KWH)
@@ -694,6 +695,12 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """The least a hold must save over its slot before it is issued."""
         value = self.options.get(CONF_HOLD_MIN_BENEFIT, DEFAULT_HOLD_MIN_BENEFIT)
         return max(float(value if value is not None else DEFAULT_HOLD_MIN_BENEFIT), 0.0)
+
+    def cushion_kwh(self) -> float:
+        """The planning cushion in energy, held inside the usable window."""
+        room = max(self.settings.max_soc - self.effective_min_soc - 1.0, 0.0)
+        cushion = min(max(self.settings.cushion_soc, 0.0), room)
+        return cushion / 100.0 * max(self.nominal_capacity_kwh(), 0.0)
 
     def solar_shortfall_ratio(self, days: float = RECENT_EVENINGS_DAYS) -> float:
         """What share of its forecast the sun has delivered over recent days."""
@@ -2270,6 +2277,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "evening_allowance_kwh": round(sum(uplift), 3),
             "daytime_allowance_kwh": round(sum(day_uplift), 3),
             "solar_shortfall_ratio": round(sun_ratio, 3),
+            "cushion_kwh": round(self.cushion_kwh(), 3),
             "climate_note": self._climate_note,
         }
         return slots, note

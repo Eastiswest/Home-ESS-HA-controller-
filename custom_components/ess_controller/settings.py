@@ -106,6 +106,13 @@ class RuntimeSettings:
     min_soc: float = DEFAULT_MIN_SOC
     max_soc: float = DEFAULT_MAX_SOC
     reserve_soc: float = DEFAULT_RESERVE_SOC
+    cushion_soc: float = 0.0
+    """Charge the plan keeps above ``min_soc`` unless free electricity is due.
+
+    Insurance against a forecast miss, in percentage points. The inverter is
+    still allowed down to ``reserve_soc`` in self-use, so the house can draw on
+    it; only the plan treats it as a floor.
+    """
     max_charge_kw: float = DEFAULT_MAX_CHARGE_POWER
     max_discharge_kw: float = DEFAULT_MAX_DISCHARGE_POWER
     cycle_cost: float = DEFAULT_CYCLE_COST
@@ -150,6 +157,10 @@ class RuntimeSettings:
         # The hardware reserve sits below the planning floor: the optimiser must
         # never plan into the emergency reserve.
         self.reserve_soc = _clamp(self.reserve_soc, 0.0, self.min_soc)
+        # The cushion must leave something above it to schedule with.
+        self.cushion_soc = _clamp(
+            self.cushion_soc, 0.0, max(self.max_soc - self.min_soc - 1.0, 0.0)
+        )
         self.max_charge_kw = _clamp(self.max_charge_kw, 0.0, 100.0)
         self.max_discharge_kw = _clamp(self.max_discharge_kw, 0.0, 100.0)
         self.cycle_cost = _clamp(self.cycle_cost, 0.0, 100.0)

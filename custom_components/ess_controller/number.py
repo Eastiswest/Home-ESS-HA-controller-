@@ -52,6 +52,30 @@ NUMBERS: tuple[EssNumberDescription, ...] = (
         },
     ),
     EssNumberDescription(
+        key="cushion_soc",
+        translation_key="cushion_soc",
+        name="Planning cushion",
+        icon="mdi:battery-plus-variant",
+        native_unit_of_measurement="%",
+        native_min_value=0,
+        native_max_value=50,
+        native_step=1,
+        mode=NumberMode.BOX,
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.cushion_soc,
+        field="cushion_soc",
+        attributes=lambda c: {
+            "description": (
+                "Charge the plan keeps above the minimum, as insurance against "
+                "a forecast miss. The house can still draw on it: the inverter "
+                "is allowed down to the emergency reserve. Released for the "
+                "half-day before electricity priced at or below zero, so the "
+                "pack has room to be paid to fill."
+            ),
+            "cushion_kwh": round(c.cushion_kwh(), 2),
+        },
+    ),
+    EssNumberDescription(
         key="max_soc",
         translation_key="max_soc",
         name="Maximum state of charge",

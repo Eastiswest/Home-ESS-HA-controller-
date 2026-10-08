@@ -3818,6 +3818,62 @@ class TestTheEveningHedgeAnswersToTheEvenings:
         assert RECENT_EVENINGS_DAYS <= 3.0
 
 
+class TestThePlanningCushion:
+    """Two nights running the plan arrived at its floor hours early, on a
+    forecast miss bigger than the five points between the floor and the
+    inverter's reserve. The cushion is the user's answer: how much the plan
+    should aim to keep in hand above the minimum."""
+
+    ENTITY = "number.ai_ess_controller_planning_cushion"
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_it_is_a_setting_with_a_sensible_default(self, hass):
+        coordinator = await self._coordinator(hass)
+        state = hass.states.get(self.ENTITY)
+        assert state is not None
+        assert float(state.state) == 0.0
+        assert coordinator.optimiser_settings().floor_cushion_kwh == 0.0
+
+    async def test_it_reaches_the_optimiser_in_energy(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(cushion_soc=10.0)
+        expected = 0.10 * coordinator.nominal_capacity_kwh()
+        assert coordinator.optimiser_settings().floor_cushion_kwh == pytest.approx(
+            expected
+        )
+        assert coordinator.diagnostics()["forecast_sources"][
+            "cushion_kwh"
+        ] == pytest.approx(expected, abs=0.001)
+
+    async def test_it_cannot_swallow_the_usable_window(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(
+            min_soc=20.0, max_soc=40.0, cushion_soc=50.0
+        )
+        room = coordinator.settings.max_soc - coordinator.effective_min_soc - 1.0
+        assert (
+            coordinator.cushion_kwh()
+            <= room / 100.0 * coordinator.nominal_capacity_kwh() + 1e-9
+        )
+
+    async def test_it_survives_a_restart(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(cushion_soc=8.0)
+        await coordinator.runtime_store.async_save()
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert hass.data[DOMAIN][entry.entry_id].settings.cushion_soc == 8.0
+
+
 class TestTheDaytimeHedgeAnswersToTheMornings:
     """The evening hedge only ever looked at evenings. The first cold morning of
     the heating season put 1.3 kWh of unforecast load before nine o'clock and

@@ -96,6 +96,12 @@ class TestSanitisation:
         settings = RuntimeSettings(min_soc=15, reserve_soc=40).sanitised()
         assert settings.reserve_soc <= settings.min_soc
 
+    def test_the_cushion_leaves_room_above_it(self):
+        settings = RuntimeSettings(min_soc=20, max_soc=95, cushion_soc=90).sanitised()
+        assert settings.cushion_soc == pytest.approx(74.0)
+        assert RuntimeSettings(cushion_soc=-5).sanitised().cushion_soc == 0.0
+        assert RuntimeSettings(cushion_soc=10).sanitised().cushion_soc == 10.0
+
     def test_negative_power_clamped(self):
         settings = RuntimeSettings(max_charge_kw=-5, max_discharge_kw=-1).sanitised()
         assert settings.max_charge_kw == 0.0

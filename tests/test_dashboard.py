@@ -78,6 +78,7 @@ ALL_KEYS = (
     # numbers
     "min_soc",
     "max_soc",
+    "cushion_soc",
     "reserve_soc",
     "max_charge_power",
     "max_discharge_power",
@@ -135,6 +136,7 @@ BINARY = {
 
 NUMBERS = {
     "min_soc",
+    "cushion_soc",
     "max_soc",
     "reserve_soc",
     "max_charge_power",

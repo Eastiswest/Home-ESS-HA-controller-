@@ -89,6 +89,25 @@ SOLAR_RESERVE_LOOKAHEAD_HOURS = 12.0
 # to make has inverted, so it is capped rather than trusted.
 SOLAR_RESERVE_MAX_SHARE = 0.4
 
+# A planning cushion is insurance against the forecast running heavy, and it
+# is priced as insurance rather than enforced as a floor. Every kWh the plan
+# discharges *into* the cushion costs this share of the slot's import price on
+# top of the energy: cheap enough that a dear evening is still served from the
+# cushion when the house needs it, dear enough that the next cheap slot buys it
+# back. Charged on the discharge, once per kWh, and never on merely being
+# below the line: priced per half-hour it paid to hold off until the end of
+# the evening, and the plan issued holds at 30p to do so. Enforced as a hard
+# floor it showed the house buying at 30p while the battery sat on ten points
+# it was "protecting", which is the hoarding the cushion exists to prevent.
+CUSHION_SHORTFALL_SHARE = 0.10
+
+# Released ahead of free electricity: the one time a carried cushion costs real
+# money is when the pack could have been paid to fill and the cushion was
+# occupying the room, so for the half-day leading into such a window there is
+# no cushion at all.
+CUSHION_RELEASE_HOURS = 12.0
+CUSHION_RELEASE_PRICE = 0.0
+
 
 @dataclass(slots=True)
 class OptimiserSettings:
@@ -112,6 +131,15 @@ class OptimiserSettings:
 
     min_grid_charge_kwh: float = MIN_GRID_CHARGE_KWH
     """The smallest grid purchase a slot may be planned to make on its own."""
+
+    floor_cushion_kwh: float = 0.0
+    """Charge the plan aims to keep above the floor, in kWh.
+
+    Priced, not enforced: see ``CUSHION_SHORTFALL_SHARE``. The inverter is still
+    allowed down to its reserve in self-use, so when the forecast runs heavy
+    the house draws on the cushion rather than the grid. Zero plans to the bare
+    minimum, which is the default.
+    """
 
     solar_headroom_error_kwh: float = 0.0
     """Measured solar forecast error per slot, in kWh.
@@ -660,6 +688,37 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
     return max(sum(s.load_kwh - s.pv_kwh for s in window), 0.0)
 
 
+def _cushion_levels(
+    slots: list[HorizonSlot],
+    settings: OptimiserSettings,
+    levels: int,
+    step: float,
+) -> list[int]:
+    """The level the cushion reaches up to, per slot.
+
+    The cushion level everywhere, except in the slots leading into a window
+    priced at or below ``CUSHION_RELEASE_PRICE``: there it is nothing, so the
+    house drains the cushion through the evening and the pack arrives at the
+    paid-to-fill window with the room to use it.
+    """
+    cushion = max(settings.floor_cushion_kwh, 0.0)
+    if cushion <= 0.0 or step <= 0.0 or not slots:
+        return [0] * len(slots)
+    level = min(math.ceil(cushion / step - EPS), levels)
+    floors: list[int] = []
+    for index, first in enumerate(slots):
+        released = False
+        for slot in slots[index:]:
+            ahead = (slot.start - first.start).total_seconds() / 3600.0
+            if ahead >= CUSHION_RELEASE_HOURS:
+                break
+            if slot.import_price <= CUSHION_RELEASE_PRICE:
+                released = True
+                break
+        floors.append(0 if released else level)
+    return floors
+
+
 def _solar_headroom_levels(
     slots: list[HorizonSlot],
     battery: BatterySpec,
@@ -838,6 +897,7 @@ def optimise(
     values: list[list[float]] = [[] for _ in range(n)] + [future]
 
     headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
+    floors = _cushion_levels(slots, settings, levels, step)
     slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
 
     for i in range(n - 1, -1, -1):
@@ -864,6 +924,11 @@ def optimise(
                 bought = flow.charge_ac_kwh - surplus > EPS
                 priced.append((offset, flow.cost, bought))
         ceiling = headroom[i]
+        floor = floors[i]
+        # What a level discharged into the cushion costs here, on top of the
+        # energy. Sized by this slot's price, so a shortfall is dear where
+        # electricity is.
+        into_cushion = CUSHION_SHORTFALL_SHARE * max(slot.import_price, 0.0) * step
 
         current = [INF] * (levels + 1)
         slot_choices = choices[i]
@@ -881,6 +946,8 @@ def optimise(
                     # than being made to empty itself.
                     continue
                 candidate = cost + future[k]
+                if k < floor and k < j:
+                    candidate += (min(j, floor) - k) * into_cushion
                 # Strictly ``<``, which breaks exact ties towards the more
                 # discharged state. That is deliberate. At a flat price the
                 # terminal value of holding a kWh exactly equals the import it
