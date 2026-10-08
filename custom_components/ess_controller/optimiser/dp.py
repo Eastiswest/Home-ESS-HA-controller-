@@ -534,6 +534,7 @@ def _hold_value(
     step: float,
     battery: BatterySpec,
     span: int,
+    risk_at_cells: float = 0.0,
 ) -> float | None:
     """What the next kWh out of the battery is worth, in price units.
 
@@ -558,6 +559,12 @@ def _hold_value(
     is worth more later than the grid costs now and should be protected; at or
     below it, the battery is the cheaper source and should be left available.
 
+    ``risk_at_cells`` is what the sweep charged, per kWh, for discharging this
+    charge over and above the energy: the cushion's insurance price. The slope
+    does not contain it, because the slope is read off the branch that kept
+    the charge, so a hold the sweep chose for the cushion would otherwise be
+    valued at exactly the import price and never issued.
+
     ``None`` when no slope can be read -- an unreachable level, or a grid with no
     room on either side.
     """
@@ -576,7 +583,9 @@ def _hold_value(
     at_cells = (below - above) / ((high - low) * step)
     # Full wear, matching what the sweep charges an actual discharge now that
     # the allowance is booked entirely on the way out.
-    return (at_cells + battery.cycle_cost_per_kwh) / battery.discharge_efficiency
+    return (
+        at_cells + risk_at_cells + battery.cycle_cost_per_kwh
+    ) / battery.discharge_efficiency
 
 
 def hold_is_worthwhile(
@@ -691,6 +700,7 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
 def _cushion_levels(
     slots: list[HorizonSlot],
     settings: OptimiserSettings,
+    grid: GridSpec,
     levels: int,
     step: float,
 ) -> list[int]:
@@ -699,12 +709,15 @@ def _cushion_levels(
     The cushion level everywhere, except in the slots leading into a window
     priced at or below ``CUSHION_RELEASE_PRICE``: there it is nothing, so the
     house drains the cushion through the evening and the pack arrives at the
-    paid-to-fill window with the room to use it.
+    paid-to-fill window with the room to use it. No release on a site that may
+    not charge from the grid: the room would be made and nothing could fill it.
     """
     cushion = max(settings.floor_cushion_kwh, 0.0)
     if cushion <= 0.0 or step <= 0.0 or not slots:
         return [0] * len(slots)
     level = min(math.ceil(cushion / step - EPS), levels)
+    if not grid.allow_grid_charge:
+        return [level] * len(slots)
     floors: list[int] = []
     for index, first in enumerate(slots):
         released = False
@@ -897,7 +910,7 @@ def optimise(
     values: list[list[float]] = [[] for _ in range(n)] + [future]
 
     headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
-    floors = _cushion_levels(slots, settings, levels, step)
+    floors = _cushion_levels(slots, settings, grid, levels, step)
     slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
 
     for i in range(n - 1, -1, -1):
@@ -1001,7 +1014,12 @@ def optimise(
             / battery.discharge_efficiency
             / step
         )
-        hold_value = _hold_value(values[i + 1], next_level, levels, step, battery, span)
+        risk = 0.0
+        if floors[i] > 0 and next_level <= floors[i]:
+            risk = CUSHION_SHORTFALL_SHARE * max(slot.import_price, 0.0)
+        hold_value = _hold_value(
+            values[i + 1], next_level, levels, step, battery, span, risk
+        )
         # A hold that is protecting nothing should not be expressed as a hold.
         #
         # The plan is a forecast, and the forecast is wrong all day: an oven, a

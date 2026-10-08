@@ -2170,7 +2170,9 @@ class TestThePlanKeepsACushion:
     CUSHION = 2.2  # ten points of the pack
 
     @staticmethod
-    def _slots(start_hour: int = 12, free_at: int | None = None) -> list[HorizonSlot]:
+    def _slots(
+        start_hour: int = 12, free_at: int | None = None, free_price: float = -2.0
+    ) -> list[HorizonSlot]:
         """Two days from ``start_hour``: 5p nights, 30p evenings, a flat house."""
         slots = []
         for index in range(96):
@@ -2183,7 +2185,7 @@ class TestThePlanKeepsACushion:
             else:
                 price, load = 15.0, 0.2
             if free_at is not None and index in (free_at, free_at + 1):
-                price = -2.0
+                price = free_price
             slots.append(
                 HorizonSlot(
                     start=start,
@@ -2278,9 +2280,29 @@ class TestThePlanKeepsACushion:
         assert min(s.soc_end for s in bare.slots) < self.MIN_SOC + 1.0
 
     def test_the_price_of_the_cushion_is_not_charged_to_the_plan(self):
-        """A risk price shapes the decision; it is not money spent."""
-        plan = self._plan(self.CUSHION)
-        assert plan.total_cost == pytest.approx(sum(s.cost for s in plan.slots))
+        """A risk price shapes the decision; it is not money spent. The plan's
+        cost must be the electricity and the wear and nothing else."""
+        plan = self._plan(self.CUSHION, self._slots(start_hour=17), start_soc=36.0)
+        assert min(s.soc_end for s in plan.slots[:10]) < self.MIN_SOC + 1.0, (
+            "the cushion was discharged into, so a risk price was paid"
+        )
+        money = sum(
+            s.grid_import_kwh * s.import_price + max(-s.battery_delta_kwh, 0.0) * 1.15
+            for s in plan.slots
+        )
+        assert plan.total_cost == pytest.approx(money, abs=0.05)
+
+    def test_a_free_session_at_exactly_nothing_releases_the_cushion(self):
+        """A supplier's free-electricity window is priced at exactly 0p."""
+        from custom_components.ess_controller.optimiser.dp import _cushion_levels
+
+        slots = self._slots(free_at=40, free_price=0.0)
+        floors = _cushion_levels(
+            slots, OptimiserSettings(floor_cushion_kwh=2.2), make_grid(), 100, 0.165
+        )
+        assert floors[40] == 0
+        assert floors[39] == 0
+        assert floors[42] == 14
 
     def test_the_floors_follow_the_free_window(self):
         from custom_components.ess_controller.optimiser.dp import (
@@ -2290,7 +2312,7 @@ class TestThePlanKeepsACushion:
 
         slots = self._slots(free_at=40)  # 08:00 on day two
         floors = _cushion_levels(
-            slots, OptimiserSettings(floor_cushion_kwh=2.2), 100, 0.165
+            slots, OptimiserSettings(floor_cushion_kwh=2.2), make_grid(), 100, 0.165
         )
         assert floors[0] == 14  # 2.2 kWh in 0.165 kWh steps, rounded up
         # Released strictly within the lookahead: twelve hours out is not yet.
@@ -2303,4 +2325,45 @@ class TestThePlanKeepsACushion:
     def test_no_cushion_means_no_floors(self):
         from custom_components.ess_controller.optimiser.dp import _cushion_levels
 
-        assert _cushion_levels(self._slots(), OptimiserSettings(), 100, 0.165) == [0] * 96
+        floors = _cushion_levels(
+            self._slots(), OptimiserSettings(), make_grid(), 100, 0.165
+        )
+        assert floors == [0] * 96
+
+    def test_no_release_where_the_grid_may_not_fill_the_room(self):
+        """Making room for free electricity the site is not allowed to buy
+        would drain the cushion for nothing and leave no way to rebuild it."""
+        from custom_components.ess_controller.optimiser.dp import _cushion_levels
+
+        slots = self._slots(free_at=40)
+        floors = _cushion_levels(
+            slots,
+            OptimiserSettings(floor_cushion_kwh=2.2),
+            make_grid(allow_grid_charge=False),
+            100,
+            0.165,
+        )
+        assert floors == [14] * 96
+
+    def test_a_hold_the_sweep_chose_for_the_cushion_is_worth_issuing(self):
+        """On a flat stretch the sweep keeps the cushion by holding the house
+        on the grid. The hold's value is read off the branch that kept the
+        charge, which does not contain the cushion's price, so it came out at
+        exactly the import price and was never issued: the plan line showed
+        the cushion kept while the inverter drained it."""
+        from custom_components.ess_controller.optimiser.dp import hold_is_worthwhile
+
+        slots = build_slots([15.0] * 48, load=0.5)
+        plan = self._plan(self.CUSHION, slots, start_soc=40.0)
+        held = [
+            s
+            for s in plan.slots
+            if s.action is SlotAction.IDLE and s.soc_end <= self.MIN_SOC + 10.5
+        ]
+        assert held, "the cushion is kept by holding"
+        for slot in held:
+            assert slot.hold_value is not None
+            assert slot.hold_value > slot.import_price + 1.0
+            assert hold_is_worthwhile(
+                slot.import_price, slot.hold_value, slot.load_kwh - slot.pv_kwh, 0.5
+            )

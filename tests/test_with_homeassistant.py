@@ -3864,6 +3864,27 @@ class TestThePlanningCushion:
             <= room / 100.0 * coordinator.nominal_capacity_kwh() + 1e-9
         )
 
+    async def test_an_outage_hold_leaves_the_cushion_room_to_sit_in(self, hass):
+        """The settings clamp only knows the configured floor. An outage boost
+        raises the floor the plan is built to, and the cushion must shrink to
+        fit above that or the optimiser is handed a cushion wider than its
+        window."""
+        from custom_components.ess_controller import outage as outage_mod
+
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(
+            min_soc=20.0, max_soc=95.0, cushion_soc=30.0, outage_protection=True
+        )
+        coordinator.outage = outage_mod.OutageAssessment(
+            level=outage_mod.RISK_HIGH, reserve_soc=80.0, reason="storm"
+        )
+        assert coordinator.effective_min_soc == pytest.approx(80.0)
+        room = coordinator.settings.max_soc - coordinator.effective_min_soc - 1.0
+        assert coordinator.cushion_kwh() == pytest.approx(
+            room / 100.0 * coordinator.nominal_capacity_kwh()
+        )
+        assert coordinator.cushion_kwh() < 0.30 * coordinator.nominal_capacity_kwh()
+
     async def test_it_survives_a_restart(self, hass):
         coordinator = await self._coordinator(hass)
         await coordinator.async_update_settings(cushion_soc=8.0)
