@@ -1748,3 +1748,118 @@ class TestTheHedgeIsPerEvening:
         hours, loads = self._two_evenings()
         uplift = evening_uplift(hours, loads, 0.0)
         assert all(u == 0.0 for h, u in zip(hours, uplift, strict=True) if h < 16)
+
+
+class TestADaytimeShortfallIsProvisionedFor:
+    """The evening hedge only ever looked at evenings. The first cold mornings
+    of a heating season put 1.3 kWh of unforecast load before nine o'clock on a
+    real install and the plan arrived at the evening already short."""
+
+    def _allowance(self, measured):
+        from custom_components.ess_controller.forecast.confidence import (
+            daytime_allowance_kwh,
+        )
+
+        return daytime_allowance_kwh(measured)
+
+    def test_a_shortfall_is_added_and_an_over_call_is_not(self):
+        assert self._allowance(-1.3) == pytest.approx(1.3)
+        assert self._allowance(0.0) == 0.0
+        assert self._allowance(0.8) == 0.0
+
+    def test_it_is_capped(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            DAYTIME_HEDGE_CAP_KWH,
+        )
+
+        assert self._allowance(-9.0) == pytest.approx(DAYTIME_HEDGE_CAP_KWH)
+
+    @staticmethod
+    def _two_days():
+        hours = [hour for hour in range(24) for _ in (0, 30)] * 2
+        loads = [0.4] * len(hours)
+        return hours, loads
+
+    def test_each_full_day_gets_the_whole_allowance_outside_the_evening(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            daytime_uplift,
+            is_evening,
+        )
+
+        hours, loads = self._two_days()
+        uplift = daytime_uplift(hours, loads, -1.3)
+        first = sum(uplift[:48])
+        second = sum(uplift[48:])
+        assert first == pytest.approx(1.3)
+        assert second == pytest.approx(1.3)
+        assert all(u == 0.0 for h, u in zip(hours, uplift, strict=True) if is_evening(h))
+
+    def test_it_lands_where_the_load_is(self):
+        from custom_components.ess_controller.forecast.confidence import daytime_uplift
+
+        hours = [6, 7, 8, 9]
+        loads = [0.1, 0.1, 0.6, 0.2]
+        uplift = daytime_uplift(hours, loads, -1.0)
+        assert uplift[2] > uplift[0]
+        assert sum(uplift) == pytest.approx(4 / 32)  # four of a day's 32 daytime slots
+
+    def test_a_day_the_horizon_only_holds_part_of_gets_its_share(self):
+        """The morning that has already happened cannot be provisioned for."""
+        from custom_components.ess_controller.forecast.confidence import (
+            DAYTIME_SLOTS,
+            daytime_uplift,
+        )
+
+        hours = [h for h in [*range(10, 24), *range(0, 10)] for _ in (0, 30)]
+        loads = [0.4] * len(hours)
+        uplift = daytime_uplift(hours, loads, -1.3)
+        today = sum(uplift[:12])  # 10:00-15:30, twelve of the day's daytime slots
+        assert today == pytest.approx(1.3 * 12 / DAYTIME_SLOTS)
+
+    def test_nothing_is_added_without_a_shortfall(self):
+        from custom_components.ess_controller.forecast.confidence import daytime_uplift
+
+        hours, loads = self._two_days()
+        assert daytime_uplift(hours, loads, 0.5) == [0.0] * len(hours)
+
+
+class TestTheSunRunningShortTrimsTheForecast:
+    """Three days delivered 50%, 73% and 78% of forecast while the thirty-day
+    bias read zero: weather, not a model fault, and the learned correction is
+    too slow to follow it. The plan went into each evening sized for sun that
+    had not come."""
+
+    def _ratio(self, actual, forecast):
+        from custom_components.ess_controller.forecast.confidence import (
+            solar_shortfall_ratio,
+        )
+
+        return solar_shortfall_ratio(actual, forecast)
+
+    def test_the_recent_share_delivered_is_the_ratio(self):
+        assert self._ratio(9.1, 12.35) == pytest.approx(0.737, abs=0.001)
+
+    def test_the_sun_beating_its_forecast_is_not_marked_up(self):
+        """That direction is the solar reserve's business."""
+        assert self._ratio(14.0, 12.0) == 1.0
+
+    def test_it_never_halves_the_forecast_on_three_days_evidence(self):
+        from custom_components.ess_controller.forecast.confidence import (
+            SOLAR_SHORTFALL_FLOOR,
+        )
+
+        assert self._ratio(1.0, 12.0) == pytest.approx(SOLAR_SHORTFALL_FLOOR)
+
+    def test_too_little_forecast_sun_says_nothing(self):
+        assert self._ratio(0.0, 0.5) == 1.0
+        assert self._ratio(0.0, 0.0) == 1.0
+
+    def test_the_note_names_both_hedges(self):
+        from custom_components.ess_controller.forecast.confidence import describe
+
+        note = describe(1.0, 0.0, -1.3, 0.74)
+        assert "1.3 kWh heavier than forecast outside the evening" in note
+        assert "delivered 74% of its forecast" in note
+        assert describe(1.0, 0.0, 0.0, 1.0) == "forecasts trusted as they stand"
+        # The evening wording is unchanged.
+        assert "heavier than forecast: planning for" in describe(1.0, -1.2)

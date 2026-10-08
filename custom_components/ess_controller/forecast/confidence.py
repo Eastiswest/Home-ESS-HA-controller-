@@ -129,20 +129,126 @@ def evening_uplift(
     return uplift
 
 
-def describe(confidence: float, measured_error_kwh: float = 0.0) -> str:
+# The most extra daytime load a run of heavy days may provision for. The same
+# ceiling as the evening's, for the same reason: one wild day must not buy a
+# week's worth of insurance.
+DAYTIME_HEDGE_CAP_KWH = 3.0
+
+# Half-hours outside the evening in a day, which is what a day's allowance is
+# spread over when the whole day is ahead.
+DAYTIME_SLOTS = (24 - (EVENING_END_HOUR - EVENING_START_HOUR + 1)) * 2
+
+
+def daytime_allowance_kwh(measured_error_kwh: float) -> float:
+    """Extra daytime load to provision for, given what recent days did.
+
+    ``measured_error_kwh`` is the signed error of the forecast outside the
+    evening, in kWh per day, positive when the forecast has been running high.
+    Only a shortfall counts: an over-call is the daytime correction's business.
+
+    No young-model term. The evening carries that, because a flat default
+    shape is wrong about the evening and roughly right about the rest; what the
+    daytime needs is the feedback. The first cold mornings of a heating season
+    put 1.3 kWh of unforecast load before nine o'clock on a real install, and
+    the evening hedge -- which only ever looked at evenings -- did not move.
+    """
+    return min(max(-measured_error_kwh, 0.0), DAYTIME_HEDGE_CAP_KWH)
+
+
+def daytime_uplift(
+    hours: list[int], loads: list[float], measured_error_kwh: float
+) -> list[float]:
+    """Extra kWh to add to each daytime slot's forecast, same length as the inputs.
+
+    Per day, spread across the slots outside the evening in proportion to the
+    load forecast there, so it lands at breakfast rather than at three in the
+    morning. A day the horizon only holds part of gets its share of the
+    allowance: the morning that has already happened cannot be provisioned for.
+    """
+    allowance = daytime_allowance_kwh(measured_error_kwh)
+    if allowance <= 0.0:
+        return [0.0] * len(loads)
+    days: list[list[int]] = []
+    last_hour: int | None = None
+    for i, hour in enumerate(hours):
+        if is_evening(hour):
+            continue
+        if not days or (last_hour is not None and hour < last_hour):
+            days.append([])
+        days[-1].append(i)
+        last_hour = hour
+    uplift = [0.0] * len(loads)
+    for day in days:
+        share_of_day = min(len(day) / DAYTIME_SLOTS, 1.0)
+        total = sum(loads[i] for i in day)
+        for i in day:
+            share = (loads[i] / total) if total > 0 else (1.0 / len(day))
+            uplift[i] = allowance * share_of_day * share
+    return uplift
+
+
+# How much of a shortfall the sun's recent form may take off the forecast.
+#
+# The floor, not the whole ratio: a forecast cannot be trusted to within a
+# factor of two in either direction on three days' evidence, and planning for
+# half the sun on a day that then delivers all of it costs a kWh or two bought
+# cheap and carried, which is the direction to err in.
+SOLAR_SHORTFALL_FLOOR = 0.5
+
+# Less forecast sun than this over the window says nothing about the forecast.
+MIN_SOLAR_SHORTFALL_FORECAST_KWH = 1.0
+
+
+def solar_shortfall_ratio(actual_kwh: float, forecast_kwh: float) -> float:
+    """What fraction of its forecast the sun has recently delivered, at most 1.
+
+    The learned correction fixes the forecast's systematic bias bucket by
+    bucket and needs days in each to do it. This is the short-term term: three
+    consecutive days delivered 50%, 73% and 78% of forecast on a real install
+    while the thirty-day bias read zero, and the plan went into each evening
+    sized for sun that had not come. One-sided, because the sun beating its
+    forecast is already provided for by the room the solar reserve keeps.
+    """
+    if forecast_kwh < MIN_SOLAR_SHORTFALL_FORECAST_KWH:
+        return 1.0
+    ratio = max(actual_kwh, 0.0) / forecast_kwh
+    return min(max(ratio, SOLAR_SHORTFALL_FLOOR), 1.0)
+
+
+def describe(
+    confidence: float,
+    measured_error_kwh: float = 0.0,
+    daytime_error_kwh: float = 0.0,
+    solar_ratio: float = 1.0,
+) -> str:
     """One line for the diagnostics and the dashboard."""
+    parts: list[str] = []
     allowance = evening_allowance_kwh(confidence, measured_error_kwh)
-    if allowance <= 0.01:
-        return "forecasts trusted as they stand"
-    if measured_error_kwh < -0.01 and doubt(confidence) < 0.5:
-        return (
-            f"recent evenings ran {-measured_error_kwh:.1f} kWh heavier than "
-            f"forecast: planning for {allowance:.1f} kWh more evening load"
+    if allowance > 0.01:
+        if measured_error_kwh < -0.01 and doubt(confidence) < 0.5:
+            parts.append(
+                f"recent evenings ran {-measured_error_kwh:.1f} kWh heavier than "
+                f"forecast: planning for {allowance:.1f} kWh more evening load"
+            )
+        else:
+            parts.append(
+                f"still learning ({confidence * 100:.0f}% of the way): planning for "
+                f"{allowance:.1f} kWh more evening load than forecast"
+            )
+    daytime = daytime_allowance_kwh(daytime_error_kwh)
+    if daytime > 0.01:
+        parts.append(
+            f"recent days ran {daytime:.1f} kWh heavier than forecast outside the "
+            f"evening: planning for that much more daytime load"
         )
-    return (
-        f"still learning ({confidence * 100:.0f}% of the way): planning for "
-        f"{allowance:.1f} kWh more evening load than forecast"
-    )
+    if solar_ratio < 0.99:
+        parts.append(
+            f"the sun has delivered {solar_ratio * 100:.0f}% of its forecast "
+            f"lately: planning for that share of it"
+        )
+    if not parts:
+        return "forecasts trusted as they stand"
+    return "; ".join(parts)
 
 
 # How many measured slots before a bias is a bias rather than a run of weather.

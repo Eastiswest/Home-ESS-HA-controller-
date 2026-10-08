@@ -21,6 +21,9 @@ writes nothing until you arm the `Inverter control` switch.
 - Learns solar and load from your sensors; bins by weather, time and season
 - Hourly solar forecasts from Solcast, Forecast.Solar or any energy-platform
   integration; keeps headroom for the sun to beat its forecast
+- Provisions for recent forecast misses: evenings and daytime that ran heavy,
+  sun that ran short; optional planning cushion above the minimum charge,
+  released ahead of free electricity
 - Octopus Saving Sessions and Power Ups
 - Flexible load shifting with optional appliance switching
 - Storm/outage anticipation; steps back entirely during a power cut (EPS)

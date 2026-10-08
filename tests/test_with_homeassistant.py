@@ -3818,6 +3818,139 @@ class TestTheEveningHedgeAnswersToTheEvenings:
         assert RECENT_EVENINGS_DAYS <= 3.0
 
 
+class TestTheDaytimeHedgeAnswersToTheMornings:
+    """The evening hedge only ever looked at evenings. The first cold morning of
+    the heating season put 1.3 kWh of unforecast load before nine o'clock and
+    the plan arrived at the evening already short."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator.learning_store.model.confidence = lambda: {
+            "load_maturity": 1.0,
+            "solar_maturity": 1.0,
+        }
+        return coordinator
+
+    @staticmethod
+    def _record_mornings(coordinator, actual: float, forecast: float, days: int = 2):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        now = dt_util.utcnow()
+        for day in range(1, days + 1):
+            for half_hour in range(4):
+                start = dt_util.as_local(now).replace(
+                    hour=7, minute=0, second=0, microsecond=0
+                ) - timedelta(days=day)
+                start += timedelta(minutes=30 * half_hour)
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=dt_util.as_utc(start),
+                        load_kwh=actual,
+                        load_forecast_kwh=forecast,
+                        load_measured=True,
+                    )
+                )
+
+    async def test_heavy_mornings_raise_the_daytime_plan(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.forecast.confidence import is_evening
+
+        coordinator = await self._coordinator(hass)
+        assert coordinator.daytime_forecast_error_kwh() == 0.0
+        await coordinator.async_refresh()
+        before = sum(
+            s.load_kwh
+            for s in coordinator.plan.slots
+            if not is_evening(dt_util.as_local(s.start).hour)
+        )
+        # 0.3 kWh a slot heavier over four slots: 1.2 kWh a morning, two days.
+        self._record_mornings(coordinator, actual=0.7, forecast=0.4)
+        assert coordinator.daytime_forecast_error_kwh() == pytest.approx(-1.2, abs=0.01)
+        await coordinator.async_refresh()
+        after = sum(
+            s.load_kwh
+            for s in coordinator.plan.slots
+            if not is_evening(dt_util.as_local(s.start).hour)
+        )
+        # Up to two days' worth of daytime in a 48-hour horizon, the first
+        # of them only partly ahead of now.
+        assert 0.3 < after - before <= 2.4 + 0.01
+        assert (
+            coordinator.diagnostics()["forecast_sources"]["daytime_allowance_kwh"] > 0.3
+        )
+        assert "outside the evening" in coordinator.confidence_note()
+
+    async def test_light_mornings_do_not_lower_it(self, hass):
+        """Over-calling during the day has its own, slower correction."""
+        coordinator = await self._coordinator(hass)
+        self._record_mornings(coordinator, actual=0.2, forecast=0.5)
+        assert coordinator.daytime_forecast_error_kwh() > 0
+        await coordinator.async_refresh()
+        assert (
+            coordinator.diagnostics()["forecast_sources"]["daytime_allowance_kwh"] == 0.0
+        )
+
+
+class TestTheSunRunningShortTrimsThePlan:
+    """Three days delivered 50%, 73% and 78% of forecast while the thirty-day
+    bias read zero. Weather, not a model fault; the plan went into each
+    evening sized for sun that had not come."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _record_days(coordinator, actual: float, forecast: float, days: int = 3):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        now = dt_util.utcnow()
+        for day in range(1, days + 1):
+            for half_hour in range(8):
+                start = dt_util.as_local(now).replace(
+                    hour=10, minute=0, second=0, microsecond=0
+                ) - timedelta(days=day)
+                start += timedelta(minutes=30 * half_hour)
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=dt_util.as_utc(start),
+                        pv_kwh=actual,
+                        pv_forecast_kwh=forecast,
+                    )
+                )
+
+    async def test_the_recent_share_delivered_scales_the_forecast(self, hass):
+        coordinator = await self._coordinator(hass)
+        assert coordinator.solar_shortfall_ratio() == 1.0
+        self._record_days(coordinator, actual=0.3, forecast=0.4)
+        assert coordinator.solar_shortfall_ratio() == pytest.approx(0.75)
+        await coordinator.async_refresh()
+        sources = coordinator.diagnostics()["forecast_sources"]
+        assert sources["solar_shortfall_ratio"] == pytest.approx(0.75)
+        assert "delivered 75% of its forecast" in coordinator.confidence_note()
+
+    async def test_sun_beating_its_forecast_changes_nothing(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._record_days(coordinator, actual=0.5, forecast=0.4)
+        assert coordinator.solar_shortfall_ratio() == 1.0
+
+
 class TestAPowerCutStopsTheSteering:
     """During a power cut the inverter carries the house on its EPS output.
 

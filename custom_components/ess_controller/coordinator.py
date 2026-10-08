@@ -134,7 +134,13 @@ from .const import (
     TERMINAL_MODE_REPLACEMENT,
 )
 from .dashboard import OUTAGE_HOLD_MARK
-from .forecast.confidence import daytime_correction, evening_uplift, is_evening
+from .forecast.confidence import (
+    daytime_correction,
+    daytime_uplift,
+    evening_uplift,
+    is_evening,
+    solar_shortfall_ratio,
+)
 from .forecast.confidence import describe as describe_confidence
 from .forecast.energy import EnergySeries
 from .forecast.load import LoadForecaster, describe_climate_uplift
@@ -689,6 +695,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         value = self.options.get(CONF_HOLD_MIN_BENEFIT, DEFAULT_HOLD_MIN_BENEFIT)
         return max(float(value if value is not None else DEFAULT_HOLD_MIN_BENEFIT), 0.0)
 
+    def solar_shortfall_ratio(self, days: float = RECENT_EVENINGS_DAYS) -> float:
+        """What share of its forecast the sun has delivered over recent days."""
+        actual = 0.0
+        forecast = 0.0
+        for record in self.performance_store.log.window(days):
+            if record.pv_forecast_kwh is None:
+                continue
+            actual += record.pv_kwh
+            forecast += record.pv_forecast_kwh
+        return solar_shortfall_ratio(actual, forecast)
+
     def solar_forecast_error_kwh(self, days: float = 7.0) -> float:
         """Per-daylight-slot solar forecast error, calibrated at the day level.
 
@@ -801,6 +818,28 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0.0
         # Per evening rather than per slot: the allowance is a nightly figure.
         return sum(errors) / len(evenings)
+
+    def daytime_forecast_error_kwh(self, days: float = RECENT_EVENINGS_DAYS) -> float:
+        """How wrong the load forecast has been outside the evening, per day.
+
+        The evening's counterpart, measured the same way over the same few
+        days. A heating season starts in the mornings, and a miss there drains
+        the pack before the evening it was provisioned for.
+        """
+        errors: list[float] = []
+        days_seen: set[Any] = set()
+        for record in self.performance_store.log.window(days):
+            local = dt_util.as_local(record.start)
+            if is_evening(local.hour) or not record.load_measured:
+                continue
+            error = record.load_error
+            if error is None:
+                continue
+            errors.append(error)
+            days_seen.add(local.date())
+        if not errors or not days_seen:
+            return 0.0
+        return sum(errors) / len(days_seen)
 
     @property
     def horizon_hours(self) -> int:
@@ -2155,6 +2194,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         trim = daytime_correction(
             hours, [demand.kwh for demand in load_predictions], bias, measured
         )
+        # ...and the daytime running *heavy*, which the evening hedge cannot
+        # see: the first cold mornings of a heating season put 1.3 kWh of
+        # unforecast load before nine o'clock and the plan arrived at the
+        # evening already short.
+        day_uplift = daytime_uplift(
+            hours,
+            [demand.kwh for demand in load_predictions],
+            self.daytime_forecast_error_kwh(),
+        )
+        # The sun's recent form. Three days at 50-78% of forecast against a
+        # thirty-day bias of zero is weather, not a model fault, and the
+        # learned correction is too slow to follow it.
+        sun_ratio = self.solar_shortfall_ratio()
 
         slots: list[HorizonSlot] = []
         for index, ((start, end), sun, demand) in enumerate(
@@ -2171,8 +2223,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     end=end,
                     import_price=import_price,
                     export_price=export_price,
-                    pv_kwh=sun.kwh,
-                    load_kwh=max(demand.kwh + uplift[index] - trim[index], 0.0),
+                    pv_kwh=sun.kwh * sun_ratio,
+                    load_kwh=max(
+                        demand.kwh + uplift[index] + day_uplift[index] - trim[index],
+                        0.0,
+                    ),
                     # Declared on HorizonSlot from the start and never populated,
                     # which only mattered once there was a forecast worth telling
                     # apart from an announced price.
@@ -2213,6 +2268,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "load_sources": [p.source for p in load_predictions[:8]],
             "climate_uplift_kwh": round(climate_kwh, 3),
             "evening_allowance_kwh": round(sum(uplift), 3),
+            "daytime_allowance_kwh": round(sum(day_uplift), 3),
+            "solar_shortfall_ratio": round(sun_ratio, 3),
             "climate_note": self._climate_note,
         }
         return slots, note
@@ -3192,7 +3249,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def confidence_note(self) -> str:
         """One line on how much the forecasts are being trusted right now."""
         return describe_confidence(
-            self.forecast_confidence(), self.evening_forecast_error_kwh()
+            self.forecast_confidence(),
+            self.evening_forecast_error_kwh(),
+            self.daytime_forecast_error_kwh(),
+            self.solar_shortfall_ratio(),
         )
 
     def solar_learning(self) -> dict[str, Any]:
