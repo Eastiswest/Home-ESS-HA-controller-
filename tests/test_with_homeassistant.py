@@ -1190,6 +1190,124 @@ async def async_setup_component_if_needed(hass) -> None:
     await async_setup_component(hass, DOMAIN, {})
 
 
+class TestStockFollowsThePredictedRefill:
+    """The value of charge carried out of the horizon was read off the cheap
+    end of the horizon itself, so with a 1p slot in sight stock was worth
+    nothing and the plan went lean into every dear spell. The outlook for the
+    days after the horizon now says what the next refill will cost."""
+
+    async def _coordinator(self, hass, monkeypatch, outlook):
+        from homeassistant.setup import async_setup_component
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller import coordinator as coordinator_mod
+        from custom_components.ess_controller.const import CONF_AGILE_PREDICT
+        from custom_components.ess_controller.models import PriceSlot
+        from custom_components.ess_controller.tariff import agile_predict
+
+        horizon: dict[str, float] = {}
+
+        async def fake(session, region, **kwargs):
+            now = dt_util.utcnow()
+            start = now.replace(minute=0, second=0, microsecond=0)
+            horizon_end = now + timedelta(hours=horizon.get("hours", 48.0))
+            slots = []
+            for n in range(48 * 5):
+                slot_start = start + timedelta(minutes=30 * n)
+                ahead = (slot_start - horizon_end).total_seconds() / 3600.0
+                slots.append(
+                    PriceSlot(
+                        start=slot_start,
+                        end=slot_start + timedelta(minutes=30),
+                        price=outlook(ahead),
+                        is_forecast=True,
+                    )
+                )
+            return slots
+
+        monkeypatch.setattr(
+            coordinator_mod, "async_get_clientsession", lambda hass: object()
+        )
+        monkeypatch.setattr(agile_predict, "async_fetch_forecast", fake)
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        hass.config_entries.async_update_entry(
+            entry,
+            options={**entry.options, CONF_AGILE_PREDICT: True, "octopus_region": "C"},
+        )
+        await hass.async_block_till_done()
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        horizon["hours"] = float(coordinator.horizon_hours)
+        return coordinator
+
+    @staticmethod
+    def _dear_then_cheap(ahead_hours: float) -> float:
+        """9p across the horizon, then a 20p day with an 18p cheap end, then a
+        day whose cheapest three hours are 22p. ``ahead_hours`` is measured
+        from the end of the horizon."""
+        if ahead_hours < 0:
+            return 9.0
+        day, hour = divmod(ahead_hours, 24.0)
+        cheap = 1.0 <= hour < 4.0
+        if day < 1:
+            return 18.0 if cheap else 20.0
+        return 22.0 if cheap else 25.0
+
+    async def test_the_outlook_sets_the_refill_price(self, hass, monkeypatch):
+        coordinator = await self._coordinator(hass, monkeypatch, self._dear_then_cheap)
+        await coordinator.async_refresh()
+        price, source = coordinator.refill_price()
+        assert source == "outlook"
+        assert price == pytest.approx(18.0)
+        assert coordinator.optimiser_settings().refill_price == pytest.approx(18.0)
+        state = coordinator.price_forecast
+        assert state["outlook_slots"] >= 96
+        assert state["refill_price"] == pytest.approx(18.0)
+        sources = coordinator.diagnostics()["forecast_sources"]
+        assert sources["refill_price"] == pytest.approx(18.0)
+        assert sources["refill_source"] == "outlook"
+
+    async def test_an_announced_horizon_still_asks_for_the_outlook(
+        self, hass, monkeypatch
+    ):
+        """The default tariff prices the whole horizon, which used to be the
+        reason not to call at all. The days after it are the point now."""
+        coordinator = await self._coordinator(hass, monkeypatch, self._dear_then_cheap)
+        await coordinator.async_refresh()
+        state = coordinator.price_forecast
+        assert state["used"] == 0
+        assert state["outlook_slots"] > 0
+
+    async def test_without_an_outlook_the_tariffs_own_history_answers(
+        self, hass, monkeypatch
+    ):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass, monkeypatch, lambda ahead: 9.0)
+        coordinator._price_outlook = []
+        assert coordinator.refill_price() == (None, "horizon")
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        for day in range(1, 9):
+            midnight = dt_util.as_local(now).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=day)
+            for index in range(48):
+                start = dt_util.as_utc(midnight + timedelta(minutes=30 * index))
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=start,
+                        import_price=12.0 if 2 <= index < 8 else 30.0,
+                    )
+                )
+        price, source = coordinator.refill_price()
+        assert source == "history"
+        assert price == pytest.approx(12.0)
+
+
 class TestAgilePredictSessionFailure:
     """A missing HTTP session must not be able to stop a plan.
 

@@ -1391,7 +1391,7 @@ class TestARealSummerHorizon:
 
         original = dp._terminal_energy_cap
         try:
-            dp._terminal_energy_cap = lambda _slots: 1e9
+            dp._terminal_energy_cap = lambda _slots, _days=1.0: 1e9
             greedy = optimise(
                 slots,
                 soc,
@@ -2111,6 +2111,87 @@ class TestAHoldMustBeWorthAPenny:
         assert hold_is_worthwhile(29.0, 28.0, 5.0, 0.0) is False
         # An unknown value keeps the sweep's own decision.
         assert hold_is_worthwhile(29.0, None, 0.13, 0.5) is True
+
+
+class TestStockIsValuedAtThePredictedRefill:
+    """The cheap end of the horizon assumes tomorrow's refill is as cheap as the
+    cheapest slot in sight. On a volatile tariff that is the assumption that
+    fails: twelve of twenty recorded days had their cheapest three hours above
+    15p, and a pack filled at 4.7p the night before one of them saves about
+    17p a kWh. An outlook of the days after the horizon says which it will be.
+    """
+
+    @staticmethod
+    def _slots() -> list[HorizonSlot]:
+        """Cheap tonight, dear evening, and a tail predicted cheaper still."""
+        prices = [4.7] * 10 + [15.0] * 22 + [30.0] * 12 + [1.0] * 4
+        return build_slots(prices, load=0.25)
+
+    def _plan(self, refill, mode="replacement_cost"):
+        return optimise(
+            self._slots(),
+            25.0,
+            make_battery(min_soc=20.0, max_charge_kw=6.0, cycle_cost_per_kwh=1.15),
+            make_grid(allow_export=False),
+            OptimiserSettings(terminal_mode=mode, refill_price=refill),
+        )
+
+    def test_the_outlook_replaces_the_horizons_cheap_end(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        slots = self._slots()
+        assert _terminal_rate(slots, OptimiserSettings()) == pytest.approx(1.0)
+        assert _terminal_rate(
+            slots, OptimiserSettings(refill_price=20.0)
+        ) == pytest.approx(20.0)
+
+    def test_a_dear_outlook_fills_the_pack_and_a_cheap_one_leaves_it_lean(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        dear = self._plan(20.0)
+        cheap = self._plan(None)
+        assert not dear.infeasible and not cheap.infeasible
+        assert cheap.slots[-1].soc_end < 35.0
+        # Filled to the stock the credit covers: two days of shortfall, which on
+        # this 48-slot horizon is the horizon's own 12 kWh.
+        battery = make_battery(min_soc=20.0)
+        stocked = battery.soc_to_energy(dear.slots[-1].soc_end)
+        assert stocked == pytest.approx(_terminal_energy_cap(self._slots(), 2.0), abs=0.4)
+        assert dear.slots[-1].soc_end > 70.0
+
+    def test_it_is_a_refinement_of_replacement_cost_only(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        slots = self._slots()
+        for mode, expected in (("fixed", 7.0), ("zero", 0.0)):
+            rate = _terminal_rate(
+                slots,
+                OptimiserSettings(
+                    terminal_mode=mode, terminal_rate=7.0, refill_price=20.0
+                ),
+            )
+            assert rate == pytest.approx(expected), mode
+
+    def test_a_negative_outlook_never_makes_a_pack_a_liability(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_rate
+
+        assert _terminal_rate(self._slots(), OptimiserSettings(refill_price=-3.0)) == 0.0
+
+    def test_two_days_of_shortfall_are_credited(self):
+        """A dear spell runs for more than one day; stock for one day only
+        capped the pack at a little over half."""
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        slots = build_slots([20.0] * 96, pv=0.0, load=0.25)
+        assert _terminal_energy_cap(slots, 1.0) == pytest.approx(12.0)
+        assert _terminal_energy_cap(slots, 2.0) == pytest.approx(24.0)
+        assert OptimiserSettings().stock_days == 2.0
+
+    def test_summer_still_credits_nothing(self):
+        from custom_components.ess_controller.optimiser.dp import _terminal_energy_cap
+
+        slots = build_slots([20.0] * 96, pv=0.6, load=0.25)
+        assert _terminal_energy_cap(slots, 2.0) == 0.0
 
 
 class TestLeftoverEnergyPaysItsWear:

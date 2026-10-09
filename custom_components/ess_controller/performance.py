@@ -27,7 +27,7 @@ import csv
 import io
 import logging
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from typing import Any
@@ -561,6 +561,41 @@ class PerformanceLog:
                 ]
             )
         return buffer.getvalue()
+
+
+# A day's cheap end, read from the recorded tariff: the mean of its cheapest
+# three hours, and only for days with most of their half-hours recorded.
+REFILL_WINDOW_SLOTS = 6
+REFILL_MIN_DAY_SLOTS = 40
+REFILL_MIN_DAYS = 7
+
+
+def typical_refill_price(
+    records: list[SlotRecord],
+    *,
+    day_of: Callable[[SlotRecord], Any] | None = None,
+    min_days: int = REFILL_MIN_DAYS,
+) -> float | None:
+    """The median of each recorded day's cheapest three hours, in minor units.
+
+    What a kWh has typically cost to put back on this tariff lately, for when
+    no price outlook can say what it will cost next. The median across days,
+    so a run of negative days does not value every kWh at nothing and a dear
+    week does not value it at the peak. ``None`` with fewer than ``min_days``
+    well-recorded days.
+    """
+    key = day_of or (lambda record: record.start.date())
+    by_day: dict[Any, list[float]] = {}
+    for record in records:
+        by_day.setdefault(key(record), []).append(record.import_price)
+    cheap: list[float] = []
+    for prices in by_day.values():
+        if len(prices) < REFILL_MIN_DAY_SLOTS:
+            continue
+        cheap.append(sum(sorted(prices)[:REFILL_WINDOW_SLOTS]) / REFILL_WINDOW_SLOTS)
+    if len(cheap) < max(min_days, 1):
+        return None
+    return _percentile(cheap, 0.5)
 
 
 def summarise(

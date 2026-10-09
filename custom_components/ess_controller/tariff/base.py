@@ -230,3 +230,49 @@ class ZeroTariffProvider(TariffProvider):
             slots.append(PriceSlot(start=cursor, end=cursor + _SLOT, price=0.0))
             cursor += _SLOT
         return PriceSeries(slots)
+
+
+# What a kWh will cost to put back after the horizon, read from a price outlook.
+#
+# The cheapest three hours of a day, not its minimum: a single predicted free
+# half-hour is not a refill window. Three quarters of a day's slots before a
+# day's cheap end is believed, so a trailing stub of an outlook does not value
+# the whole pack off two slots.
+REFILL_WINDOW_SLOTS = 6
+REFILL_MIN_DAY_SLOTS = 36
+
+
+def cheapest_window_mean(
+    prices: list[float], window: int = REFILL_WINDOW_SLOTS
+) -> float | None:
+    """Mean of the ``window`` lowest prices, or ``None`` with fewer than that."""
+    if len(prices) < max(window, 1):
+        return None
+    return sum(sorted(prices)[:window]) / window
+
+
+def refill_price_from_outlook(
+    slots: Iterable[PriceSlot], after: datetime, days: int = 2
+) -> float | None:
+    """The cheapest chance to refill in the ``days`` after ``after``.
+
+    Each day's cheapest three hours, and the lower of them: stock carried out
+    of the horizon is worth what it would otherwise cost to buy at the next
+    cheap window, and a dear day followed by a cheap one is worth only the
+    cheap one. ``None`` when the outlook does not cover a day well enough.
+    """
+    if days <= 0:
+        return None
+    day = timedelta(days=1)
+    best: float | None = None
+    for index in range(days):
+        start = after + day * index
+        end = start + day
+        prices = [s.price for s in slots if start <= s.start < end]
+        if len(prices) < REFILL_MIN_DAY_SLOTS:
+            continue
+        mean = cheapest_window_mean(prices)
+        if mean is None:
+            continue
+        best = mean if best is None else min(best, mean)
+    return best

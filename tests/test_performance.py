@@ -640,6 +640,68 @@ class TestSummaryCaveats:
         assert not any("from where it started" in note for note in summary.notes)
 
 
+class TestTheTypicalRefillPrice:
+    """When no outlook can say what the next refill will cost, the tariff's
+    own recent days can: the median of each day's cheapest three hours."""
+
+    @staticmethod
+    def _days(cheap_by_day: list[float], slots: int = 48) -> list[SlotRecord]:
+        records = []
+        for day, cheap in enumerate(cheap_by_day):
+            for index in range(slots):
+                hour, minute = divmod(index * 30, 60)
+                price = cheap if 2 <= index < 8 else cheap + 20.0
+                records.append(
+                    SlotRecord(
+                        start=datetime(2026, 2, 1 + day, hour, minute, tzinfo=UTC),
+                        import_price=price,
+                    )
+                )
+        return records
+
+    def test_the_median_of_the_daily_cheap_ends(self):
+        from custom_components.ess_controller.performance import typical_refill_price
+
+        price = typical_refill_price(self._days([3.0, 25.0, 20.0, 1.0, 22.0, 15.0, 18.0]))
+        assert price == pytest.approx(18.0)
+
+    def test_a_run_of_free_days_does_not_make_energy_worthless(self):
+        from custom_components.ess_controller.performance import typical_refill_price
+
+        price = typical_refill_price(
+            self._days([-2.0, -3.0, -1.0, 20.0, 21.0, 19.0, 22.0, 18.0])
+        )
+        assert price == pytest.approx(18.5)
+
+    def test_too_few_days_is_no_answer(self):
+        from custom_components.ess_controller.performance import (
+            REFILL_MIN_DAYS,
+            typical_refill_price,
+        )
+
+        assert typical_refill_price(self._days([10.0] * (REFILL_MIN_DAYS - 1))) is None
+        assert typical_refill_price(self._days([10.0] * REFILL_MIN_DAYS)) == 10.0
+
+    def test_a_patchy_day_does_not_count(self):
+        from custom_components.ess_controller.performance import typical_refill_price
+
+        records = self._days([10.0] * 7) + self._days([1.0], slots=12)
+        assert typical_refill_price(records) == pytest.approx(10.0)
+
+    def test_days_can_be_told_apart_locally(self):
+        from custom_components.ess_controller.performance import typical_refill_price
+
+        records = self._days([10.0] * 7)
+        seen: list = []
+
+        def day_of(record):
+            seen.append(record.start)
+            return record.start.date()
+
+        assert typical_refill_price(records, day_of=day_of) == 10.0
+        assert len(seen) == len(records)
+
+
 class TestGridIntegration:
     """The accumulator has to meter grid flow for any of the money to be real."""
 

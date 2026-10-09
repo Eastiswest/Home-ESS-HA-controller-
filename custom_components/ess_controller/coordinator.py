@@ -184,12 +184,19 @@ from .models import (
     Override,
     Plan,
     PlanSlot,
+    PriceSlot,
     SiteState,
     SlotAction,
     describe_horizon_reach,
 )
 from .optimiser.dp import OptimiserSettings, hold_is_worthwhile, optimise, percentile
-from .performance import PerformanceSummary, SelfUseShadow, SlotRecord, summarise
+from .performance import (
+    PerformanceSummary,
+    SelfUseShadow,
+    SlotRecord,
+    summarise,
+    typical_refill_price,
+)
 from .performance_store import PerformanceStore
 from .runtime import RuntimeSettings, RuntimeStore
 from .sampling import SlotAccumulator, slot_boundaries, slot_start_for
@@ -203,7 +210,7 @@ from .shifting import (
 )
 from .stall import STALL_CYCLES, StallReading, stalled
 from .tariff import agile_predict
-from .tariff.base import PriceSeries
+from .tariff.base import PriceSeries, refill_price_from_outlook
 from .tariff.factory import build_provider
 from .tariff.octopus import OctopusApiError
 
@@ -220,6 +227,13 @@ REDISCOVER_WINDOW = timedelta(minutes=30)
 # Few enough to follow a seasonal shift within days, enough that one odd night
 # does not set the hedge on its own.
 RECENT_EVENINGS_DAYS = 3.0
+
+# How far past the horizon the price outlook is read to value stock carried out
+# of it, and how far back the tariff's own history is read when no outlook can.
+# Two days: a dear spell runs for more than one, and the prediction model is
+# still worth something that far out.
+STOCK_OUTLOOK_DAYS = 2
+REFILL_HISTORY_DAYS = 14
 
 # How many applies to keep for the diagnostics download. Twenty half-hourly-ish
 # cycles is a couple of hours of behaviour: long enough to show a setting that
@@ -364,6 +378,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # when the feature is off, so diagnostics can tell "disabled" from
         # "enabled and failing".
         self.price_forecast: dict[str, Any] | None = None
+        self._price_outlook: list[PriceSlot] = []
+        self._horizon_end: datetime | None = None
         self.outage: outage_mod.OutageAssessment = outage_mod.OutageAssessment()
         self.placements: list[LoadPlacement] = []
         self._slot_marks: dict[datetime, dict[str, Any]] = {}
@@ -687,6 +703,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
             solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
             floor_cushion_kwh=self.cushion_kwh(),
+            refill_price=self.refill_price()[0],
+            stock_days=float(STOCK_OUTLOOK_DAYS),
             hold_min_benefit=self.hold_min_benefit,
             min_grid_charge_kwh=float(
                 options.get(CONF_MIN_GRID_CHARGE_KWH, DEFAULT_MIN_GRID_CHARGE_KWH)
@@ -699,6 +717,29 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """The least a hold must save over its slot before it is issued."""
         value = self.options.get(CONF_HOLD_MIN_BENEFIT, DEFAULT_HOLD_MIN_BENEFIT)
         return max(float(value if value is not None else DEFAULT_HOLD_MIN_BENEFIT), 0.0)
+
+    def refill_price(self) -> tuple[float | None, str]:
+        """What a kWh will cost to put back after the horizon, and who says so.
+
+        The price outlook for the days after the horizon when there is one;
+        the tariff's own recent history when there is not; nothing when
+        neither can answer, which leaves the optimiser reading the horizon's
+        own tail. The value of stock carried out of the horizon rests on this,
+        so the source is reported with it.
+        """
+        if self._horizon_end is not None and self._price_outlook:
+            price = refill_price_from_outlook(
+                self._price_outlook, self._horizon_end, STOCK_OUTLOOK_DAYS
+            )
+            if price is not None:
+                return price, "outlook"
+        price = typical_refill_price(
+            self.performance_store.log.window(REFILL_HISTORY_DAYS),
+            day_of=lambda record: dt_util.as_local(record.start).date(),
+        )
+        if price is not None:
+            return price, "history"
+        return None, "horizon"
 
     def cushion_kwh(self) -> float:
         """The planning cushion in energy, held inside the usable window."""
@@ -2032,6 +2073,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         unreachable third-party service must degrade to persistence, not stop the
         plan.
         """
+        self._price_outlook = []
         if not self.options.get(CONF_AGILE_PREDICT, DEFAULT_AGILE_PREDICT):
             self.price_forecast = None
             return 0
@@ -2042,15 +2084,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return 0
 
         known_end = import_series.known_until(now) or import_series.end or now
-        if known_end >= horizon_end:
-            # Everything is announced already. Still worth scoring the forecast
-            # against reality, but not worth a request to do it.
-            self.price_forecast = {
-                "available": True,
-                "used": 0,
-                "reason": "all announced",
-            }
-            return 0
+        # Asked for past the horizon as well: the days after it are what say
+        # whether stock carried out of it is worth anything, so the request is
+        # worth making even when every slot of the horizon is announced.
+        outlook_end = horizon_end + timedelta(days=STOCK_OUTLOOK_DAYS)
 
         # Even acquiring the session can fail, and an optional price forecast must
         # never be the reason a plan does not happen.
@@ -2072,8 +2109,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             slots = await agile_predict.async_fetch_forecast(
                 session,
                 region,
-                days=agile_predict.days_needed(now, horizon_end),
-                until=horizon_end,
+                days=agile_predict.days_needed(now, outlook_end),
+                until=outlook_end,
             )
         except agile_predict.AgilePredictError as err:
             _LOGGER.warning(
@@ -2092,12 +2129,20 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # is how a units or VAT mismatch announces itself.
         state["accuracy"] = agile_predict.compare_with_actual(slots, list(import_series))
 
-        future = [slot for slot in slots if slot.start >= known_end]
+        future = [slot for slot in slots if known_end <= slot.start < horizon_end]
         if future:
             import_series.merge(future)
             added = len(future)
+        elif known_end >= horizon_end:
+            state["reason"] = "all announced"
         state["used"] = added
         state["until"] = dt_util.as_local(future[-1].end).isoformat() if future else None
+        self._price_outlook = [slot for slot in slots if slot.start >= horizon_end]
+        state["outlook_slots"] = len(self._price_outlook)
+        refill = refill_price_from_outlook(
+            self._price_outlook, horizon_end, STOCK_OUTLOOK_DAYS
+        )
+        state["refill_price"] = None if refill is None else round(refill, 2)
 
         if self.options.get(CONF_AGILE_PREDICT_EXPORT, DEFAULT_AGILE_PREDICT_EXPORT):
             state["export"] = await self._async_forecast_export(
@@ -2144,6 +2189,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> tuple[list[HorizonSlot], str | None]:
         """Assemble the priced, forecast horizon the optimiser will plan over."""
         horizon_end = now + timedelta(hours=self.horizon_hours)
+        self._horizon_end = horizon_end
 
         import_series = PriceSeries()
         export_series = PriceSeries()
@@ -2318,6 +2364,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._climate_note:
             _LOGGER.warning("Load forecast: %s", self._climate_note)
 
+        refill, refill_source = self.refill_price()
         self._diagnostics = {
             "solar_sources": [p.source for p in solar_predictions[:8]],
             "load_sources": [p.source for p in load_predictions[:8]],
@@ -2326,6 +2373,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "daytime_allowance_kwh": round(sum(day_uplift), 3),
             "solar_shortfall_ratio": round(sun_ratio, 3),
             "cushion_kwh": round(self.cushion_kwh(), 3),
+            "refill_price": None if refill is None else round(refill, 2),
+            "refill_source": refill_source,
             "climate_note": self._climate_note,
         }
         return slots, note

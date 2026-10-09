@@ -24,6 +24,9 @@ writes nothing until you arm the `Inverter control` switch.
 - Provisions for recent forecast misses: evenings and daytime that ran heavy,
   sun that ran short; optional planning cushion above the minimum charge,
   released ahead of free electricity
+- Values charge carried past the horizon at the predicted price of the next
+  refill, so a cheap night before a dear spell fills the pack and a cheap
+  spell ahead leaves it lean
 - Octopus Saving Sessions and Power Ups
 - Flexible load shifting with optional appliance switching
 - Storm/outage anticipation; steps back entirely during a power cut (EPS)

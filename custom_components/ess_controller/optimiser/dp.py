@@ -120,6 +120,23 @@ class OptimiserSettings:
     terminal_weight: float = 1.0
     """Scales the value placed on energy left at the end of the horizon."""
 
+    refill_price: float | None = None
+    """What a kWh will cost to put back after the horizon, in minor units.
+
+    Read from a price outlook or the tariff's recent history by the caller.
+    Used by ``replacement_cost`` in place of the horizon's own cheap end, which
+    assumes tomorrow's refill is as cheap as the cheapest slot it can see --
+    the one assumption a volatile tariff breaks. ``None`` keeps the tail rule.
+    """
+
+    stock_days: float = 2.0
+    """Days of forecast shortfall worth crediting at the horizon end.
+
+    Stock carried out of the horizon is spent over the following days, and a
+    dear spell runs for more than one of them; two days of shortfall is the
+    whole usable pack in winter and next to nothing in summer.
+    """
+
     hold_min_benefit: float = 0.5
     """The least a hold must save over its slot, in minor units, to be issued.
 
@@ -658,6 +675,13 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
         return 0.0
     if settings.terminal_mode == TERMINAL_MODE_FIXED:
         return max(settings.terminal_rate, 0.0)
+    if (
+        settings.terminal_mode == TERMINAL_MODE_REPLACEMENT
+        and settings.refill_price is not None
+    ):
+        # The refill will happen after the horizon; an outlook of those days
+        # says what it will cost better than the cheap end of this one does.
+        return max(settings.refill_price, 0.0)
     if not slots:
         return 0.0
     prices = [s.import_price for s in slots]
@@ -669,7 +693,7 @@ def _terminal_rate(slots: list[HorizonSlot], settings: OptimiserSettings) -> flo
     return max(percentile(tail, TERMINAL_REPLACEMENT_FRACTION), 0.0)
 
 
-def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
+def _terminal_energy_cap(slots: list[HorizonSlot], days: float = 1.0) -> float:
     """How much of the battery's charge is worth crediting at the horizon end.
 
     The price of leftover energy was never the real problem; the *quantity* was.
@@ -684,8 +708,8 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
     with no solar, that is the whole pack and the valuation is unchanged. In summer
     it is close to nothing, and the plan stops buying what the sun will give it.
 
-    Measured over the last day rather than the whole horizon because that is the
-    part that speaks to what happens after it ends.
+    Measured over the last ``days`` of the horizon rather than the whole of it
+    because that is the part that speaks to what happens after it ends.
 
     Reads the slots as given. Any allowance for the forecast being wrong is applied
     once, where the horizon is built, so that the energy balance and this cap cannot
@@ -693,7 +717,8 @@ def _terminal_energy_cap(slots: list[HorizonSlot]) -> float:
     """
     if not slots:
         return 0.0
-    window = slots[-min(len(slots), SLOTS_PER_DAY) :]
+    span = max(round(max(days, 0.0) * SLOTS_PER_DAY), 1)
+    window = slots[-min(len(slots), span) :]
     return max(sum(s.load_kwh - s.pv_kwh for s in window), 0.0)
 
 
@@ -811,7 +836,7 @@ def _terminal_terms(
     # pack than spent, and at a 10p allowance a 4p spread bought 7 kWh to sit
     # there. Clamped at zero: a pack is never a liability.
     value = rate * battery.discharge_efficiency - battery.cycle_cost_per_kwh
-    return max(value, 0.0), _terminal_energy_cap(slots)
+    return max(value, 0.0), _terminal_energy_cap(slots, settings.stock_days)
 
 
 def terminal_value(

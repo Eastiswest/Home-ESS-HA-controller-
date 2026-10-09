@@ -530,3 +530,59 @@ class TestOctopusErrorClassification:
 
     def test_a_good_response_returns_the_rate_count(self):
         assert self._run(self._Session(self._Response(200, {"count": 48}))) == 48
+
+
+class TestTheRefillPriceFromAnOutlook:
+    """Stock carried out of the horizon is worth what it would otherwise cost
+    to buy at the next cheap window. A fortnight of predictions says when that
+    is; the cheap end of the horizon itself only says what today looked like."""
+
+    AFTER = datetime(2026, 1, 17, 0, 0, tzinfo=UTC)
+
+    def _day(
+        self, offset: int, flat: float, cheap: float, n: int = 48
+    ) -> list[PriceSlot]:
+        start = self.AFTER + timedelta(days=offset)
+        out = []
+        for index in range(n):
+            price = cheap if 2 <= index < 8 else flat
+            out.append(
+                PriceSlot(
+                    start=start + timedelta(minutes=30 * index),
+                    end=start + timedelta(minutes=30 * (index + 1)),
+                    price=price,
+                    is_forecast=True,
+                )
+            )
+        return out
+
+    def _refill(self, slots, days=2):
+        from custom_components.ess_controller.tariff.base import (
+            refill_price_from_outlook,
+        )
+
+        return refill_price_from_outlook(slots, self.AFTER, days)
+
+    def test_a_days_value_is_its_cheapest_three_hours(self):
+        assert self._refill(self._day(0, 25.0, 18.0)) == pytest.approx(18.0)
+
+    def test_the_cheaper_of_two_days_wins(self):
+        """A dear day followed by a cheap one is only worth the cheap one."""
+        slots = self._day(0, 25.0, 20.0) + self._day(1, 10.0, 3.0)
+        assert self._refill(slots) == pytest.approx(3.0)
+        assert self._refill(slots, days=1) == pytest.approx(20.0)
+
+    def test_a_stub_of_a_day_is_not_believed(self):
+        from custom_components.ess_controller.tariff.base import REFILL_MIN_DAY_SLOTS
+
+        assert self._refill(self._day(0, 25.0, 1.0, n=REFILL_MIN_DAY_SLOTS - 1)) is None
+        assert self._refill(self._day(0, 25.0, 1.0, n=REFILL_MIN_DAY_SLOTS)) is not None
+
+    def test_slots_before_the_horizon_end_are_not_the_outlook(self):
+        before = self._day(-1, 1.0, 0.0)
+        assert self._refill(before) is None
+        assert self._refill(before + self._day(0, 25.0, 18.0)) == pytest.approx(18.0)
+
+    def test_nothing_says_nothing(self):
+        assert self._refill([]) is None
+        assert self._refill(self._day(0, 25.0, 18.0), days=0) is None
