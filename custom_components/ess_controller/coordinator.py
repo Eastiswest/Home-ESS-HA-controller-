@@ -2690,7 +2690,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         is enough to converge in practice, and each pass is one optimiser run.
         """
         self.placements = []
-        if not self.settings.shifting_enabled:
+        # An empty house has no dishwasher to run and no hot water to heat.
+        if not self.settings.shifting_enabled or self.settings.away:
             return
         loads = self.shiftable_loads()
         if not loads:

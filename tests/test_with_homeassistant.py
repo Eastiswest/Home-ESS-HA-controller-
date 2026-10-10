@@ -4430,6 +4430,23 @@ class TestTheAwaySwitch:
         assert record.away is True
         assert seen == []
 
+    async def test_nothing_is_shifted_for_the_empty_house(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(shifting_enabled=True, away=True)
+
+        def _loads():
+            raise AssertionError("the loads were consulted for an empty house")
+
+        coordinator.shiftable_loads = _loads
+        await coordinator._async_shift_loads(self._now_utc(), [], 50.0)
+        assert coordinator.placements == []
+
+    @staticmethod
+    def _now_utc():
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.utcnow()
+
     async def test_the_number_sets_the_empty_house_figure(self, hass):
         coordinator = await self._coordinator(hass)
         entity = "number.ai_ess_controller_away_daily_use"
