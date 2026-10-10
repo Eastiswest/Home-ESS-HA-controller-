@@ -3452,6 +3452,17 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def confidence_note(self) -> str:
         """One line on how much the forecasts are being trusted right now."""
+        if self.settings.away:
+            # The load hedges are off for the empty house; only the sun's
+            # form still applies.
+            sun = describe_confidence(
+                1.0, 0.0, 0.0, self.solar_shortfall_ratio(), self.solar_shortfall_share()
+            )
+            note = (
+                f"away: planning a flat {self.settings.away_daily_load:.1f} kWh a day "
+                "for the empty house, load hedges off"
+            )
+            return note if sun == "forecasts trusted as they stand" else f"{note}; {sun}"
         return describe_confidence(
             self.forecast_confidence(),
             self.evening_forecast_error_kwh(),

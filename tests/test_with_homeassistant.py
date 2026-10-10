@@ -4372,6 +4372,40 @@ class TestTheAwaySwitch:
         assert coordinator.daytime_forecast_error_kwh() < 0.0
         assert coordinator.daytime_load_bias_kwh()[1] == 12
 
+    async def test_the_flat_plan_carries_no_hedge_or_trim(self, hass):
+        """With evidence of a daytime over-call and heavy evenings on the log,
+        the plan at home is trimmed and hedged; the empty house gets the flat
+        figure and nothing else."""
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        self._heavy(coordinator, 18, away=False)
+        now = dt_util.utcnow()
+        for index in range(60):  # a week of daytime over-call
+            start = dt_util.as_local(now).replace(
+                hour=10, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1 + index // 10, minutes=30 * (index % 10))
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=dt_util.as_utc(start),
+                    load_kwh=0.2,
+                    load_forecast_kwh=0.5,
+                    load_measured=True,
+                )
+            )
+        await coordinator.async_refresh()
+        assert coordinator.diagnostics()["forecast_sources"]["evening_allowance_kwh"] > 0
+        await coordinator.async_update_settings(away=True, away_daily_load=4.8)
+        await coordinator.async_refresh()
+        full = [s for s in coordinator.plan.slots if s.duration_hours == 0.5]
+        assert full and all(s.load_kwh == pytest.approx(0.1) for s in full)
+        sources = coordinator.diagnostics()["forecast_sources"]
+        assert sources["evening_allowance_kwh"] == 0.0
+        assert sources["daytime_allowance_kwh"] == 0.0
+        assert "away: planning a flat 4.8 kWh" in coordinator.confidence_note()
+
     async def test_a_half_hour_away_for_any_part_of_it_is_away(self, hass):
         """The household arrives at ten past; the plan had forecast that
         half-hour for an empty house. Labelled home at the close it was the
