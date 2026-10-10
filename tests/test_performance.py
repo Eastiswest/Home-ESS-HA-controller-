@@ -711,13 +711,36 @@ class TestAwayAndThrottledHalfHours:
     the house load, so the solar reading is what was allowed, not what the sun
     could have done."""
 
-    def test_the_flag_travels_with_the_record(self):
-        data = record(12, away=True).as_dict()
+    def test_the_flags_travel_with_the_record(self):
+        data = record(12, away=True, pv_curtailed=True).as_dict()
         loaded = SlotRecord.from_dict(data)
         assert loaded is not None
         assert loaded.away is True
-        del data["away"]
-        assert SlotRecord.from_dict(data).away is False
+        assert loaded.pv_curtailed is True
+        for name in ("away", "pv_curtailed"):
+            del data[name]
+        loaded = SlotRecord.from_dict(data)
+        assert loaded.away is False and loaded.pv_curtailed is False
+
+    def test_a_throttled_reading_is_no_forecast_error(self):
+        clipped = record(12, pv_kwh=0.2, pv_forecast_kwh=0.9, pv_curtailed=True)
+        assert clipped.pv_error is None
+        genuine = record(12, pv_kwh=0.2, pv_forecast_kwh=0.9)
+        assert genuine.pv_error == pytest.approx(0.7)
+
+    def test_the_summary_leaves_throttled_slots_out_of_the_solar_error(self):
+        records = [
+            record(10, pv_kwh=0.5, pv_forecast_kwh=0.5, grid_measured=True),
+            record(
+                11, pv_kwh=0.1, pv_forecast_kwh=0.9, pv_curtailed=True, grid_measured=True
+            ),
+        ]
+        summary = summarise(records)
+        assert summary.pv_forecast_slots == 1
+        assert summary.pv_mae == pytest.approx(0.0)
+        assert summary.curtailed_slots == 1
+        assert any("throttled by a full battery" in note for note in summary.notes)
+        assert summary.as_dict()["window"]["solar_throttled_slots"] == 1
 
     def test_away_slots_are_counted_and_declared(self):
         records = [

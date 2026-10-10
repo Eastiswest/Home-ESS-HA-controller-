@@ -100,6 +100,13 @@ class SlotRecord:
     Defaults true, like ``load_measured``, so records written before the field
     existed are not read as sensor outages.
     """
+    pv_curtailed: bool = False
+    """Whether the array was throttled to the house for this half-hour.
+
+    With export refused the inverter can only generate what the house and the
+    pack will take, so once the pack is at its ceiling the reading is the
+    load, not the sun. Such a half-hour says nothing about the forecast.
+    """
     away: bool = False
     """Recorded while nobody was home: real money, but not the house's habits."""
 
@@ -157,8 +164,12 @@ class SlotRecord:
 
     @property
     def pv_error(self) -> float | None:
-        """Signed forecast error: positive means the forecast was too high."""
-        if self.pv_forecast_kwh is None:
+        """Signed forecast error: positive means the forecast was too high.
+
+        ``None`` for a throttled half-hour: the array made what it was allowed
+        to, which is no comment on what the forecast said it could.
+        """
+        if self.pv_forecast_kwh is None or self.pv_curtailed:
             return None
         return self.pv_forecast_kwh - self.pv_kwh
 
@@ -320,6 +331,7 @@ class PerformanceSummary:
     compared_slots: int = 0
     followed_slots: int = 0
     away_slots: int = 0
+    curtailed_slots: int = 0
 
     cycle_cost: float = 0.0
     usable_kwh: float = 0.0
@@ -415,6 +427,7 @@ class PerformanceSummary:
                 "last": self.last.isoformat() if self.last else None,
                 "grid_metered_slots": self.grid_measured_slots,
                 "away_slots": self.away_slots,
+                "solar_throttled_slots": self.curtailed_slots,
             },
             "energy_kwh": {
                 "solar": r(self.pv_kwh, 3),
@@ -643,6 +656,8 @@ def summarise(
             summary.controlled_slots += 1
         if record.away:
             summary.away_slots += 1
+        if record.pv_curtailed:
+            summary.curtailed_slots += 1
         followed = record.followed_plan
         if followed is not None:
             summary.compared_slots += 1
@@ -713,6 +728,11 @@ def _add_caveats(
         summary.notes.append(
             f"{summary.away_slots} of {summary.slots} slots were recorded while "
             "away: real money, left out of the load model and the hedges"
+        )
+    if summary.curtailed_slots:
+        summary.notes.append(
+            f"{summary.curtailed_slots} slots had the array throttled by a full "
+            "battery, so their solar reading is not counted as forecast error"
         )
     if summary.controlled_slots == 0:
         summary.notes.append(

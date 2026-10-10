@@ -29,6 +29,8 @@ writes nothing until you arm the `Inverter control` switch.
   spell ahead leaves it lean
 - Away switch: stops load learning, plans for the empty house, keeps away
   days out of the hedges; flip it from a presence automation
+- Knows when a full battery has throttled the array, and keeps those
+  half-hours out of solar learning and the solar hedges
 - Octopus Saving Sessions and Power Ups
 - Flexible load shifting with optional appliance switching
 - Storm/outage anticipation; steps back entirely during a power cut (EPS)

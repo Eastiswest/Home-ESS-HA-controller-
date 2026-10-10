@@ -241,6 +241,11 @@ RECENT_EVENINGS_DAYS = 3.0
 STOCK_OUTLOOK_DAYS = 2
 REFILL_HISTORY_DAYS = 14
 
+# How close to its ceiling the battery must have been for a self-sufficient
+# half-hour to be read as the array throttled rather than the sun delivering
+# exactly what the house wanted. Two points: the reading is whole percent.
+FULL_SOC_MARGIN = 2.0
+
 # How many applies to keep for the diagnostics download. Twenty half-hourly-ish
 # cycles is a couple of hours of behaviour: long enough to show a setting that
 # was written once and never cleared, short enough not to bloat the file.
@@ -780,7 +785,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         forecast = 0.0
         daylight = 0
         for record in self.performance_store.log.window(days):
-            if not record.pv_measured:
+            if not record.pv_measured or record.pv_curtailed:
                 continue
             raw = record.pv_forecast_raw_kwh
             if raw is None:
@@ -1252,7 +1257,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # the sun does not shine, at whatever time of day the work happened.
             if not slot.load_measured and not slot.pv_measured:
                 continue
-            if slot.pv_measured:
+            # A throttled array made what it was allowed to, not what it could.
+            if slot.pv_measured and not record.pv_curtailed:
                 model.observe_solar(
                     SolarObservation(
                         month=local.month,
@@ -1611,6 +1617,29 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "learning_observations": self.learning_store.model.solar_observations,
         }
 
+    def _pv_curtailed(
+        self, record: SlotRecord, start_soc: float | None, end_soc: float | None
+    ) -> bool:
+        """Whether the array was throttled to the house for this half-hour.
+
+        With export refused the inverter can only generate what the house and
+        the pack will take, so once the pack is at its ceiling it clips the
+        array to the load and the reading says nothing about the sun. The
+        signature is a half-hour that imported and exported nothing while the
+        battery sat at its limit. A cloudy half-hour at a full pack imports the
+        shortfall, so its reading is genuine and it is not flagged.
+        """
+        if not record.grid_measured or record.pv_kwh <= 0.05:
+            return False
+        if record.grid_export_kwh > 0.02:
+            return False
+        if record.grid_import_kwh > max(0.02, 0.1 * record.load_kwh):
+            return False
+        readings = [soc for soc in (start_soc, end_soc) if soc is not None]
+        if not readings:
+            return False
+        return max(readings) >= self.settings.max_soc - FULL_SOC_MARGIN
+
     def _record_completed(self, completed: list[Any]) -> list[SlotRecord]:
         """Turn closed half-hours into performance records, and return them."""
         records: list[SlotRecord] = []
@@ -1676,6 +1705,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     record.battery_charge_kwh = delta
                 else:
                     record.battery_discharge_kwh = -delta
+            record.pv_curtailed = self._pv_curtailed(record, start_soc, end_soc)
             self.performance_store.log.add(record)
             self.performance_store.lifetime.add(record, shadow)
             records.append(record)

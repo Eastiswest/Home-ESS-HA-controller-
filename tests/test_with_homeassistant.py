@@ -4385,6 +4385,108 @@ class TestTheAwaySwitch:
         assert attributes["away_daily_load_kwh"] == 3.0
 
 
+class TestAThrottledArrayIsNotTheSun:
+    """With export refused, a full pack clips the array to the house load. The
+    reading is what the inverter allowed, not what the sun could have done,
+    and it was being learned as the array's performance and counted as the
+    forecast running high."""
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _slot(start, *, pv=0.4, load=0.2, grid_import=0.0, grid_export=0.0):
+        from custom_components.ess_controller.sampling import CompletedSlot
+
+        return CompletedSlot(
+            start=start,
+            end=start + timedelta(minutes=30),
+            pv_kwh=pv,
+            load_kwh=load,
+            coverage=1.0,
+            grid_measured=True,
+            grid_import_kwh=grid_import,
+            grid_export_kwh=grid_export,
+            forecast_kwh=0.9,
+        )
+
+    @staticmethod
+    def _now():
+        from homeassistant.util import dt as dt_util
+
+        return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+
+    async def test_self_sufficient_at_a_full_pack_is_a_throttled_array(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {
+            "soc_start": 95.0,
+            "soc_end": 95.0,
+            "pv_forecast_kwh": 0.9,
+        }
+        (record,) = coordinator._record_completed([self._slot(start)])
+        assert record.pv_curtailed is True
+        assert record.pv_error is None
+
+    async def test_a_cloudy_half_hour_at_a_full_pack_is_genuine(self, hass):
+        """The house needed more than the sun gave, so nothing was clipped."""
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 95.0, "soc_end": 95.0}
+        (record,) = coordinator._record_completed(
+            [self._slot(start, pv=0.1, load=0.4, grid_import=0.3)]
+        )
+        assert record.pv_curtailed is False
+
+    async def test_a_pack_with_room_is_not_throttling(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 60.0, "soc_end": 61.0}
+        (record,) = coordinator._record_completed([self._slot(start)])
+        assert record.pv_curtailed is False
+
+    async def test_an_exporting_site_is_not_throttling(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        coordinator._slot_marks[start] = {"soc_start": 95.0, "soc_end": 95.0}
+        (record,) = coordinator._record_completed([self._slot(start, grid_export=0.2)])
+        assert record.pv_curtailed is False
+
+    async def test_a_throttled_reading_is_not_learned_or_held_against_the_sun(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        seen: list = []
+        coordinator.learning_store.model.observe_solar = lambda obs: seen.append(obs.kwh)
+
+        start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=1
+        )
+        for minutes in (0, 10, 20, 31):
+            now = start + timedelta(minutes=minutes)
+            site = coordinator._read_site_state(now)
+            site.soc, site.soc_valid = 95.0, True
+            site.pv_power_kw, site.pv_valid = 0.8, True
+            site.load_power_kw = 0.8
+            site.grid_power_kw, site.grid_valid = 0.0, True
+            # The cycle notes the charge either side of the slot, then learns.
+            coordinator._note_slot_state(now, site)
+            coordinator._train_from_samples(now, site)
+
+        record = coordinator.performance_store.log.records[-1]
+        assert record.pv_curtailed is True
+        assert seen == [], "a clipped reading was learned as the array's output"
+        # And the sun's recent form ignores it: 0.4 made against 0.9 forecast
+        # would otherwise read as a 56% shortfall.
+        assert coordinator.solar_shortfall_ratio() == 1.0
+
+
 class TestAPowerCutStopsTheSteering:
     """During a power cut the inverter carries the house on its EPS output.
 
