@@ -2241,6 +2241,18 @@ class TestTheCurrentSlotDoesNotChurn:
     def _slot(coordinator, now):
         return coordinator.plan.slot_at(now)
 
+    @staticmethod
+    def _now(coordinator):
+        """A moment inside the plan's *second* slot.
+
+        Taken from the plan, not the wall clock, and from the second slot
+        rather than the first: the first runs from now to the half-hour
+        boundary and can be shorter than the five or six minutes these tests
+        step forward by, so for the last minutes of every half-hour the
+        stepped-forward moment fell into the next slot and a fresh decision.
+        """
+        return coordinator.plan.slots[1].start + timedelta(minutes=1)
+
     async def test_a_hold_judged_once_is_not_rejudged_every_cycle(self, hass):
         """The write-side hold check ran *after* the commitment, so a hold right
         on the half-penny bar was re-judged every five minutes against a hold
@@ -2251,7 +2263,7 @@ class TestTheCurrentSlotDoesNotChurn:
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         slot = self._slot(coordinator, now)
         slot.action = SlotAction.IDLE
         slot.pv_kwh = 0.0
@@ -2274,7 +2286,7 @@ class TestTheCurrentSlotDoesNotChurn:
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         slot = self._slot(coordinator, now)
         slot.action = SlotAction.IDLE
         slot.pv_kwh = 0.0
@@ -2298,7 +2310,7 @@ class TestTheCurrentSlotDoesNotChurn:
         # the refresh let a half-hour boundary fall between the two, so the slot
         # the test reasoned about was not the slot the command was committed to
         # -- and the suite failed for a minute either side of every :00 and :30.
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         slot = self._slot(coordinator, now)
         assert slot is not None
         first = coordinator._resolve_command(now).action
@@ -2318,7 +2330,7 @@ class TestTheCurrentSlotDoesNotChurn:
         # the refresh let a half-hour boundary fall between the two, so the slot
         # the test reasoned about was not the slot the command was committed to
         # -- and the suite failed for a minute either side of every :00 and :30.
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         first = coordinator._resolve_command(now).action
 
         later = coordinator.plan.slots[2]
@@ -2336,7 +2348,7 @@ class TestTheCurrentSlotDoesNotChurn:
         # the refresh let a half-hour boundary fall between the two, so the slot
         # the test reasoned about was not the slot the command was committed to
         # -- and the suite failed for a minute either side of every :00 and :30.
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         first = coordinator._resolve_command(now).action
         slot = self._slot(coordinator, now)
         other = next(a for a in SlotAction if a is not first)
@@ -2357,7 +2369,7 @@ class TestTheCurrentSlotDoesNotChurn:
         # the refresh let a half-hour boundary fall between the two, so the slot
         # the test reasoned about was not the slot the command was committed to
         # -- and the suite failed for a minute either side of every :00 and :30.
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         first = coordinator._resolve_command(now).action
 
         # A commitment to something the plan does not want.
@@ -2388,7 +2400,7 @@ class TestTheCurrentSlotDoesNotChurn:
 
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         first = coordinator._resolve_command(now).action
 
         # A fresh plan for the same half-hour, six minutes later, wanting
@@ -2454,7 +2466,7 @@ class TestTheCurrentSlotDoesNotChurn:
         """
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         first = coordinator._resolve_command(now)
 
         # The rebuild hands back the same half-hour with a different rate, as it
@@ -2470,7 +2482,7 @@ class TestTheCurrentSlotDoesNotChurn:
     async def test_a_new_slot_gets_a_fresh_rate(self, hass):
         coordinator = await self._coordinator(hass)
         await coordinator.async_refresh()
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         coordinator._resolve_command(now)
         later = coordinator.plan.slots[2]
         later.charge_ac_kwh = 4.321 * later.duration_hours
@@ -2489,7 +2501,7 @@ class TestTheCurrentSlotDoesNotChurn:
         # the refresh let a half-hour boundary fall between the two, so the slot
         # the test reasoned about was not the slot the command was committed to
         # -- and the suite failed for a minute either side of every :00 and :30.
-        now = coordinator.plan.slots[0].start + timedelta(minutes=1)
+        now = self._now(coordinator)
         coordinator._resolve_command(now)
         await coordinator.async_set_override(SlotAction.CHARGE, timedelta(minutes=30))
         command = coordinator._resolve_command(ha_dt.utcnow())
