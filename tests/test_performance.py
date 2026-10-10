@@ -742,6 +742,38 @@ class TestAwayAndThrottledHalfHours:
         assert any("throttled by a full battery" in note for note in summary.notes)
         assert summary.as_dict()["window"]["solar_throttled_slots"] == 1
 
+    def test_the_flags_reach_the_csv(self):
+        log = PerformanceLog()
+        log.add(record(12, away=True, pv_curtailed=True))
+        rows = list(csv.reader(io.StringIO(log.to_csv())))
+        assert rows[1][CSV_COLUMNS.index("away")] == "True"
+        assert rows[1][CSV_COLUMNS.index("pv_curtailed")] == "True"
+        assert rows[1][CSV_COLUMNS.index("pv_measured")] == "True"
+
+    def test_the_lifetime_total_counts_them_too(self):
+        tally = LifetimeTally()
+        shadow = SelfUseShadow(
+            soc=50.0,
+            capacity_kwh=10.0,
+            min_soc=10.0,
+            max_soc=90.0,
+            max_charge_kw=3.0,
+            max_discharge_kw=3.0,
+        )
+        tally.add(record(10, pv_kwh=0.5, pv_forecast_kwh=0.5), shadow)
+        tally.add(record(11, pv_kwh=0.1, pv_forecast_kwh=0.9, pv_curtailed=True), shadow)
+        tally.add(record(12, load_kwh=0.1, away=True), shadow)
+        summary = tally.summary()
+        assert summary.away_slots == 1
+        assert summary.curtailed_slots == 1
+        assert summary.pv_forecast_slots == 1
+        assert any("while away" in note for note in summary.notes)
+        assert any("throttled" in note for note in summary.notes)
+        import json
+
+        restored = LifetimeTally.from_dict(json.loads(json.dumps(tally.as_dict())))
+        assert restored.summary().as_dict()["window"]["away_slots"] == 1
+
     def test_away_slots_are_counted_and_declared(self):
         records = [
             record(h, load_kwh=0.1, away=h < 3, grid_measured=True) for h in range(6)

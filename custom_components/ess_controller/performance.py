@@ -222,6 +222,9 @@ CSV_COLUMNS: tuple[str, ...] = (
     "applied_action",
     "controlling",
     "coverage",
+    "pv_measured",
+    "pv_curtailed",
+    "away",
     "cost",
     "no_battery_cost",
 )
@@ -801,6 +804,8 @@ _TALLY_COUNTS: tuple[str, ...] = (
     "followed_slots",
     "pv_forecast_slots",
     "load_forecast_slots",
+    "away_slots",
+    "curtailed_slots",
 )
 _TALLY_SUMS: tuple[str, ...] = (
     *_TALLY_COUNTS,
@@ -848,6 +853,8 @@ class LifetimeTally:
     followed_slots: int = 0
     pv_forecast_slots: int = 0
     load_forecast_slots: int = 0
+    away_slots: int = 0
+    curtailed_slots: int = 0
     pv_kwh: float = 0.0
     load_kwh: float = 0.0
     grid_import_kwh: float = 0.0
@@ -921,6 +928,8 @@ class LifetimeTally:
             "followed_slots": int(bool(followed)),
             "pv_forecast_slots": int(pv_error is not None),
             "load_forecast_slots": int(load_error is not None),
+            "away_slots": int(record.away),
+            "curtailed_slots": int(record.pv_curtailed),
             "pv_kwh": record.pv_kwh,
             "load_kwh": record.load_kwh,
             "grid_import_kwh": record.grid_import_kwh,
@@ -1011,6 +1020,8 @@ class LifetimeTally:
             "followed_slots",
             "pv_forecast_slots",
             "load_forecast_slots",
+            "away_slots",
+            "curtailed_slots",
             "pv_kwh",
             "load_kwh",
             "grid_import_kwh",
