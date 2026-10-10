@@ -178,7 +178,7 @@ class RuntimeSettings:
         )
         self.battery_expected_cycles = _clamp(self.battery_expected_cycles, 0.0, 20_000.0)
         self.default_daily_load = _clamp(self.default_daily_load, 0.0, 500.0)
-        self.away_daily_load = _clamp(self.away_daily_load, 0.0, 100.0)
+        self.away_daily_load = _clamp(self.away_daily_load, 0.0, 50.0)
         self.away = bool(self.away)
         self.cooling_rate = _clamp(self.cooling_rate, 0.0, 10.0)
         self.heating_rate = _clamp(self.heating_rate, 0.0, 10.0)

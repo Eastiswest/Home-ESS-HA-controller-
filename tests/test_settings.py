@@ -101,6 +101,8 @@ class TestSanitisation:
         assert settings.away is False
         assert settings.away_daily_load == 3.0
         assert RuntimeSettings(away_daily_load=-4).sanitised().away_daily_load == 0.0
+        # The same ceiling the number entity offers, so the two never disagree.
+        assert RuntimeSettings(away_daily_load=500).sanitised().away_daily_load == 50.0
         assert RuntimeSettings(away=1).sanitised().away is True  # type: ignore[arg-type]
 
     def test_the_cushion_leaves_room_above_it(self):
