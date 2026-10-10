@@ -1622,23 +1622,41 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> bool:
         """Whether the array was throttled to the house for this half-hour.
 
-        With export refused the inverter can only generate what the house and
-        the pack will take, so once the pack is at its ceiling it clips the
-        array to the load and the reading says nothing about the sun. The
-        signature is a half-hour that imported and exported nothing while the
-        battery sat at its limit. A cloudy half-hour at a full pack imports the
-        shortfall, so its reading is genuine and it is not flagged.
+        An inverter can only generate what the house, the pack and the grid
+        will take. With export refused and the pack at its ceiling, or the
+        battery held, it clips the array to the load and the reading says
+        nothing about the sun. With export allowed, the same happens once the
+        export sits pinned at the connection limit.
+
+        The signature is a half-hour that imported nothing, exported nothing
+        (or exactly the limit), while the pack ended at its ceiling without
+        discharging, or sat held. A cloudy half-hour at a full pack either
+        imports the shortfall or draws it from the battery, and both of those
+        say the reading was genuine. A dark reading is only a dark reading
+        when the forecast was dark too: an empty house's forty watts of
+        standby clips a sunny array to almost nothing.
         """
-        if not record.grid_measured or record.pv_kwh <= 0.05:
+        if not record.grid_measured:
             return False
-        if record.grid_export_kwh > 0.02:
+        forecast = record.pv_forecast_raw_kwh
+        if forecast is None:
+            forecast = record.pv_forecast_kwh
+        if record.pv_kwh <= 0.05 and (forecast or 0.0) <= 0.05:
             return False
         if record.grid_import_kwh > max(0.02, 0.1 * record.load_kwh):
             return False
-        readings = [soc for soc in (start_soc, end_soc) if soc is not None]
-        if not readings:
+        limit_kwh = self._effective_export_limit() * record.duration_hours
+        if limit_kwh <= 0.0:
+            if record.grid_export_kwh > 0.02:
+                return False
+        elif not 0.9 * limit_kwh <= record.grid_export_kwh <= 1.1 * limit_kwh:
             return False
-        return max(readings) >= self.settings.max_soc - FULL_SOC_MARGIN
+        moved = record.battery_charge_kwh + record.battery_discharge_kwh
+        if record.applied_action == SlotAction.IDLE.value and moved <= 0.05:
+            return True
+        if end_soc is None or record.battery_discharge_kwh > 0.05:
+            return False
+        return end_soc >= self.settings.max_soc - FULL_SOC_MARGIN
 
     def _record_completed(self, completed: list[Any]) -> list[SlotRecord]:
         """Turn closed half-hours into performance records, and return them."""

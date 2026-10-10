@@ -137,6 +137,10 @@ class SlotRecord:
     without anything being wrong."""
 
     @property
+    def duration_hours(self) -> float:
+        return 0.5
+
+    @property
     def cost(self) -> float:
         """What this half-hour actually cost, in minor units."""
         return (

@@ -4391,17 +4391,28 @@ class TestAThrottledArrayIsNotTheSun:
     and it was being learned as the array's performance and counted as the
     forecast running high."""
 
-    async def _coordinator(self, hass):
+    async def _coordinator(self, hass, *, allow_export: bool = False):
         from homeassistant.setup import async_setup_component
 
         await async_setup_component(hass, DOMAIN, {})
         await _complete_flow(hass)
         entry = hass.config_entries.async_entries(DOMAIN)[0]
         await hass.async_block_till_done()
-        return hass.data[DOMAIN][entry.entry_id]
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        await coordinator.async_update_settings(allow_export=allow_export, max_soc=97.0)
+        return coordinator
 
     @staticmethod
-    def _slot(start, *, pv=0.4, load=0.2, grid_import=0.0, grid_export=0.0):
+    def _slot(
+        start,
+        *,
+        pv=0.4,
+        load=0.2,
+        grid_import=0.0,
+        grid_export=0.0,
+        grid_measured=True,
+        forecast=0.9,
+    ):
         from custom_components.ess_controller.sampling import CompletedSlot
 
         return CompletedSlot(
@@ -4410,10 +4421,10 @@ class TestAThrottledArrayIsNotTheSun:
             pv_kwh=pv,
             load_kwh=load,
             coverage=1.0,
-            grid_measured=True,
+            grid_measured=grid_measured,
             grid_import_kwh=grid_import,
             grid_export_kwh=grid_export,
-            forecast_kwh=0.9,
+            forecast_kwh=forecast,
         )
 
     @staticmethod
@@ -4422,44 +4433,176 @@ class TestAThrottledArrayIsNotTheSun:
 
         return dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
 
+    def _record(self, coordinator, slot, **mark):
+        mark.setdefault("pv_forecast_kwh", 0.9)
+        mark.setdefault("pv_forecast_raw_kwh", 0.9)
+        coordinator._slot_marks[slot.start] = mark
+        (record,) = coordinator._record_completed([slot])
+        return record
+
     async def test_self_sufficient_at_a_full_pack_is_a_throttled_array(self, hass):
         coordinator = await self._coordinator(hass)
         start = self._now() - timedelta(hours=1)
-        coordinator._slot_marks[start] = {
-            "soc_start": 95.0,
-            "soc_end": 95.0,
-            "pv_forecast_kwh": 0.9,
-        }
-        (record,) = coordinator._record_completed([self._slot(start)])
+        record = self._record(
+            coordinator, self._slot(start), soc_start=97.0, soc_end=97.0
+        )
         assert record.pv_curtailed is True
         assert record.pv_error is None
 
-    async def test_a_cloudy_half_hour_at_a_full_pack_is_genuine(self, hass):
-        """The house needed more than the sun gave, so nothing was clipped."""
+    async def test_reaching_the_ceiling_partway_still_counts(self, hass):
         coordinator = await self._coordinator(hass)
         start = self._now() - timedelta(hours=1)
-        coordinator._slot_marks[start] = {"soc_start": 95.0, "soc_end": 95.0}
-        (record,) = coordinator._record_completed(
-            [self._slot(start, pv=0.1, load=0.4, grid_import=0.3)]
+        record = self._record(
+            coordinator, self._slot(start, pv=1.2, load=0.2), soc_start=90.0, soc_end=97.0
+        )
+        assert record.battery_charge_kwh > 0
+        assert record.pv_curtailed is True
+
+    async def test_a_cloudy_half_hour_the_battery_covered_is_genuine(self, hass):
+        """The sun fell below the house and the pack made up the difference:
+        every watt the array made was used, so nothing was clipped. The rule
+        read the pack's *start* at the ceiling and flagged exactly these, the
+        dusk half-hours that are the hedges' evidence."""
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        record = self._record(
+            coordinator,
+            self._slot(start, pv=0.25, load=0.5),
+            soc_start=97.0,
+            soc_end=96.0,
+        )
+        assert record.battery_discharge_kwh > 0.05
+        assert record.pv_curtailed is False
+        assert record.pv_error == pytest.approx(0.65)
+
+    async def test_a_cloudy_half_hour_the_grid_covered_is_genuine(self, hass):
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        record = self._record(
+            coordinator,
+            self._slot(start, pv=0.1, load=0.4, grid_import=0.3),
+            soc_start=97.0,
+            soc_end=97.0,
         )
         assert record.pv_curtailed is False
 
     async def test_a_pack_with_room_is_not_throttling(self, hass):
         coordinator = await self._coordinator(hass)
         start = self._now() - timedelta(hours=1)
-        coordinator._slot_marks[start] = {"soc_start": 60.0, "soc_end": 61.0}
-        (record,) = coordinator._record_completed([self._slot(start)])
+        record = self._record(
+            coordinator, self._slot(start), soc_start=60.0, soc_end=61.0
+        )
         assert record.pv_curtailed is False
 
-    async def test_an_exporting_site_is_not_throttling(self, hass):
+    async def test_a_held_battery_clips_the_array_at_any_charge(self, hass):
+        """A strict hold stops the pack taking the surplus, so with export
+        refused the inverter clips the array to the house however full."""
         coordinator = await self._coordinator(hass)
         start = self._now() - timedelta(hours=1)
-        coordinator._slot_marks[start] = {"soc_start": 95.0, "soc_end": 95.0}
-        (record,) = coordinator._record_completed([self._slot(start, grid_export=0.2)])
+        held = self._record(
+            coordinator,
+            self._slot(start, pv=0.4, load=0.4),
+            soc_start=60.0,
+            soc_end=60.0,
+            applied_action="idle",
+        )
+        assert held.pv_curtailed is True
+        importing = self._record(
+            coordinator,
+            self._slot(start, pv=0.2, load=0.6, grid_import=0.4),
+            soc_start=60.0,
+            soc_end=60.0,
+            applied_action="idle",
+        )
+        assert importing.pv_curtailed is False
+
+    async def test_an_exporting_site_only_clips_at_its_limit(self, hass):
+        """With export allowed the surplus leaves; a full pack clips nothing
+        unless the export is pinned at the connection limit."""
+        coordinator = await self._coordinator(hass, allow_export=True)
+        limit_kwh = coordinator.grid_spec().export_limit_kw * 0.5
+        assert limit_kwh > 0.3
+        start = self._now() - timedelta(hours=1)
+        no_surplus = self._record(
+            coordinator, self._slot(start, pv=0.4, load=0.4), soc_start=97.0, soc_end=97.0
+        )
+        assert no_surplus.pv_curtailed is False
+        some_export = self._record(
+            coordinator,
+            self._slot(start, pv=0.6, load=0.4, grid_export=0.2),
+            soc_start=97.0,
+            soc_end=97.0,
+        )
+        assert some_export.pv_curtailed is False
+        pinned = self._record(
+            coordinator,
+            self._slot(start, pv=0.4 + limit_kwh, load=0.4, grid_export=limit_kwh),
+            soc_start=97.0,
+            soc_end=97.0,
+        )
+        assert pinned.pv_curtailed is True
+
+    async def test_without_a_grid_sensor_nothing_is_inferred(self, hass):
+        """No grid sensor reads as no import and no export on every slot, which
+        would flag every daylight half-hour at a full pack."""
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        record = self._record(
+            coordinator,
+            self._slot(start, grid_measured=False),
+            soc_start=97.0,
+            soc_end=97.0,
+        )
         assert record.pv_curtailed is False
+
+    async def test_a_dark_reading_is_dark_only_if_the_forecast_was(self, hass):
+        """An empty house's forty watts of standby clips a sunny array to
+        almost nothing, and a reading under the dark threshold was waved
+        through as night."""
+        coordinator = await self._coordinator(hass)
+        start = self._now() - timedelta(hours=1)
+        standby = self._record(
+            coordinator,
+            self._slot(start, pv=0.04, load=0.04),
+            soc_start=97.0,
+            soc_end=97.0,
+            pv_forecast_kwh=0.9,
+            pv_forecast_raw_kwh=0.9,
+        )
+        assert standby.pv_curtailed is True
+        night = self._record(
+            coordinator,
+            self._slot(start, pv=0.0, load=0.04, forecast=0.0),
+            soc_start=97.0,
+            soc_end=97.0,
+            pv_forecast_kwh=0.0,
+            pv_forecast_raw_kwh=0.0,
+        )
+        assert night.pv_curtailed is False
+
+    async def test_the_bridged_start_does_not_decide_it(self, hass):
+        """After a full afternoon every slot starts at the ceiling by bridging;
+        what matters is where the pack ended and whether it discharged."""
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = self._now()
+        coordinator.performance_store.log.add(
+            SlotRecord(start=now - timedelta(hours=2), soc_start=97.0, soc_end=97.0)
+        )
+        start = now - timedelta(hours=1)
+        drained = self._record(
+            coordinator, self._slot(start, pv=0.25, load=0.5), soc_end=95.0
+        )
+        assert drained.battery_discharge_kwh > 0.05
+        assert drained.pv_curtailed is False
+        held = self._record(coordinator, self._slot(start), soc_end=97.0)
+        assert held.pv_curtailed is True
 
     async def test_a_throttled_reading_is_not_learned_or_held_against_the_sun(self, hass):
         from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
 
         coordinator = await self._coordinator(hass)
         seen: list = []
@@ -4471,7 +4614,7 @@ class TestAThrottledArrayIsNotTheSun:
         for minutes in (0, 10, 20, 31):
             now = start + timedelta(minutes=minutes)
             site = coordinator._read_site_state(now)
-            site.soc, site.soc_valid = 95.0, True
+            site.soc, site.soc_valid = 97.0, True
             site.pv_power_kw, site.pv_valid = 0.8, True
             site.load_power_kw = 0.8
             site.grid_power_kw, site.grid_valid = 0.0, True
@@ -4482,8 +4625,29 @@ class TestAThrottledArrayIsNotTheSun:
         record = coordinator.performance_store.log.records[-1]
         assert record.pv_curtailed is True
         assert seen == [], "a clipped reading was learned as the array's output"
-        # And the sun's recent form ignores it: 0.4 made against 0.9 forecast
-        # would otherwise read as a 56% shortfall.
+
+        # Nor does it count against the sun's recent form: twelve genuine
+        # half-hours on forecast and twelve clipped ones at a ninth of it read
+        # as a sun that is delivering exactly what it said.
+        for index in range(12):
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=start - timedelta(hours=3, minutes=30 * index),
+                    pv_kwh=0.5,
+                    pv_forecast_kwh=0.5,
+                    pv_forecast_raw_kwh=0.5,
+                )
+            )
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=start - timedelta(hours=10, minutes=30 * index),
+                    pv_kwh=0.1,
+                    pv_forecast_kwh=0.9,
+                    pv_forecast_raw_kwh=0.9,
+                    pv_curtailed=True,
+                )
+            )
+        assert coordinator._solar_form() == (pytest.approx(6.0), pytest.approx(6.0))
         assert coordinator.solar_shortfall_ratio() == 1.0
 
 
