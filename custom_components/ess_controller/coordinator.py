@@ -146,7 +146,7 @@ from .forecast.confidence import (
 )
 from .forecast.confidence import describe as describe_confidence
 from .forecast.energy import EnergySeries
-from .forecast.load import LoadForecaster, describe_climate_uplift
+from .forecast.load import LoadForecaster, LoadPrediction, describe_climate_uplift
 from .forecast.solar import (
     SolarForecaster,
     build_forecast_series,
@@ -189,7 +189,13 @@ from .models import (
     SlotAction,
     describe_horizon_reach,
 )
-from .optimiser.dp import OptimiserSettings, hold_is_worthwhile, optimise, percentile
+from .optimiser.dp import (
+    SLOTS_PER_DAY,
+    OptimiserSettings,
+    hold_is_worthwhile,
+    optimise,
+    percentile,
+)
 from .performance import (
     PerformanceSummary,
     SelfUseShadow,
@@ -741,6 +747,21 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return price, "history"
         return None, "horizon"
 
+    def away_daily_use_kwh(self, days: float = REFILL_HISTORY_DAYS) -> float | None:
+        """What the house has used per day while away, from the recorded slots.
+
+        ``None`` until a full day of away half-hours exists, so the figure can
+        be set from evidence rather than a guess.
+        """
+        records = [
+            r
+            for r in self.performance_store.log.window(days)
+            if r.away and r.load_measured
+        ]
+        if len(records) < SLOTS_PER_DAY:
+            return None
+        return sum(r.load_kwh for r in records) / (len(records) / SLOTS_PER_DAY)
+
     def cushion_kwh(self) -> float:
         """The planning cushion in energy, held inside the usable window."""
         room = max(self.settings.max_soc - self.effective_min_soc - 1.0, 0.0)
@@ -852,7 +873,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         errors: list[float] = []
         for record in self.performance_store.log.window(days):
             local = dt_util.as_local(record.start)
-            if is_evening(local.hour) or not record.load_measured:
+            if is_evening(local.hour) or not record.load_measured or record.away:
                 continue
             error = record.load_error
             if error is not None:
@@ -886,7 +907,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         evenings: set[Any] = set()
         for record in records:
             local = dt_util.as_local(record.start)
-            if not is_evening(local.hour) or not record.load_measured:
+            if not is_evening(local.hour) or not record.load_measured or record.away:
                 continue
             error = record.load_error
             if error is None:
@@ -915,7 +936,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         errors: list[float] = []
         for record in self.performance_store.log.window(days):
             local = dt_util.as_local(record.start)
-            if is_evening(local.hour) or not record.load_measured:
+            if is_evening(local.hour) or not record.load_measured or record.away:
                 continue
             error = record.load_error
             if error is None:
@@ -1219,10 +1240,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             uv_index=uv_index,
             grid_power_kw=site.grid_power_kw if site.grid_valid else None,
         )
-        self._record_completed(completed)
+        records = self._record_completed(completed)
 
         model = self.learning_store.model
-        for slot in completed:
+        for slot, record in zip(completed, records, strict=True):
             local = dt_util.as_local(slot.start)
             # Never learn from a signal nobody measured. A slot whose sensor was
             # unavailable throughout reads zero, and zero is indistinguishable
@@ -1243,7 +1264,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         forecast_kwh=slot.forecast_kwh,
                     )
                 )
-            if not slot.load_measured:
+            # An empty house is not the house's habits.
+            if not slot.load_measured or record.away:
                 continue
             model.observe_load(
                 LoadObservation(
@@ -1589,10 +1611,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "learning_observations": self.learning_store.model.solar_observations,
         }
 
-    def _record_completed(self, completed: list[Any]) -> None:
-        """Turn closed half-hours into performance records."""
+    def _record_completed(self, completed: list[Any]) -> list[SlotRecord]:
+        """Turn closed half-hours into performance records, and return them."""
+        records: list[SlotRecord] = []
         if not completed:
-            return
+            return records
         capacity = self.nominal_capacity_kwh()
         shadow = self._shadow_template()
         for slot in completed:
@@ -1627,6 +1650,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 planned_action=mark.get("planned_action"),
                 applied_action=mark.get("applied_action"),
                 controlling=bool(mark.get("controlling", False)),
+                away=self.settings.away,
             )
             # Battery flow from the SoC change rather than a power sensor: it is
             # the one figure every inverter reports, and over a half-hour the
@@ -1654,8 +1678,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     record.battery_discharge_kwh = -delta
             self.performance_store.log.add(record)
             self.performance_store.lifetime.add(record, shadow)
+            records.append(record)
         self._report_cache = {}
         self.performance_store.async_schedule_save()
+        return records
 
     def _shadow_template(self) -> SelfUseShadow:
         """A self-use battery with today's parameters and no particular charge."""
@@ -2269,6 +2295,19 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load_predictions = load.predict_series(
             boundaries, self._weather, dt_util.as_local
         )
+        if self.settings.away:
+            # Nobody home: the learned profile is the wrong house. A flat
+            # standby figure, with no hedges on top -- they are measured
+            # against evenings that are not happening.
+            load_predictions = [
+                LoadPrediction(
+                    kwh=self.settings.away_daily_load
+                    / SLOTS_PER_DAY
+                    * ((end - start).total_seconds() / 1800.0),
+                    source="away",
+                )
+                for start, end in boundaries
+            ]
 
         # A young load model under-calls the evening, and the evening is where the
         # dear half-hours are. Provision for more of it until the house has taught
@@ -2282,6 +2321,8 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.forecast_confidence(),
             self.evening_forecast_error_kwh(),
         )
+        if self.settings.away:
+            uplift = [0.0] * len(load_predictions)
         # ...and the other direction, outside the evening. A load forecast that
         # runs high under-states the solar surplus kWh for kWh, so the plan buys
         # from the grid to fill headroom the afternoon's own sun was going to
@@ -2300,6 +2341,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             [demand.kwh for demand in load_predictions],
             self.daytime_forecast_error_kwh(),
         )
+        if self.settings.away:
+            trim = [0.0] * len(load_predictions)
+            day_uplift = [0.0] * len(load_predictions)
         # The sun's recent form. Three days at 50-78% of forecast against a
         # thirty-day bias of zero is weather, not a model fault, and the
         # learned correction is too slow to follow it.
@@ -2375,6 +2419,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "cushion_kwh": round(self.cushion_kwh(), 3),
             "refill_price": None if refill is None else round(refill, 2),
             "refill_source": refill_source,
+            "away": self.settings.away,
             "climate_note": self._climate_note,
         }
         return slots, note

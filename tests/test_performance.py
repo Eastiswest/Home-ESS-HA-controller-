@@ -702,6 +702,34 @@ class TestTheTypicalRefillPrice:
         assert len(seen) == len(records)
 
 
+class TestAwayAndThrottledHalfHours:
+    """Two kinds of half-hour that are real money and no evidence.
+
+    An empty house is not the house's habits; two weeks of it moves every
+    bucket most of the way to standby and the plan under-provisions evenings
+    for weeks after. And with export refused, a full pack clips the array to
+    the house load, so the solar reading is what was allowed, not what the sun
+    could have done."""
+
+    def test_the_flag_travels_with_the_record(self):
+        data = record(12, away=True).as_dict()
+        loaded = SlotRecord.from_dict(data)
+        assert loaded is not None
+        assert loaded.away is True
+        del data["away"]
+        assert SlotRecord.from_dict(data).away is False
+
+    def test_away_slots_are_counted_and_declared(self):
+        records = [
+            record(h, load_kwh=0.1, away=h < 3, grid_measured=True) for h in range(6)
+        ]
+        summary = summarise(records)
+        assert summary.away_slots == 3
+        assert summary.load_kwh == pytest.approx(0.6)  # the money is still real
+        assert any("3 of 6 slots were recorded while away" in n for n in summary.notes)
+        assert summary.as_dict()["window"]["away_slots"] == 3
+
+
 class TestGridIntegration:
     """The accumulator has to meter grid flow for any of the money to be real."""
 

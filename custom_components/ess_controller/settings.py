@@ -125,6 +125,14 @@ class RuntimeSettings:
     battery_expected_cycles: float = DEFAULT_BATTERY_EXPECTED_CYCLES
     battery_residual_value: float = DEFAULT_BATTERY_RESIDUAL_VALUE
 
+    # -- occupancy -------------------------------------------------------
+    away: bool = False
+    """Nobody home. The load model stops learning, the plan provisions
+    ``away_daily_load`` instead of the learned profile, and half-hours
+    recorded while away are left out of every hedge."""
+    away_daily_load: float = 3.0
+    """What the empty house uses in a day, in kWh: fridges, standby, routers."""
+
     # -- forecasting ----------------------------------------------------
     default_daily_load: float = DEFAULT_DAILY_LOAD
     cooling_rate: float = 0.0
@@ -170,6 +178,8 @@ class RuntimeSettings:
         )
         self.battery_expected_cycles = _clamp(self.battery_expected_cycles, 0.0, 20_000.0)
         self.default_daily_load = _clamp(self.default_daily_load, 0.0, 500.0)
+        self.away_daily_load = _clamp(self.away_daily_load, 0.0, 100.0)
+        self.away = bool(self.away)
         self.cooling_rate = _clamp(self.cooling_rate, 0.0, 10.0)
         self.heating_rate = _clamp(self.heating_rate, 0.0, 10.0)
         if self.strategy not in STRATEGIES:

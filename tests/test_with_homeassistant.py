@@ -4246,6 +4246,145 @@ class TestTheSunRunningShortTrimsThePlan:
         assert seen == [None]
 
 
+class TestTheAwaySwitch:
+    """Two weeks away moves every learned bucket most of the way to standby,
+    and the plan under-provisions evenings for weeks after you are back. The
+    switch stops the learning, plans for the empty house, and keeps the away
+    days out of every hedge."""
+
+    ENTITY = "switch.ai_ess_controller_away_from_home"
+
+    async def _coordinator(self, hass):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    @staticmethod
+    def _site(coordinator, now, *, soc=50.0, pv_kw=0.0, load_kw=0.4, grid_kw=0.4):
+        site = coordinator._read_site_state(now)
+        site.soc = soc
+        site.soc_valid = True
+        site.pv_power_kw = pv_kw
+        site.pv_valid = True
+        site.load_power_kw = load_kw
+        site.grid_power_kw = grid_kw
+        site.grid_valid = True
+        return site
+
+    async def _close_one_slot(self, coordinator, **site_kwargs):
+        """Feed samples through a whole half-hour so the accumulator closes it."""
+        from homeassistant.util import dt as dt_util
+
+        start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=1
+        )
+        for minutes in (0, 10, 20, 31):
+            now = start + timedelta(minutes=minutes)
+            coordinator._train_from_samples(
+                now, self._site(coordinator, now, **site_kwargs)
+            )
+        return start
+
+    async def test_the_switch_exists_and_sets_the_setting(self, hass):
+        coordinator = await self._coordinator(hass)
+        state = hass.states.get(self.ENTITY)
+        assert state is not None and state.state == "off"
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": self.ENTITY}, blocking=True
+        )
+        await hass.async_block_till_done()
+        assert coordinator.settings.away is True
+        assert hass.states.get(self.ENTITY).state == "on"
+
+    async def test_an_empty_house_teaches_the_load_model_nothing(self, hass):
+        coordinator = await self._coordinator(hass)
+        seen: list = []
+        model = coordinator.learning_store.model
+        model.observe_load = lambda obs: seen.append(("load", obs.kwh))
+        model.observe_solar = lambda obs: seen.append(("solar", obs.kwh))
+
+        await coordinator.async_update_settings(away=True)
+        await self._close_one_slot(coordinator, pv_kw=0.6, load_kw=0.4, grid_kw=0.0)
+        kinds = {kind for kind, _ in seen}
+        assert "load" not in kinds, "the empty house was learned"
+        assert "solar" in kinds, "the sun does not know you are out"
+        records = coordinator.performance_store.log.records
+        assert records and records[-1].away is True
+
+    async def test_at_home_the_house_is_learned_again(self, hass):
+        coordinator = await self._coordinator(hass)
+        seen: list = []
+        coordinator.learning_store.model.observe_load = lambda obs: seen.append(obs.kwh)
+        await self._close_one_slot(coordinator)
+        assert seen
+
+    async def test_the_plan_provisions_the_empty_house_flat(self, hass):
+        coordinator = await self._coordinator(hass)
+        await coordinator.async_update_settings(away=True, away_daily_load=4.8)
+        await coordinator.async_refresh()
+        full = [s for s in coordinator.plan.slots if s.duration_hours == 0.5]
+        assert full
+        assert all(s.load_kwh == pytest.approx(0.1) for s in full)
+        sources = coordinator.diagnostics()["forecast_sources"]
+        assert sources["away"] is True
+        assert sources["load_sources"][0] == "away"
+        assert sources["evening_allowance_kwh"] == 0.0
+        assert sources["daytime_allowance_kwh"] == 0.0
+
+    async def test_away_days_are_left_out_of_the_hedges(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        now = dt_util.utcnow()
+        for day in range(1, 3):
+            for half_hour in range(6):
+                start = dt_util.as_local(now).replace(
+                    hour=18, minute=0, second=0, microsecond=0
+                ) - timedelta(days=day)
+                start += timedelta(minutes=30 * half_hour)
+                coordinator.performance_store.log.add(
+                    SlotRecord(
+                        start=dt_util.as_utc(start),
+                        load_kwh=0.9,
+                        load_forecast_kwh=0.4,
+                        load_measured=True,
+                        away=True,
+                    )
+                )
+        assert coordinator.evening_forecast_error_kwh() == 0.0
+        assert coordinator.daytime_forecast_error_kwh() == 0.0
+        assert coordinator.daytime_load_bias_kwh() == (0.0, 0)
+
+    async def test_the_switch_reports_what_the_empty_house_actually_used(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        from custom_components.ess_controller.performance import SlotRecord
+
+        coordinator = await self._coordinator(hass)
+        assert coordinator.away_daily_use_kwh() is None
+        now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+        for index in range(1, 49):
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=now - timedelta(minutes=30 * index),
+                    load_kwh=0.1,
+                    load_measured=True,
+                    away=True,
+                )
+            )
+        assert coordinator.away_daily_use_kwh() == pytest.approx(4.8)
+        await coordinator.async_refresh()
+        attributes = hass.states.get(self.ENTITY).attributes
+        assert attributes["measured_daily_use_kwh"] == pytest.approx(4.8)
+        assert attributes["away_daily_load_kwh"] == 3.0
+
+
 class TestAPowerCutStopsTheSteering:
     """During a power cut the inverter carries the house on its EPS output.
 

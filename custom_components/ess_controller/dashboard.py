@@ -141,6 +141,8 @@ LABELS: dict[str, str] = {
     "shifting_enabled": "Shift flexible loads",
     "appliance_control": "Switch appliances",
     "outage_protection": "Outage protection",
+    "away": "Away from home",
+    "away_daily_load": "Away daily use",
     "derive_wear_from_cost": "Derive from pack cost",
     # Numbers
     "min_soc": "Minimum charge",
@@ -1604,6 +1606,7 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
     load = _entities_card(
         [
             "default_daily_load",
+            "away_daily_load",
             "cooling_threshold",
             "cooling_rate",
             "heating_threshold",
@@ -1627,6 +1630,7 @@ def _settings_view(resolved: dict[str, str]) -> dict[str, Any]:
                 "shifting_enabled",
                 "appliance_control",
                 "outage_protection",
+                "away",
             ],
             resolved,
         ),

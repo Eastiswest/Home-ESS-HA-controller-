@@ -27,6 +27,8 @@ writes nothing until you arm the `Inverter control` switch.
 - Values charge carried past the horizon at the predicted price of the next
   refill, so a cheap night before a dear spell fills the pack and a cheap
   spell ahead leaves it lean
+- Away switch: stops load learning, plans for the empty house, keeps away
+  days out of the hedges; flip it from a presence automation
 - Octopus Saving Sessions and Power Ups
 - Flexible load shifting with optional appliance switching
 - Storm/outage anticipation; steps back entirely during a power cut (EPS)
@@ -67,6 +69,32 @@ and the performance log survive. Never uninstall to update.
 Run in advisory mode for a few days. When the plan looks right, arm
 `Inverter control`. Overrides, a strategy lock and a `Re-plan now` button are
 on the dashboard; diagnostics can be downloaded from the device page.
+
+Going away: turn on the `Away from home` switch, or let an automation do it
+from presence, for example:
+
+```yaml
+automation:
+  - alias: ESS away when the house is empty
+    trigger:
+      - platform: state
+        entity_id: group.household
+        to: not_home
+        for: "24:00:00"
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.ai_ess_controller_away_from_home
+  - alias: ESS home again
+    trigger:
+      - platform: state
+        entity_id: group.household
+        to: home
+    action:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.ai_ess_controller_away_from_home
+```
 
 ## Known constraints
 

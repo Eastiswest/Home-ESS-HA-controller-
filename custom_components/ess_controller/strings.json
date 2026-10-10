@@ -734,6 +734,9 @@
       "outage_protection": {
         "name": "Outage protection"
       },
+      "away": {
+        "name": "Away from home"
+      },
       "derive_wear_from_cost": {
         "name": "Derive wear from battery cost"
       },
@@ -765,6 +768,9 @@
       },
       "default_daily_load": {
         "name": "Typical daily consumption"
+      },
+      "away_daily_load": {
+        "name": "Away daily use"
       },
       "cooling_rate": {
         "name": "Cooling load per degree"

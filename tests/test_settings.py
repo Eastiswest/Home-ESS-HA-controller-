@@ -96,6 +96,13 @@ class TestSanitisation:
         settings = RuntimeSettings(min_soc=15, reserve_soc=40).sanitised()
         assert settings.reserve_soc <= settings.min_soc
 
+    def test_away_is_off_with_a_standby_figure_to_hand(self):
+        settings = RuntimeSettings().sanitised()
+        assert settings.away is False
+        assert settings.away_daily_load == 3.0
+        assert RuntimeSettings(away_daily_load=-4).sanitised().away_daily_load == 0.0
+        assert RuntimeSettings(away=1).sanitised().away is True  # type: ignore[arg-type]
+
     def test_the_cushion_leaves_room_above_it(self):
         settings = RuntimeSettings(min_soc=20, max_soc=95, cushion_soc=90).sanitised()
         assert settings.cushion_soc == pytest.approx(74.0)

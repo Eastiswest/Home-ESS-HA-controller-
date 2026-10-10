@@ -257,6 +257,32 @@ NUMBERS: tuple[EssNumberDescription, ...] = (
         },
     ),
     EssNumberDescription(
+        key="away_daily_load",
+        translation_key="away_daily_load",
+        name="Away daily use",
+        icon="mdi:home-export-outline",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        native_min_value=0,
+        native_max_value=50,
+        native_step=0.5,
+        mode=NumberMode.BOX,
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.away_daily_load,
+        field="away_daily_load",
+        attributes=lambda c: {
+            "description": (
+                "What the empty house uses in a day while the Away switch is on: "
+                "fridges, freezers, standby. Spread flat across the day. The "
+                "switch reports what was actually used after a full day away."
+            ),
+            "measured_daily_use_kwh": (
+                None
+                if (measured := c.away_daily_use_kwh()) is None
+                else round(measured, 2)
+            ),
+        },
+    ),
+    EssNumberDescription(
         key="cooling_rate",
         translation_key="cooling_rate",
         name="Cooling load per degree",

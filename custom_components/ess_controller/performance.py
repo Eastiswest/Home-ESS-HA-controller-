@@ -100,6 +100,8 @@ class SlotRecord:
     Defaults true, like ``load_measured``, so records written before the field
     existed are not read as sensor outages.
     """
+    away: bool = False
+    """Recorded while nobody was home: real money, but not the house's habits."""
 
     coverage: float = 1.0
 
@@ -317,6 +319,7 @@ class PerformanceSummary:
     controlled_slots: int = 0
     compared_slots: int = 0
     followed_slots: int = 0
+    away_slots: int = 0
 
     cycle_cost: float = 0.0
     usable_kwh: float = 0.0
@@ -411,6 +414,7 @@ class PerformanceSummary:
                 "first": self.first.isoformat() if self.first else None,
                 "last": self.last.isoformat() if self.last else None,
                 "grid_metered_slots": self.grid_measured_slots,
+                "away_slots": self.away_slots,
             },
             "energy_kwh": {
                 "solar": r(self.pv_kwh, 3),
@@ -637,6 +641,8 @@ def summarise(
             summary.grid_measured_slots += 1
         if record.controlling:
             summary.controlled_slots += 1
+        if record.away:
+            summary.away_slots += 1
         followed = record.followed_plan
         if followed is not None:
             summary.compared_slots += 1
@@ -702,6 +708,11 @@ def _add_caveats(
         summary.notes.append(
             f"{missing} of {summary.slots} slots had no grid power sensor, so their "
             "cost is derived from solar and load rather than metered"
+        )
+    if summary.away_slots:
+        summary.notes.append(
+            f"{summary.away_slots} of {summary.slots} slots were recorded while "
+            "away: real money, left out of the load model and the hedges"
         )
     if summary.controlled_slots == 0:
         summary.notes.append(

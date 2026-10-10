@@ -74,6 +74,7 @@ ALL_KEYS = (
     "shifting_enabled",
     "appliance_control",
     "outage_protection",
+    "away",
     "derive_wear_from_cost",
     # numbers
     "min_soc",
@@ -84,6 +85,7 @@ ALL_KEYS = (
     "max_discharge_power",
     "cycle_cost",
     "default_daily_load",
+    "away_daily_load",
     "cooling_rate",
     "cooling_threshold",
     "heating_rate",
@@ -110,6 +112,7 @@ DOMAIN_FOR = {
     "shifting_enabled": "switch",
     "appliance_control": "switch",
     "outage_protection": "switch",
+    "away": "switch",
     "derive_wear_from_cost": "switch",
     "strategy": "select",
     "replan": "button",
@@ -137,6 +140,7 @@ BINARY = {
 NUMBERS = {
     "min_soc",
     "cushion_soc",
+    "away_daily_load",
     "max_soc",
     "reserve_soc",
     "max_charge_power",

@@ -104,6 +104,29 @@ SWITCHES: tuple[EssSwitchDescription, ...] = (
 
 FEATURE_SWITCHES: tuple[EssSwitchDescription, ...] = (
     EssSwitchDescription(
+        key="away",
+        translation_key="away",
+        name="Away from home",
+        icon="mdi:bag-suitcase-outline",
+        entity_category=EntityCategory.CONFIG,
+        value=lambda s: s.away,
+        setter=lambda on: {"away": on},
+        attributes=lambda c: {
+            "description": (
+                "Nobody home. The load model stops learning, the plan provisions "
+                "the away daily use instead of the learned profile, and half-hours "
+                "recorded while away are left out of every hedge. Solar keeps "
+                "learning. Flip it from a presence automation or by hand."
+            ),
+            "away_daily_load_kwh": c.settings.away_daily_load,
+            "measured_daily_use_kwh": (
+                None
+                if (measured := c.away_daily_use_kwh()) is None
+                else round(measured, 2)
+            ),
+        },
+    ),
+    EssSwitchDescription(
         key="derive_wear_from_cost",
         translation_key="derive_wear_from_cost",
         name="Derive wear from battery cost",
