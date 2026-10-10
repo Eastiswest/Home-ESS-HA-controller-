@@ -4335,17 +4335,17 @@ class TestTheAwaySwitch:
         assert sources["evening_allowance_kwh"] == 0.0
         assert sources["daytime_allowance_kwh"] == 0.0
 
-    async def test_away_days_are_left_out_of_the_hedges(self, hass):
+    @staticmethod
+    def _heavy(coordinator, hour: int, *, away: bool, days: int = 2, slots: int = 6):
         from homeassistant.util import dt as dt_util
 
         from custom_components.ess_controller.performance import SlotRecord
 
-        coordinator = await self._coordinator(hass)
         now = dt_util.utcnow()
-        for day in range(1, 3):
-            for half_hour in range(6):
+        for day in range(1, days + 1):
+            for half_hour in range(slots):
                 start = dt_util.as_local(now).replace(
-                    hour=18, minute=0, second=0, microsecond=0
+                    hour=hour, minute=0, second=0, microsecond=0
                 ) - timedelta(days=day)
                 start += timedelta(minutes=30 * half_hour)
                 coordinator.performance_store.log.add(
@@ -4354,12 +4354,59 @@ class TestTheAwaySwitch:
                         load_kwh=0.9,
                         load_forecast_kwh=0.4,
                         load_measured=True,
-                        away=True,
+                        away=away,
                     )
                 )
+
+    async def test_away_days_are_left_out_of_the_hedges(self, hass):
+        coordinator = await self._coordinator(hass)
+        self._heavy(coordinator, 18, away=True)  # evenings
+        self._heavy(coordinator, 10, away=True)  # mornings
         assert coordinator.evening_forecast_error_kwh() == 0.0
         assert coordinator.daytime_forecast_error_kwh() == 0.0
         assert coordinator.daytime_load_bias_kwh() == (0.0, 0)
+        # The same half-hours at home are evidence.
+        self._heavy(coordinator, 18, away=False)
+        self._heavy(coordinator, 10, away=False)
+        assert coordinator.evening_forecast_error_kwh() < 0.0
+        assert coordinator.daytime_forecast_error_kwh() < 0.0
+        assert coordinator.daytime_load_bias_kwh()[1] == 12
+
+    async def test_a_half_hour_away_for_any_part_of_it_is_away(self, hass):
+        """The household arrives at ten past; the plan had forecast that
+        half-hour for an empty house. Labelled home at the close it was the
+        hedges' only evidence for days: a phantom 17 kWh miss."""
+        from homeassistant.util import dt as dt_util
+
+        coordinator = await self._coordinator(hass)
+        seen: list = []
+        coordinator.learning_store.model.observe_load = lambda obs: seen.append(obs.kwh)
+        await coordinator.async_update_settings(away=True)
+        start = dt_util.utcnow().replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=1
+        )
+        for minutes in (0, 10, 20, 31):
+            now = start + timedelta(minutes=minutes)
+            if minutes == 10:
+                await coordinator.async_update_settings(away=False)
+            site = self._site(coordinator, now)
+            coordinator._note_slot_state(now, site)
+            coordinator._train_from_samples(now, site)
+        record = coordinator.performance_store.log.records[-1]
+        assert record.away is True
+        assert seen == []
+
+    async def test_the_number_sets_the_empty_house_figure(self, hass):
+        coordinator = await self._coordinator(hass)
+        entity = "number.ai_ess_controller_away_daily_use"
+        state = hass.states.get(entity)
+        assert state is not None
+        assert state.attributes["measured_daily_use_kwh"] is None
+        await hass.services.async_call(
+            "number", "set_value", {"entity_id": entity, "value": 7.5}, blocking=True
+        )
+        await hass.async_block_till_done()
+        assert coordinator.settings.away_daily_load == 7.5
 
     async def test_the_switch_reports_what_the_empty_house_actually_used(self, hass):
         from homeassistant.util import dt as dt_util
@@ -4369,7 +4416,16 @@ class TestTheAwaySwitch:
         coordinator = await self._coordinator(hass)
         assert coordinator.away_daily_use_kwh() is None
         now = dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
-        for index in range(1, 49):
+        # A week at home at five times the standby, which must not count.
+        for index in range(49, 97):
+            coordinator.performance_store.log.add(
+                SlotRecord(
+                    start=now - timedelta(minutes=30 * index),
+                    load_kwh=0.5,
+                    load_measured=True,
+                )
+            )
+        for index in range(1, 48):
             coordinator.performance_store.log.add(
                 SlotRecord(
                     start=now - timedelta(minutes=30 * index),
@@ -4378,6 +4434,15 @@ class TestTheAwaySwitch:
                     away=True,
                 )
             )
+        assert coordinator.away_daily_use_kwh() is None, "not a full day away yet"
+        coordinator.performance_store.log.add(
+            SlotRecord(
+                start=now - timedelta(minutes=30 * 48),
+                load_kwh=0.1,
+                load_measured=True,
+                away=True,
+            )
+        )
         assert coordinator.away_daily_use_kwh() == pytest.approx(4.8)
         await coordinator.async_refresh()
         attributes = hass.states.get(self.ENTITY).attributes

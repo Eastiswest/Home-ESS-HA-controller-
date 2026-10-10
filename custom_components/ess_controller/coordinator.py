@@ -1315,6 +1315,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         mark["import_price"] = self._import_prices.price_at(slot_start)
         mark["export_price"] = self._export_prices.price_at(slot_start)
         mark["controlling"] = self.settings.controlling
+        # Away if the switch was on at any point in the half-hour. Read at the
+        # close instead, the half-hour the household arrived in was labelled
+        # home against a forecast made for an empty house, and that one slot
+        # was the whole of the hedges' evidence for days.
+        mark["away"] = bool(mark.get("away", False)) or self.settings.away
         planned = self.plan.slot_at(now) if self.plan else None
         if planned is not None:
             # First value wins, like soc_start. Overwriting each cycle recorded
@@ -1341,6 +1346,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     slot.start, slot.pv_kwh
                 )
                 future["load_forecast_kwh"] = slot.load_kwh
+                future["away"] = bool(future.get("away", False)) or self.settings.away
 
         # Marks are only needed until their slot closes; a few hours is ample.
         cutoff = slot_start - timedelta(hours=4)
@@ -1697,7 +1703,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 planned_action=mark.get("planned_action"),
                 applied_action=mark.get("applied_action"),
                 controlling=bool(mark.get("controlling", False)),
-                away=self.settings.away,
+                away=bool(mark.get("away", False)) or self.settings.away,
             )
             # Battery flow from the SoC change rather than a power sensor: it is
             # the one figure every inverter reports, and over a half-hour the
