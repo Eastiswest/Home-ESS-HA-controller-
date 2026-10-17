@@ -1212,6 +1212,32 @@ class TestRecommendationRanking:
         rec = self._make([("Agile", 200.0, True), ("Flat", 400.0, False)])
         assert "stay on Agile" in summarise(rec)
 
+    def test_a_typed_in_tariff_is_named_as_the_house_s_own(self):
+        """A fixed or time-of-use tariff has no product code to name, so the
+        summary must read as a sentence without one."""
+        from custom_components.ess_controller.recommend import (
+            current_tariff_candidate,
+            summarise,
+        )
+
+        rec = self._make([("Agile", 400.0, False)])
+        rec.scores[0].current = False
+        own = self._make([("own", 200.0, True)]).scores[0]
+        own.candidate = current_tariff_candidate("your fixed tariff")
+        rec.scores.append(own)
+        assert summarise(rec) == "stay on your fixed tariff — nothing cheaper found"
+
+    def test_the_house_s_own_code_is_not_an_octopus_product(self):
+        from custom_components.ess_controller.recommend import (
+            CURRENT_TARIFF_CODE,
+            DEFAULT_EXPORT_PRODUCTS,
+            DEFAULT_IMPORT_PRODUCTS,
+        )
+
+        assert CURRENT_TARIFF_CODE not in DEFAULT_IMPORT_PRODUCTS
+        assert CURRENT_TARIFF_CODE not in DEFAULT_EXPORT_PRODUCTS
+        assert CURRENT_TARIFF_CODE.lower() == CURRENT_TARIFF_CODE
+
     def test_the_summary_says_what_the_money_is(self):
         """It read "GO-VAR-22-10-14 saves ~0.01/day": a product code rather than
         a tariff, no currency, and no sense of scale."""

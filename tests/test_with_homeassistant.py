@@ -6497,3 +6497,131 @@ def _flat_candidate(seen: list[str] | None = None, standing: float = 50.0):
         return PriceSeries(slots), standing
 
     return flat
+
+
+class TestATypedInTariffHasAStandingCharge:
+    """Octopus tariffs bring their own standing charge to the comparison; a
+    fixed or time-of-use tariff was scored without one, a day cheaper than it
+    is, and was never scored as the tariff the house is on at all."""
+
+    @pytest.fixture(autouse=True)
+    def _no_network(self, hass, monkeypatch):
+        from custom_components.ess_controller import coordinator as coordinator_mod
+        from custom_components.ess_controller.tariff import factory as factory_mod
+
+        for module in (coordinator_mod, factory_mod):
+            monkeypatch.setattr(module, "async_get_clientsession", lambda hass: object())
+
+    async def _entry(self, hass, **options):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, **options}
+        )
+        await hass.async_block_till_done()
+        return entry
+
+    async def _fields(self, hass, step, **options):
+        import voluptuous_serialize
+        from homeassistant.helpers import config_validation as cv
+
+        entry = await self._entry(hass, **options)
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": step}
+        )
+        fields = voluptuous_serialize.convert(
+            result["data_schema"], custom_serializer=cv.custom_serializer
+        )
+        return {f["name"]: f for f in fields}
+
+    async def test_a_time_of_use_tariff_asks_for_it_and_a_region(self, hass):
+        fields = await self._fields(hass, "tariff_import", import_provider="tou")
+        assert fields["standing_charge"]["selector"]["number"]["unit_of_measurement"] == (
+            "p/day"
+        )
+        assert "octopus_region" in fields, "no region, no comparison to use it in"
+        assert fields["octopus_region"].get("default") is None
+
+    async def test_a_fixed_rate_asks_for_them_as_well(self, hass):
+        fields = await self._fields(hass, "tariff_import", import_provider="fixed")
+        assert "standing_charge" in fields
+        assert "octopus_region" in fields
+
+    async def test_octopus_tariffs_do_not(self, hass):
+        fields = await self._fields(
+            hass, "tariff_import", import_provider="octopus_api", octopus_region="M"
+        )
+        assert "standing_charge" not in fields
+
+    async def test_export_does_not(self, hass):
+        fields = await self._fields(hass, "tariff_export", export_provider="tou")
+        assert "standing_charge" not in fields
+
+    async def _comparison(self, hass, **options):
+        entry = await self._entry(
+            hass, octopus_region="M", agile_predict=False, **options
+        )
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        coordinator._async_fetch_candidate = _flat_candidate()
+        recommendation = await coordinator.async_recommend_tariffs()
+        assert recommendation is not None
+        return coordinator, recommendation
+
+    async def test_the_comparison_scores_the_tariff_the_house_is_on(self, hass):
+        _, recommendation = await self._comparison(
+            hass,
+            import_provider="tou",
+            import_tou_schedule="00:30-05:30=9.5,05:30-00:30=33.56",
+            import_fixed_rate=33.56,
+            standing_charge=60.86,
+        )
+        own = recommendation.current
+        assert own is not None, [s.candidate.display_name for s in recommendation.scores]
+        assert own.candidate.display_name == "your time-of-use tariff"
+        assert own.error is None
+        assert own.min_price == pytest.approx(9.5)
+        assert own.max_price == pytest.approx(33.56)
+        assert own.standing_charge == pytest.approx(60.86 * own.hours / 24.0)
+        # The Octopus candidates are still there to be compared against.
+        others = [s for s in recommendation.scores if s is not own and s.error is None]
+        assert others
+        assert all(
+            s.standing_charge == pytest.approx(50.0 * s.hours / 24.0) for s in others
+        )
+        assert all(not s.current for s in others)
+
+    async def test_a_fixed_rate_is_scored_the_same_way(self, hass):
+        _, recommendation = await self._comparison(
+            hass, import_provider="fixed", import_fixed_rate=28.0, standing_charge=55.0
+        )
+        own = recommendation.current
+        assert own is not None
+        assert own.candidate.display_name == "your fixed tariff"
+        assert own.min_price == own.max_price == pytest.approx(28.0)
+        assert own.standing_charge == pytest.approx(55.0 * own.hours / 24.0)
+
+    async def test_without_a_standing_charge_the_house_s_tariff_is_left_out(self, hass):
+        """Scored at no standing charge it would beat every Octopus tariff by
+        a day's charge and the summary would say "stay", which is the wrong
+        answer dressed as the right one."""
+        coordinator, recommendation = await self._comparison(
+            hass, import_provider="fixed", import_fixed_rate=28.0
+        )
+        assert coordinator._current_manual_tariff() is None
+        assert recommendation.current is None
+        assert not [
+            s
+            for s in recommendation.scores
+            if s.candidate.display_name.startswith("your")
+        ]
+
+    async def test_an_octopus_tariff_is_not_a_typed_in_one(self, hass):
+        entry = await self._entry(
+            hass, import_provider="octopus_api", octopus_region="M", standing_charge=60.0
+        )
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert coordinator._current_manual_tariff() is None

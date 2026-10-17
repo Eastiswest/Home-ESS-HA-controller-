@@ -110,6 +110,7 @@ from .const import (
     CONF_SOC_LEVELS,
     CONF_SOLAR_FORECAST_ENTITIES,
     CONF_SOLAR_PEAK_POWER,
+    CONF_STANDING_CHARGE,
     CONF_TERMINAL_VALUE_MODE,
     CONF_TERMINAL_VALUE_RATE,
     CONF_WEATHER_ENTITY,
@@ -148,6 +149,7 @@ from .const import (
     DEFAULT_SAVING_SESSION_RATE,
     DEFAULT_SOC_LEVELS,
     DEFAULT_SOLAR_PEAK_POWER,
+    DEFAULT_STANDING_CHARGE,
     DOMAIN,
     EXPORT_PROVIDERS,
     IMPORT_PROVIDERS,
@@ -538,6 +540,14 @@ class EssFlowMixin:
         elif provider == PROVIDER_TOU:
             key = CONF_IMPORT_TOU_SCHEDULE if is_import else CONF_EXPORT_TOU_SCHEDULE
             fields[_suggest(current, key, "00:30-04:30=9.5")] = selector.TextSelector()
+        if is_import and provider in (PROVIDER_TOU, PROVIDER_FIXED):
+            # The comparison needs a region to fetch the Octopus candidates for,
+            # and a typed-in tariff needs its standing charge typed in too, or
+            # it is scored a day cheaper than it is. No region, no comparison.
+            fields[_suggest(current, CONF_OCTOPUS_REGION, None)] = _region_options()
+            fields[_suggest(current, CONF_STANDING_CHARGE, DEFAULT_STANDING_CHARGE)] = (
+                _number(0, 500, 0.01, "p/day")
+            )
 
         # Predicted prices for the unannounced tail. Offered on any Octopus
         # source, since AgilePredict forecasts the Agile rate itself and needs

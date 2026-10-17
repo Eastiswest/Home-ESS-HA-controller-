@@ -336,6 +336,26 @@ def friendly_name(product_code: str, fallback: str = "") -> str:
     return PRODUCT_NAMES.get(product_code, fallback or product_code)
 
 
+# The product code a typed-in tariff is scored under. Not an Octopus code, so
+# it can never collide with one.
+CURRENT_TARIFF_CODE = "current"
+
+
+def current_tariff_candidate(display_name: str) -> TariffCandidate:
+    """The tariff the house is on, when it is not an Octopus product.
+
+    A fixed or time-of-use tariff is entered by hand, so there is nothing to
+    fetch: its prices come from the configured provider and its standing charge
+    from the same form. Scored like any other candidate, it gives the ranking
+    something to be cheaper *than*.
+    """
+    return TariffCandidate(
+        product_code=CURRENT_TARIFF_CODE,
+        display_name=display_name,
+        tariff_code=CURRENT_TARIFF_CODE,
+    )
+
+
 DEFAULT_IMPORT_PRODUCTS: tuple[str, ...] = (
     "AGILE-24-10-01",
     "GO-VAR-22-10-14",

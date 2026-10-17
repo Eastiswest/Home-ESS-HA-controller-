@@ -67,6 +67,7 @@ from .const import (
     CONF_GRID_POWER_ENTITY,
     CONF_HOLD_MIN_BENEFIT,
     CONF_HORIZON_HOURS,
+    CONF_IMPORT_PROVIDER,
     CONF_INVERTER_ADAPTER,
     CONF_INVERTER_PREFIX,
     CONF_LOAD_POWER_ENTITY,
@@ -96,6 +97,7 @@ from .const import (
     CONF_SOC_LEVELS,
     CONF_SOLAR_FORECAST_ENTITIES,
     CONF_SOLAR_PEAK_POWER,
+    CONF_STANDING_CHARGE,
     CONF_TERMINAL_VALUE_MODE,
     CONF_TERMINAL_VALUE_RATE,
     CONF_WEATHER_ENTITY,
@@ -123,7 +125,10 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SOC_LEVELS,
     DEFAULT_SOLAR_PEAK_POWER,
+    DEFAULT_STANDING_CHARGE,
     DOMAIN,
+    PROVIDER_FIXED,
+    PROVIDER_TOU,
     SLOT_BOUNDARY_SECONDS,
     SLOT_MINUTES,
     STRATEGY_AUTO,
@@ -2886,6 +2891,18 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         settings = self.optimiser_settings()
         start_soc = self.battery.soc if self.battery.valid else 50.0
 
+        fetched: list[tuple[Any, Any, float]] = []
+        current = self._current_manual_tariff()
+        if current is not None and self._import_provider is not None:
+            # A typed-in tariff has no product to fetch: its prices come from
+            # the provider and its standing charge from the form.
+            candidate, standing = current
+            prices = await self._import_provider.async_fetch(
+                now, now + timedelta(hours=window)
+            )
+            fetched.append((candidate, prices, standing))
+            current_code = candidate.product_code
+
         # Fetched first, scored second, because the charge left at the end of the
         # window has to be priced identically for every candidate. Priced from
         # each tariff's own prices -- the default -- a deep-trough tariff credits
@@ -2893,7 +2910,6 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # effect than the difference being measured: it put Go and Agile 0.22p
         # apart across a day whose troughs differ by 10.6p a kWh.
         scores: list[recommend.TariffScore] = []
-        fetched: list[tuple[Any, Any, float]] = []
         for candidate in candidates:
             try:
                 prices, standing = await self._async_fetch_candidate(
@@ -2960,6 +2976,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.async_update_listeners()
         return self.recommendation
+
+    def _current_manual_tariff(self) -> tuple[Any, float] | None:
+        """The fixed or time-of-use tariff the house is on, with its standing
+        charge; None when the prices come from Octopus, or when no standing
+        charge was entered, since scored without one it would come out a day
+        cheaper than every Octopus candidate and win on that alone."""
+        provider = self.options.get(CONF_IMPORT_PROVIDER, PROVIDER_FIXED)
+        if provider == PROVIDER_TOU:
+            name = "your time-of-use tariff"
+        elif provider == PROVIDER_FIXED:
+            name = "your fixed tariff"
+        else:
+            return None
+        standing = float(self.options.get(CONF_STANDING_CHARGE, DEFAULT_STANDING_CHARGE))
+        if standing <= 0.0:
+            return None
+        return recommend.current_tariff_candidate(name), standing
 
     async def _async_fetch_candidate(
         self,

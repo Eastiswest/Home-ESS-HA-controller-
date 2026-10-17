@@ -72,6 +72,7 @@
           "octopus_account": "Octopus account number (optional)",
           "import_tou_schedule": "Time-of-use schedule",
           "import_fixed_rate": "Fixed or fallback rate",
+          "standing_charge": "Standing charge",
           "import_price_scale": "Price units",
           "agile_predict": "Predict unannounced prices (AgilePredict)"
         },
@@ -80,7 +81,8 @@
           "octopus_account": "Supply this with an API key and the tariff codes will be looked up for you.",
           "import_tou_schedule": "For example 00:30-04:30=9.5,04:30-00:30=28.0 in local time.",
           "import_fixed_rate": "Used as a fallback if the chosen source returns no prices.",
-          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
+          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour.",
+          "standing_charge": "Pence per day on a fixed or time-of-use tariff. With it entered, the tariff comparison scores your own tariff alongside the Octopus ones for the region above. Left at 0 your tariff is left out, because it would score a day cheaper than it is."
         }
       },
       "tariff_export": {
@@ -348,11 +350,13 @@
           "octopus_account": "Octopus account number (optional)",
           "import_tou_schedule": "Time-of-use schedule",
           "import_fixed_rate": "Fixed or fallback rate",
+          "standing_charge": "Standing charge",
           "import_price_scale": "Price units",
           "agile_predict": "Predict unannounced prices (AgilePredict)"
         },
         "data_description": {
-          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour."
+          "agile_predict": "Octopus announces tomorrow's Agile prices at about 16:00, so for most of the day the plan runs past known prices. With this on, the rest is filled from agilepredict.com's forecast for your region instead of from yesterday's shape. Predicted slots are marked as such, and if the service is unreachable the plan falls back to the old behaviour.",
+          "standing_charge": "Pence per day on a fixed or time-of-use tariff. With it entered, the tariff comparison scores your own tariff alongside the Octopus ones for the region above. Left at 0 your tariff is left out, because it would score a day cheaper than it is."
         }
       },
       "tariff_export": {
