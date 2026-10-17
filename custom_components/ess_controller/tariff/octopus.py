@@ -105,10 +105,15 @@ def build_tariff_code(product_code: str, region: str, direction: str = "import")
 
 def product_code_from_tariff(tariff_code: str) -> str:
     """Recover the product code from a full tariff code."""
+    return product_in_tariff_code(tariff_code) or tariff_code
+
+
+def product_in_tariff_code(tariff_code: str) -> str | None:
+    """The product a full tariff code names, or None for a bare product code."""
     parts = tariff_code.strip().upper().split("-")
     if len(parts) > 3 and parts[0] == "E":
         return "-".join(parts[2:-1])
-    return tariff_code
+    return None
 
 
 def parse_unit_rates(

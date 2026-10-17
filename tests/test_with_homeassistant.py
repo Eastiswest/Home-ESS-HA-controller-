@@ -6270,3 +6270,230 @@ class TestThePlanSensorCarriesRecentPrices:
     async def test_no_lookback_when_asked_for_none(self, hass):
         coordinator = await self._coordinator(hass)
         assert coordinator.recent_prices(0.0) == []
+
+
+class TestTheTariffFormFollowsTheFullCode:
+    """A full tariff code names its product. Typed in beside a product field
+    still holding the old tariff, the form looked the new code up under the old
+    product and reported "no such product" -- for a code Octopus had just
+    emailed. A code found from the account went the same way, silently.
+
+    The form also pre-fills the stored full code, so the code must give way
+    to a product typed over the old one, or every later product change would
+    be quietly switched back."""
+
+    GO = "E-1R-GO-FIX-12M-26-09-29-M"
+    AGILE = "E-1R-AGILE-24-10-01-M"
+
+    @pytest.fixture(autouse=True)
+    def _no_network(self, hass, monkeypatch):
+        """The bare test instance has no network component to hand out an HTTP
+        session; the Octopus calls are stubbed, so none is needed. After ``hass``
+        because that fixture purges the integration's modules."""
+        from custom_components.ess_controller import config_flow as flow_mod
+        from custom_components.ess_controller import coordinator as coordinator_mod
+        from custom_components.ess_controller.tariff import factory as factory_mod
+
+        for module in (flow_mod, coordinator_mod, factory_mod):
+            monkeypatch.setattr(module, "async_get_clientsession", lambda hass: object())
+
+    async def _entry(self, hass, **options):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, **options}
+        )
+        await hass.async_block_till_done()
+        return entry
+
+    async def _submit(self, hass, entry, user_input, step="tariff_import"):
+        from unittest.mock import AsyncMock, patch
+
+        validate = AsyncMock(return_value=10)
+        with patch(
+            "custom_components.ess_controller.config_flow.async_validate_tariff",
+            validate,
+        ):
+            result = await hass.config_entries.options.async_init(entry.entry_id)
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {"next_step_id": step}
+            )
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], user_input
+            )
+            await hass.async_block_till_done()
+        assert result["type"] == "create_entry", result.get("errors")
+        return validate.await_args.args[1:]
+
+    async def test_a_full_code_typed_in_brings_its_product_with_it(self, hass):
+        entry = await self._entry(
+            hass,
+            import_provider="octopus_api",
+            octopus_import_product="AGILE-24-10-01",
+            octopus_import_tariff=self.AGILE,
+            octopus_region="M",
+        )
+        validated = await self._submit(
+            hass,
+            entry,
+            {
+                "octopus_import_product": "AGILE-24-10-01",
+                "octopus_region": "M",
+                "octopus_import_tariff": self.GO,
+            },
+        )
+        assert validated == (self.GO, "GO-FIX-12M-26-09-29")
+        assert entry.options["octopus_import_product"] == "GO-FIX-12M-26-09-29"
+        assert entry.options["octopus_import_tariff"] == self.GO
+
+    async def test_a_product_typed_over_the_old_one_beats_the_pre_filled_code(self, hass):
+        entry = await self._entry(
+            hass,
+            import_provider="octopus_api",
+            octopus_import_product="GO-FIX-12M-26-09-29",
+            octopus_import_tariff=self.GO,
+            octopus_region="M",
+        )
+        validated = await self._submit(
+            hass,
+            entry,
+            {
+                "octopus_import_product": "AGILE-24-10-01",
+                "octopus_region": "M",
+                "octopus_import_tariff": self.GO,  # as the form pre-filled it
+            },
+        )
+        assert validated == (self.AGILE, "AGILE-24-10-01")
+        assert entry.options["octopus_import_product"] == "AGILE-24-10-01"
+        assert entry.options["octopus_import_tariff"] == self.AGILE
+
+    async def test_a_code_found_from_the_account_brings_its_product_too(self, hass):
+        from unittest.mock import AsyncMock, patch
+
+        entry = await self._entry(
+            hass,
+            import_provider="octopus_api",
+            octopus_import_product="AGILE-24-10-01",
+            octopus_import_tariff=self.AGILE,
+            octopus_region="M",
+        )
+        discover = AsyncMock(
+            return_value={"import": self.GO, "export": None, "mpans": []}
+        )
+        with patch(
+            "custom_components.ess_controller.config_flow.async_discover_tariffs",
+            discover,
+        ):
+            # The code box cleared, so the account is asked.
+            validated = await self._submit(
+                hass,
+                entry,
+                {
+                    "octopus_import_product": "AGILE-24-10-01",
+                    "octopus_region": "M",
+                    "octopus_api_key": "sk_live_test",
+                    "octopus_account": "A-12345678",
+                },
+            )
+        assert discover.await_count == 1
+        assert validated == (self.GO, "GO-FIX-12M-26-09-29")
+        assert entry.options["octopus_import_product"] == "GO-FIX-12M-26-09-29"
+        assert entry.options["octopus_import_tariff"] == self.GO
+
+    async def test_a_bare_product_code_is_tidied_and_kept(self, hass):
+        entry = await self._entry(hass, import_provider="octopus_api", octopus_region="M")
+        validated = await self._submit(
+            hass,
+            entry,
+            {"octopus_import_product": " go-fix-12m-26-09-29 ", "octopus_region": "M"},
+        )
+        assert validated == (self.GO, "GO-FIX-12M-26-09-29")
+        assert entry.options["octopus_import_product"] == "GO-FIX-12M-26-09-29"
+
+    async def test_the_export_side_is_treated_the_same(self, hass):
+        fixed = "E-1R-OUTGOING-FIX-12M-19-05-13-M"
+        entry = await self._entry(
+            hass,
+            export_provider="octopus_api",
+            octopus_export_product="OUTGOING-AGILE-24-10-01",
+            octopus_export_tariff="E-1R-OUTGOING-AGILE-24-10-01-M",
+            octopus_region="M",
+        )
+        validated = await self._submit(
+            hass,
+            entry,
+            {
+                "octopus_export_product": "OUTGOING-AGILE-24-10-01",
+                "octopus_region": "M",
+                "octopus_export_tariff": fixed,
+            },
+            step="tariff_export",
+        )
+        assert validated == (fixed, "OUTGOING-FIX-12M-19-05-13")
+        assert entry.options["octopus_export_product"] == "OUTGOING-FIX-12M-19-05-13"
+        assert entry.options["octopus_export_tariff"] == fixed
+
+    async def test_the_provider_fetches_the_product_the_code_names(self, hass):
+        """Entries saved before the form was fixed can hold the pair mismatched."""
+        from custom_components.ess_controller.tariff.factory import build_provider
+
+        provider = build_provider(
+            hass,
+            {
+                "import_provider": "octopus_api",
+                "octopus_import_product": "AGILE-24-10-01",
+                "octopus_import_tariff": self.GO,
+                "octopus_region": "M",
+            },
+            "import",
+        )
+        assert provider.describe()["product_code"] == "GO-FIX-12M-26-09-29"
+        assert provider.describe()["tariff_code"] == self.GO
+
+    async def test_the_comparison_compares_against_the_tariff_the_code_names(self, hass):
+        """The same mismatched entry: the house is planned on Go, so Go is the
+        tariff everything else is measured against, not the stale product."""
+        entry = await self._entry(
+            hass,
+            import_provider="octopus_api",
+            octopus_import_product="AGILE-24-10-01",
+            octopus_import_tariff=self.GO,
+            octopus_region="M",
+            agile_predict=False,
+        )
+        from custom_components.ess_controller.tariff.fixed import FixedTariffProvider
+
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        # No Octopus to fetch the house's prices from here; any prices will do
+        # for the horizon, since the question is which candidate is "current".
+        coordinator._import_provider = FixedTariffProvider(25.0)
+        seen: list[str] = []
+        coordinator._async_fetch_candidate = _flat_candidate(seen)
+        recommendation = await coordinator.async_recommend_tariffs()
+        assert recommendation is not None
+        assert "GO-FIX-12M-26-09-29" in seen
+        assert recommendation.current is not None
+        assert recommendation.current.candidate.product_code == "GO-FIX-12M-26-09-29"
+
+
+def _flat_candidate(seen: list[str] | None = None, standing: float = 50.0):
+    """A stand-in for the Octopus fetch: 25p flat, and a standing charge."""
+    from custom_components.ess_controller.models import PriceSlot
+    from custom_components.ess_controller.tariff.base import PriceSeries
+
+    async def flat(session, candidate, now, window):
+        if seen is not None:
+            seen.append(candidate.product_code)
+        slots = []
+        cursor = now.replace(minute=0, second=0, microsecond=0)
+        while cursor < now + timedelta(hours=window):
+            slots.append(
+                PriceSlot(start=cursor, end=cursor + timedelta(minutes=30), price=25.0)
+            )
+            cursor += timedelta(minutes=30)
+        return PriceSeries(slots), standing
+
+    return flat

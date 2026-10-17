@@ -27,6 +27,7 @@ from custom_components.ess_controller.tariff.octopus import (
     parse_account_tariffs,
     parse_unit_rates,
     product_code_from_tariff,
+    product_in_tariff_code,
 )
 
 UTC = UTC
@@ -132,6 +133,14 @@ class TestOctopusParsing:
 
     def test_product_recovered_from_tariff_code(self):
         assert product_code_from_tariff("E-1R-AGILE-24-10-01-C") == "AGILE-24-10-01"
+
+    def test_a_full_code_names_its_product_and_a_bare_one_does_not(self):
+        assert (
+            product_in_tariff_code("E-1R-GO-FIX-12M-26-09-29-M") == "GO-FIX-12M-26-09-29"
+        )
+        assert product_in_tariff_code(" e-1r-agile-24-10-01-c ") == "AGILE-24-10-01"
+        assert product_in_tariff_code("GO-FIX-12M-26-09-29") is None
+        assert product_in_tariff_code("AGILE-24-10-01") is None
 
     def test_parses_newest_first_results_into_order(self):
         payload = {

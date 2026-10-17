@@ -73,6 +73,7 @@ from .const import (
     CONF_LOG_RETENTION_DAYS,
     CONF_MIN_GRID_CHARGE_KWH,
     CONF_OCTOPUS_IMPORT_PRODUCT,
+    CONF_OCTOPUS_IMPORT_TARIFF,
     CONF_OCTOPUS_REGION,
     CONF_ONLY_JOINED_SESSIONS,
     CONF_OUTAGE_CALENDAR,
@@ -218,7 +219,7 @@ from .stall import STALL_CYCLES, StallReading, stalled
 from .tariff import agile_predict
 from .tariff.base import PriceSeries, refill_price_from_outlook
 from .tariff.factory import build_provider
-from .tariff.octopus import OctopusApiError
+from .tariff.octopus import OctopusApiError, product_in_tariff_code
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2869,7 +2870,11 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         import_codes = _as_list(options.get(CONF_RECOMMEND_IMPORT_PRODUCTS)) or list(
             recommend.DEFAULT_IMPORT_PRODUCTS
         )
-        current_code = options.get(CONF_OCTOPUS_IMPORT_PRODUCT)
+        # The full tariff code names the product the house is actually planned
+        # on; entries saved before the form kept the pair in step can disagree.
+        current_code = product_in_tariff_code(
+            options.get(CONF_OCTOPUS_IMPORT_TARIFF) or ""
+        ) or options.get(CONF_OCTOPUS_IMPORT_PRODUCT)
         if current_code and current_code not in import_codes:
             import_codes.insert(0, current_code)
 

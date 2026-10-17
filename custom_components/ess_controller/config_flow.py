@@ -192,6 +192,7 @@ from .tariff.octopus import (
     async_discover_tariffs,
     async_validate_tariff,
     build_tariff_code,
+    product_in_tariff_code,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -306,6 +307,46 @@ def _labelled(pairs: list[tuple[str, str]]) -> selector.SelectSelector:
 
 def _region_options() -> selector.SelectSelector:
     return _labelled([(code, f"{code} — {REGION_NAMES[code]}") for code in REGIONS])
+
+
+def _tariff_keys(direction: str) -> tuple[str, str]:
+    """The product and full-tariff-code option keys for one direction."""
+    if direction == "import":
+        return CONF_OCTOPUS_IMPORT_PRODUCT, CONF_OCTOPUS_IMPORT_TARIFF
+    return CONF_OCTOPUS_EXPORT_PRODUCT, CONF_OCTOPUS_EXPORT_TARIFF
+
+
+def _normalised(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _tariff_input(
+    previous: dict[str, Any], user_input: dict[str, Any], direction: str
+) -> dict[str, Any]:
+    """The settings a tariff step was submitted with, over what was stored.
+
+    The full tariff code is the one field a blank box must clear, and the one
+    that gives way to a product typed over the old one. The form pre-fills it
+    with the stored code, so left alone it would outlive the product change
+    beside it and switch the product straight back.
+    """
+    cleaned = _clean(user_input)
+    data = dict(previous)
+    data.update(cleaned)
+    product_key, tariff_key = _tariff_keys(direction)
+    if tariff_key not in cleaned:
+        if (
+            previous.get(
+                CONF_IMPORT_PROVIDER if direction == "import" else CONF_EXPORT_PROVIDER
+            )
+            == PROVIDER_OCTOPUS_API
+        ):
+            data.pop(tariff_key, None)
+    elif _normalised(cleaned.get(product_key)) != _normalised(
+        previous.get(product_key)
+    ) and _normalised(cleaned[tariff_key]) == _normalised(previous.get(tariff_key)):
+        data.pop(tariff_key, None)
+    return data
 
 
 # A mistyped product code and a dead network are different problems with
@@ -774,6 +815,15 @@ class EssFlowMixin:
         if not tariff_code:
             return {"base": "octopus_tariff_required"}
 
+        # A full tariff code names its product, and that is the one to look up
+        # and to keep: left to disagree, a switch typed into one box and not
+        # the other was reported as "no such product", and a code found from
+        # the account was validated under whatever product was already there.
+        embedded = product_in_tariff_code(tariff_code)
+        if embedded and embedded != product:
+            product = embedded
+            data[product_key] = product
+
         try:
             count = await async_validate_tariff(session, tariff_code, product)
         except OctopusApiError as err:
@@ -897,8 +947,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            candidate = dict(self._data)
-            candidate.update(_clean(user_input))
+            candidate = _tariff_input(self._data, user_input, "import")
             errors = await self._async_validate_tariff(candidate, "import")
             if not errors:
                 self._data = candidate
@@ -918,8 +967,7 @@ class EssConfigFlow(EssFlowMixin, ConfigFlow, domain=DOMAIN):
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            candidate = dict(self._data)
-            candidate.update(_clean(user_input))
+            candidate = _tariff_input(self._data, user_input, "export")
             errors = await self._async_validate_tariff(candidate, "export")
             if not errors:
                 self._data = candidate
@@ -1147,8 +1195,7 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            candidate = dict(self.current)
-            candidate.update(_clean(user_input))
+            candidate = _tariff_input(self.current, user_input, "import")
             errors = await self._async_validate_tariff(candidate, "import")
             if not errors:
                 self._data = candidate
@@ -1164,8 +1211,7 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            candidate = dict(self.current)
-            candidate.update(_clean(user_input))
+            candidate = _tariff_input(self.current, user_input, "export")
             errors = await self._async_validate_tariff(candidate, "export")
             if not errors:
                 self._data = candidate

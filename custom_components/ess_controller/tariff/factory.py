@@ -39,7 +39,11 @@ from ..const import (
 from .base import TariffProvider, ZeroTariffProvider
 from .entity import EntityTariffProvider
 from .fixed import FixedTariffProvider, TimeOfUseTariffProvider
-from .octopus import OctopusApiTariffProvider, build_tariff_code
+from .octopus import (
+    OctopusApiTariffProvider,
+    build_tariff_code,
+    product_in_tariff_code,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -118,10 +122,13 @@ def build_provider(
                 "Octopus %s tariff code missing; using a fixed rate", direction
             )
             return FixedTariffProvider(fixed_rate) if is_import else ZeroTariffProvider()
+        # A full tariff code names its own product, and that one is right
+        # whatever the product field says: the two drift when a switch is
+        # entered in one box and not the other.
         return OctopusApiTariffProvider(
             async_get_clientsession(hass),
             tariff_code=tariff_code,
-            product_code=product,
+            product_code=product_in_tariff_code(tariff_code) or product,
             api_key=options.get(CONF_OCTOPUS_API_KEY),
             scale_mode=scale,
         )
