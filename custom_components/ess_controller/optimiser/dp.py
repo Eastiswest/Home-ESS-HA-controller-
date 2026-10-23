@@ -79,6 +79,10 @@ CRAMPED_WINDOW_SHARE = 0.15
 # by tomorrow the plan will have been rebuilt a hundred times.
 SOLAR_RESERVE_LOOKAHEAD_HOURS = 12.0
 
+# Prices within this of the horizon's lowest count as the same cheap window,
+# and a horizon whose prices all sit within it has no window at all.
+FILL_WINDOW_PRICE_EPS = 0.01
+
 # The most of the usable window the reserve may withhold from grid charging.
 #
 # The reserve is sized from measured forecast error, and on a small pack a bad
@@ -156,6 +160,19 @@ class OptimiserSettings:
     allowed down to its reserve in self-use, so when the forecast runs heavy
     the house draws on the cushion rather than the grid. Zero plans to the bare
     minimum, which is the default.
+    """
+
+    fill_price: float | None = None
+    """Fill the pack whenever the import price is at or below this, whatever
+    the forecast. None leaves it off, which is the default.
+
+    On a scheduled tariff the cheap window comes round every day at the same
+    price, so a kWh bought and not used is simply one fewer to buy tomorrow;
+    a kWh not bought and needed is bought at the day rate. Set to the
+    schedule's cheapest rate, the plan aims for the ceiling through every
+    window at that rate or below, less the room the forecast sun needs
+    afterwards. Off, the plan buys what the forecast says it needs, which is
+    right wherever tomorrow's price is unknown.
     """
 
     solar_headroom_error_kwh: float = 0.0
@@ -825,6 +842,59 @@ def _solar_headroom_levels(
     return ceilings
 
 
+def _fill_targets(
+    slots: list[HorizonSlot],
+    battery: BatterySpec,
+    grid: GridSpec,
+    settings: OptimiserSettings,
+    levels: int,
+    step: float,
+) -> list[int]:
+    """The level each cheap slot is filling towards, or -1 outside a window.
+
+    A cheap slot is one at or below the fill price; a free half-hour from a
+    grid session is cheap too, and fills. Each carries the ceiling less the
+    peak the forecast sun would lift the pack to from here on, counted to the
+    end of the horizon and not merely to the next window: a window can top
+    the pack up, it cannot take anything out, so sun on the far side of one
+    still needs its room kept. Only the surplus counts, so a morning that
+    drains the pack before the sun arrives frees that much room by itself,
+    and sun arriving inside a window is room the slots before it leave. Load
+    in a cheap slot is no drain, since the grid carries it there. With grid
+    charging refused there is nothing to fill with, and a horizon that is
+    cheap throughout has no window.
+    """
+    none = [-1] * len(slots)
+    if settings.fill_price is None or not slots or not grid.allow_grid_charge:
+        return none
+    cheap = [
+        slot.import_price <= settings.fill_price + FILL_WINDOW_PRICE_EPS for slot in slots
+    ]
+    if all(cheap) or not any(cheap):
+        return none
+    targets = list(none)
+    for index, is_cheap in enumerate(cheap):
+        if not is_cheap:
+            continue
+        run = 0.0
+        peak = 0.0
+        for later, slot in enumerate(slots[index + 1 :], index + 1):
+            net = slot.pv_kwh - slot.load_kwh
+            if cheap[later]:
+                net = max(net, 0.0)
+            # Stored sun pays its way in; a drain pays its way out, and no
+            # faster than the inverter can deliver it -- the rest of a heavy
+            # morning is bought, and frees no room.
+            if net > 0.0:
+                run += net * battery.charge_efficiency
+            else:
+                drain = min(-net, battery.max_discharge_kw * slot.duration_hours)
+                run -= drain / battery.discharge_efficiency
+            peak = max(peak, run)
+        targets[index] = max(levels - math.ceil(peak / step - EPS), 0)
+    return targets
+
+
 def _terminal_terms(
     slots: list[HorizonSlot], battery: BatterySpec, settings: OptimiserSettings
 ) -> tuple[float, float]:
@@ -936,6 +1006,19 @@ def optimise(
 
     headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
     floors = _cushion_levels(slots, settings, grid, levels, step)
+    targets = _fill_targets(slots, battery, grid, settings, levels, step)
+    # Window charging left undone while below the target is priced per level
+    # at the spread: what the missing kWh costs bought later at the dearest
+    # half-hour, less what it would have cost here. It is the charging *this
+    # slot could have done* that is priced, never the shortfall itself: a
+    # shortfall can be shrunk by buying dear before the window or by holding
+    # the pack shut through a dear evening, and priced that way the sweep did
+    # both. Charging that no move in the slot can express -- the import limit,
+    # the minimum purchase, the solar reserve -- is not undone and costs
+    # nothing, for the same reason. Priced rather than enforced, so a charger
+    # too slow for the window fills what it can.
+    prices = [slot.import_price for slot in slots]
+    short_price = max(max(prices) - min(prices), 0.0) * step
     slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
 
     for i in range(n - 1, -1, -1):
@@ -963,6 +1046,8 @@ def optimise(
                 priced.append((offset, flow.cost, bought))
         ceiling = headroom[i]
         floor = floors[i]
+        target = min(targets[i], ceiling) if targets[i] >= 0 else -1
+        charges = sorted(offset for offset, _, _ in priced if offset > 0)
         # What a level discharged into the cushion costs here, on top of the
         # energy. Sized by this slot's price, so a shortfall is dear where
         # electricity is.
@@ -986,6 +1071,18 @@ def optimise(
                 candidate = cost + future[k]
                 if k < floor and k < j:
                     candidate += (min(j, floor) - k) * into_cushion
+                # Discharging in a window is priced as charging left undone,
+                # which it is from the fill's side; on an export site it also
+                # blocks a round trip the next window slot would have refilled,
+                # a loss accepted for the window never being drained to sell.
+                if target >= 0 and k < target:
+                    reach = min(j, target)
+                    for up in charges:
+                        if j + up > target:
+                            break
+                        reach = j + up
+                    if k < reach:
+                        candidate += (reach - k) * short_price
                 # Strictly ``<``, which breaks exact ties towards the more
                 # discharged state. That is deliberate. At a flat price the
                 # terminal value of holding a kWh exactly equals the import it
@@ -1151,7 +1248,23 @@ def optimise(
     # the decision's own margin rather than the rounding the sweep cannot avoid.
     plan.self_use_cost = gridded.total_cost
     plan.self_use_terminal_value = gridded.terminal_value
-    if gridded.net_cost < plan.net_cost - EPS:
+    # A cheap-window fill is insurance against the forecast, and on the
+    # forecast it never pays: a sunny, quiet day values the spare charge at
+    # nothing, and judged on that the guard handed back plain self-use, which
+    # buys nothing in the window at all. So the plan is allowed to lose what
+    # the fill itself can cost -- everything bought in the window, the charge
+    # and the load the pack would otherwise have carried, at the window price
+    # plus wear -- and not a penny more, so a plan that went wrong elsewhere
+    # is still caught.
+    allowance = 0.0
+    if settings.fill_price is not None:
+        bought = sum(
+            slot.grid_import_kwh
+            for slot, target in zip(plan.slots, targets, strict=True)
+            if target >= 0
+        )
+        allowance = bought * (max(settings.fill_price, 0.0) + battery.cycle_cost_per_kwh)
+    if gridded.net_cost < plan.net_cost - allowance - EPS:
         self_use.baseline_cost = plan.baseline_cost
         self_use.baseline_terminal_value = plan.baseline_terminal_value
         self_use.self_use_cost = plan.self_use_cost
@@ -1161,8 +1274,36 @@ def optimise(
         )
         return self_use
 
-    plan.reason = _describe(plan, battery)
+    plan.reason = _describe(
+        plan, battery, _fill_note(plan, targets, headroom, battery, step)
+    )
     return plan
+
+
+def _fill_note(
+    plan: Plan,
+    targets: list[int],
+    headroom: list[int],
+    battery: BatterySpec,
+    step: float,
+) -> str:
+    """Where the plan is filling the first cheap window to, for the reason."""
+    ends = [
+        i
+        for i, target in enumerate(targets)
+        if target >= 0 and (i + 1 == len(targets) or targets[i + 1] < 0)
+    ]
+    if not ends or len(plan.slots) <= ends[0]:
+        return ""
+    first = ends[0]
+    aim = battery.energy_to_soc(min(targets[first], headroom[first]) * step)
+    reached = plan.slots[first].soc_end
+    note = f"fill the cheap window to {reached:.0f}%"
+    if reached + 0.5 < aim:
+        return f"{note}, short of the {aim:.0f}% it was aiming for"
+    if reached < battery.max_soc - 1.0:
+        return f"{note}, leaving room for the sun"
+    return note
 
 
 def _simulate(
@@ -1314,7 +1455,7 @@ def simulate_self_use(
     return plan
 
 
-def _describe(plan: Plan, battery: BatterySpec) -> str:
+def _describe(plan: Plan, battery: BatterySpec, fill: str = "") -> str:
     """A short human-readable summary of what the plan does and why.
 
     This is what makes the optimiser auditable: the sensor carries a sentence
@@ -1323,6 +1464,8 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
     charge_slots = [s for s in plan.slots if s.action is SlotAction.CHARGE]
     discharge_slots = [s for s in plan.slots if s.action is SlotAction.DISCHARGE]
     parts: list[str] = []
+    if fill:
+        parts.append(fill)
 
     # Said first, because nothing else in the sentence matters if this is true.
     #
@@ -1376,6 +1519,13 @@ def _describe(plan: Plan, battery: BatterySpec) -> str:
 
     saving = plan.saving_vs_self_use
     summary = "; ".join(parts)
+    if saving < -0.5:
+        # Only a cheap-window fill is kept at a loss on the forecast: the
+        # spare charge is bought against the forecast being wrong.
+        return (
+            f"{summary}. Costs {-saving:.0f}p more than self-use on the forecast, "
+            "carrying charge for the day ahead."
+        )
     if abs(saving) < 0.5:
         saving = 0.0  # never "-0p"
     return f"{summary}. Saves {saving:.0f}p vs self-use over the horizon."

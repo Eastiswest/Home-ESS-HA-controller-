@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from itertools import pairwise
 
@@ -2448,3 +2449,315 @@ class TestThePlanKeepsACushion:
             assert hold_is_worthwhile(
                 slot.import_price, slot.hold_value, slot.load_kwh - slot.pv_kwh, 0.5
             )
+
+
+class TestAScheduledTariffFillsItsCheapWindow:
+    """On Go the planner bought 8.8 kWh for a 13.6 kWh day and the house spent
+    the evening on 33.56p with the pack at its floor. The forecast was wrong,
+    which forecasts are; the mistake was treating a kWh too many as a cost.
+    On a schedule the window comes round tomorrow at the same price, so a
+    spare kWh is one fewer to buy then, and a missing one costs the day rate.
+    """
+
+    NIGHT = 9.5
+    DAY = 33.56
+
+    @classmethod
+    def _slots(
+        cls,
+        load: float = 0.15,
+        pv: dict[int, float] | None = None,
+        start_hour: int = 20,
+        prices: dict[int, float] | None = None,
+        count: int = 96,
+    ):
+        """From ``start_hour``: 00:30-05:30 at 9.5p, 33.56p otherwise."""
+        slots = []
+        for index in range(count):
+            start = datetime(2026, 10, 23, start_hour, 0) + timedelta(minutes=30 * index)
+            minute = start.hour * 60 + start.minute
+            price = cls.NIGHT if 30 <= minute < 330 else cls.DAY
+            price = (prices or {}).get(index, price)
+            slots.append(
+                HorizonSlot(
+                    start=start,
+                    end=start + timedelta(minutes=30),
+                    import_price=price,
+                    export_price=0.0,
+                    pv_kwh=(pv or {}).get(index, 0.0),
+                    load_kwh=load,
+                )
+            )
+        return slots
+
+    @staticmethod
+    def _plan(slots, fill=True, start_soc=20.0, grid=None, **battery):
+        spec = dict(min_soc=20.0, max_charge_kw=6.0, cycle_cost_per_kwh=1.5)
+        spec.update(battery)
+        return optimise(
+            slots,
+            start_soc,
+            make_battery(**spec),
+            grid or make_grid(allow_export=False, allow_battery_export=False),
+            OptimiserSettings(fill_price=9.5 if fill else None, refill_price=9.5),
+        )
+
+    @staticmethod
+    def _window_end(plan):
+        """The slot the first cheap window ends on."""
+        for earlier, later in pairwise(plan.slots):
+            if earlier.import_price < later.import_price:
+                return earlier
+        raise AssertionError("no window in the plan")
+
+    @staticmethod
+    def _dear_buying(plan) -> float:
+        return sum(s.charge_ac_kwh for s in plan.slots if s.import_price > 10.0)
+
+    def test_the_window_ends_at_the_ceiling(self):
+        plan = self._plan(self._slots())
+        assert self._window_end(plan).soc_end >= 94.0
+        assert self._dear_buying(plan) == 0.0
+        assert "fill the cheap window to 95%" in plan.reason
+
+    def test_off_the_plan_buys_only_the_need(self):
+        """The behaviour on every other tariff, and the one that stranded the
+        house: a 7 kWh day needs a third of the pack, so a third is bought."""
+        plan = self._plan(self._slots(), fill=False)
+        assert self._window_end(plan).soc_end < 75.0
+
+    def test_the_fill_costs_the_day_nothing(self):
+        """Nothing bought in the window is wasted. The extra kWh are still
+        there at the horizon end, valued at the price they were bought for."""
+        full = self._plan(self._slots())
+        lean = self._plan(self._slots(), fill=False)
+        spare = sum(s.charge_ac_kwh for s in full.slots) - sum(
+            s.charge_ac_kwh for s in lean.slots
+        )
+        assert spare > 8.0
+        # Wear and the round trip are all a spare kWh costs: a few pence,
+        # against the 24p a missing one is bought for.
+        assert (full.net_cost - lean.net_cost) / spare < 3.0
+
+    def test_room_is_left_for_the_forecast_sun(self):
+        """Eight kWh of sun over 6.8 kWh of surplus, less the nine half-hours of
+        standby before it: 6.8 x 0.95 in, 1.35 / 0.95 out, about 5.0 kWh of
+        room on a 22 kWh pack, so the window stops near 71%."""
+        sunny = dict.fromkeys(range(28, 36), 1.0)  # 10:00 to 14:00
+        plan = self._plan(self._slots(pv=sunny))
+        end = self._window_end(plan)
+        room = 8 * 0.85 * 0.95 - 9 * 0.15 / 0.95
+        aim = 95.0 - room / 22.0 * 100.0
+        assert end.soc_end == pytest.approx(aim, abs=2.0), (end.soc_end, aim)
+        # A fraction of a level per sunny half-hour is the grid's rounding, not
+        # a full pack; the plan with the rule off spills the same.
+        assert sum(s.curtailed_kwh for s in plan.slots[:48]) < 0.3
+        after_sun = next(
+            s for s in plan.slots if s.start.hour == 14 and s.start.minute == 0
+        )
+        assert after_sun.soc_end >= 90.0
+        assert "leaving room for the sun" in plan.reason
+
+    def test_sun_beyond_the_next_window_still_gets_its_room(self):
+        """A window can top the pack up but cannot take anything out, so sun on
+        the far side of one is room the window before it has to leave."""
+        both_days = dict.fromkeys(list(range(28, 36)) + list(range(76, 84)), 1.0)
+        plan = self._plan(self._slots(pv=both_days))
+        assert sum(s.curtailed_kwh for s in plan.slots) < 0.6
+        first = self._window_end(plan)
+        assert 62.0 <= first.soc_end <= 76.0
+        second = [s for s in plan.slots[48:] if s.import_price == self.NIGHT][-1]
+        assert 62.0 <= second.soc_end <= 76.0
+
+    def test_a_heavy_morning_frees_only_what_the_inverter_can_give(self):
+        """A 6 kW morning against a 3.6 kW inverter: the pack drains at 3.6 kW
+        and the rest is bought, so the room it frees is the inverter's, not
+        the load's, and the sun after it still has to fit."""
+        from custom_components.ess_controller.optimiser.dp import _fill_targets
+
+        battery = make_battery(min_soc=20.0, max_discharge_kw=3.6)
+        grid = make_grid(allow_export=False)
+        levels, step = 60, battery.usable_kwh / 60
+        heavy = dict.fromkeys(range(20, 26), 3.0)  # 06:00-09:00, 6 kW
+        sunny = dict.fromkeys(range(28, 36), 2.0)  # 10:00-14:00
+        slots = self._slots(pv=sunny)
+        for index, load in heavy.items():
+            slots[index].load_kwh = load
+        targets = _fill_targets(
+            slots, battery, grid, OptimiserSettings(fill_price=9.5), levels, step
+        )
+        drained = 6 * 1.8 / 0.95 + 3 * 0.15 / 0.95  # 3.6 kW for 3 h, then standby
+        surplus = 8 * 1.85 * 0.95
+        room = surplus - drained
+        assert targets[18] == levels - math.ceil(room / step - 1e-6)
+        assert room > 2.0
+
+    def test_a_flat_tariff_has_no_window(self):
+        flat = build_slots([25.0] * 48, load=0.15)
+        plan = self._plan(flat)
+        assert all(s.action is not SlotAction.CHARGE for s in plan.slots)
+        assert "fill the cheap window" not in plan.reason
+
+    def test_a_slow_charger_fills_what_it_can_and_nothing_dear(self):
+        """Priced, not enforced: a 1.5 kW charger cannot fill 16.5 kWh in five
+        hours. It charges the whole window, buys nothing at the day rate to
+        make up the difference, and the plan says so."""
+        plan = self._plan(self._slots(load=0.1), max_charge_kw=1.5)
+        lean = self._plan(self._slots(load=0.1), fill=False, max_charge_kw=1.5)
+        assert not plan.infeasible
+        assert self._dear_buying(plan) == 0.0
+        window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
+        assert all(s.action is SlotAction.CHARGE for s in window)
+        assert self._window_end(plan).soc_end > self._window_end(lean).soc_end + 5.0
+        assert 45.0 <= self._window_end(plan).soc_end <= 53.0
+        assert "short of the" in plan.reason
+        # And it does not hold the pack shut through the dear evening to
+        # arrive at the window higher: the evening is served from the pack.
+        assert [round(s.soc_end, 1) for s in plan.slots[:9]] == [
+            round(s.soc_end, 1) for s in lean.slots[:9]
+        ]
+
+    def test_an_import_limit_is_not_made_up_at_the_day_rate(self):
+        """The charger could do 6 kW but the connection allows 3 kW: the window
+        charges at what the limit allows, and the evening before it is served
+        from the pack exactly as it would be with the rule off."""
+        limited = make_grid(
+            allow_export=False, allow_battery_export=False, import_limit_kw=3.0
+        )
+        plan = self._plan(self._slots(), start_soc=40.0, grid=limited)
+        lean = self._plan(self._slots(), fill=False, start_soc=40.0, grid=limited)
+        assert self._dear_buying(plan) == 0.0
+        assert [round(s.soc_end, 1) for s in plan.slots[:9]] == [
+            round(s.soc_end, 1) for s in lean.slots[:9]
+        ]
+        assert self._window_end(plan).soc_end >= 80.0
+
+    def test_with_grid_charging_refused_there_is_nothing_to_fill(self):
+        """No targets at all, so no holds through the dear day to protect a
+        fill that cannot happen: the plan is the one the rule off would make."""
+        from custom_components.ess_controller.optimiser.dp import _fill_targets
+
+        refused = make_grid(
+            allow_export=False, allow_battery_export=False, allow_grid_charge=False
+        )
+        battery = make_battery(min_soc=20.0)
+        targets = _fill_targets(
+            self._slots(), battery, refused, OptimiserSettings(fill_price=9.5), 60, 0.275
+        )
+        assert targets == [-1] * 96
+        plan = self._plan(self._slots(), start_soc=90.0, grid=refused)
+        lean = self._plan(self._slots(), fill=False, start_soc=90.0, grid=refused)
+        assert [(s.action, round(s.soc_end, 1)) for s in plan.slots] == [
+            (s.action, round(s.soc_end, 1)) for s in lean.slots
+        ]
+
+    def test_a_free_half_hour_fills_too_and_keeps_the_window(self):
+        """A grid session can make one afternoon slot free. It is cheaper than
+        the window, and it must not become the only window there is."""
+        free = {40: 0.0}  # 16:00 the next day
+        plan = self._plan(self._slots(pv=None, prices=free))
+        assert self._window_end(plan).soc_end >= 94.0
+        assert plan.slots[40].action is SlotAction.CHARGE
+        assert plan.slots[40].soc_end > plan.slots[40].soc_start + 5.0
+
+    def test_a_mid_rate_is_not_a_window(self):
+        """Three rates, as on Cosy or Economy 10: only the lowest fills."""
+        afternoon = dict.fromkeys(range(34, 40), 20.0)  # 13:00 to 16:00
+        plan = self._plan(self._slots(prices=afternoon))
+        assert self._window_end(plan).soc_end >= 94.0
+        mid = [s for s in plan.slots if s.import_price == 20.0]
+        assert mid and all(s.action is not SlotAction.CHARGE for s in mid)
+
+    def test_a_window_overlapping_the_sun_leaves_it_room(self):
+        """An afternoon window: sun arriving inside it is room the slots before
+        it leave, so the fill waits for the sun rather than spilling it."""
+        afternoon = dict.fromkeys(range(34, 40), 9.5)  # 13:00 to 16:00
+        sunny = dict.fromkeys(range(30, 38), 1.5)  # 11:00 to 15:00
+        plan = self._plan(self._slots(prices=afternoon, pv=sunny))
+        assert sum(s.curtailed_kwh for s in plan.slots[:48]) < 0.5
+        assert plan.slots[39].soc_end >= 92.0  # full, to the grid's rounding
+
+    def test_a_plan_made_inside_the_window_still_fills(self):
+        """At runtime the plan is rebuilt every few minutes, so most of them
+        start with the window already open."""
+        plan = self._plan(self._slots(start_hour=2, count=72))
+        assert self._dear_buying(plan) == 0.0
+        assert self._window_end(plan).soc_end >= 94.0
+
+    def test_a_full_pack_only_tops_up_what_the_evening_took(self):
+        plan = self._plan(self._slots(), start_soc=95.0)
+        before = plan.slots[:9]  # 20:00 to 00:30, at the day rate
+        assert all(s.action is not SlotAction.CHARGE for s in before)
+        topped = sum(s.charge_ac_kwh for s in plan.slots[9:19])
+        assert 1.0 < topped < 2.5  # the 1.35 kWh the evening used, and the losses
+        assert self._window_end(plan).soc_end >= 94.0
+
+    def test_a_sunny_quiet_day_keeps_the_fill_and_says_what_it_costs(self):
+        """On the forecast the fill loses a little, and the guard that would
+        hand back self-use must not fire: it would buy nothing at all."""
+        sunny = dict.fromkeys(list(range(28, 36)) + list(range(76, 84)), 1.0)
+        plan = self._plan(self._slots(load=0.1, pv=sunny))
+        assert "Self-consumption" not in plan.reason
+        # Seven kWh of surplus sun a day on a 4.8 kWh house: the window's job
+        # is a top-up to the fifties, and the sun does the rest.
+        window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
+        assert sum(s.charge_ac_kwh for s in window) > 3.0
+        assert 45.0 <= self._window_end(plan).soc_end <= 65.0
+        assert plan.saving_vs_self_use > -60.0
+        if plan.saving_vs_self_use < -0.5:
+            assert "carrying charge for the day ahead" in plan.reason
+        else:
+            assert "Saves" in plan.reason
+
+    def test_too_much_sun_for_the_pack_means_nothing_to_fill(self):
+        """Fifteen kWh of sun a day cannot all go in a 16.5 kWh window on top
+        of anything: the room is the whole pack, and the window buys nothing."""
+        sunny = dict.fromkeys(list(range(28, 38)) + list(range(76, 86)), 1.5)
+        plan = self._plan(self._slots(load=0.1, pv=sunny))
+        lean = self._plan(self._slots(load=0.1, pv=sunny), fill=False)
+        window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
+        bought = sum(s.charge_ac_kwh for s in window)
+        # The evening's own need is still bought; nothing is bought on top.
+        assert bought == pytest.approx(
+            sum(s.charge_ac_kwh for s in lean.slots[:48] if s.import_price == self.NIGHT),
+            abs=0.3,
+        )
+        assert plan.net_cost == pytest.approx(lean.net_cost, abs=5.0)
+
+    def test_a_loss_beyond_the_fill_itself_is_still_vetoed(self):
+        """The guard tolerates what the fill can cost and nothing more."""
+        from custom_components.ess_controller.models import Plan
+
+        battery = make_battery()
+        lossy = Plan(created=START, total_cost=400.0, self_use_cost=100.0)
+        from custom_components.ess_controller.optimiser.dp import _describe
+
+        text = _describe(lossy, battery, "fill the cheap window to 95%")
+        assert text.endswith(
+            "Costs 300p more than self-use on the forecast, carrying charge for the day ahead."
+        )
+
+    def test_the_targets_themselves(self):
+        from custom_components.ess_controller.optimiser.dp import _fill_targets
+
+        battery = make_battery(min_soc=20.0)
+        grid = make_grid(allow_export=False)
+        levels, step = 60, battery.usable_kwh / 60
+        slots = self._slots(pv={30: 3.0, 31: 3.0})  # 11:00-12:00, 6 kWh
+        targets = _fill_targets(
+            slots, battery, grid, OptimiserSettings(fill_price=9.5), levels, step
+        )
+        windows = [i for i, t in enumerate(targets) if t >= 0]
+        assert windows == list(range(9, 19)) + list(range(57, 67))  # 00:30-05:30
+        # Every slot of the first window leaves the same room: load inside the
+        # window is the grid's, so only the eleven dear half-hours before the
+        # sun drain the pack, and 5.7 kWh of surplus goes in at 95%.
+        assert len(set(targets[9:19])) == 1
+        room = 2 * 2.85 * 0.95 - 11 * 0.15 / 0.95
+        assert targets[18] == levels - math.ceil(room / step - 1e-6)
+        # No sun after the second window: it fills to the top.
+        assert targets[66] == levels
+        assert (
+            _fill_targets(slots, battery, grid, OptimiserSettings(), levels, step)
+            == [-1] * 96
+        )

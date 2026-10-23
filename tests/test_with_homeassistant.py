@@ -6562,12 +6562,26 @@ class TestATypedInTariffHasAStandingCharge:
         assert "standing_charge" not in fields
 
     async def _comparison(self, hass, **options):
+        from custom_components.ess_controller import recommend as recommend_mod
+
         entry = await self._entry(
             hass, octopus_region="M", agile_predict=False, **options
         )
         coordinator = hass.data[DOMAIN][entry.entry_id]
         coordinator._async_fetch_candidate = _flat_candidate()
-        recommendation = await coordinator.async_recommend_tariffs()
+        scored = recommend_mod.score_tariff
+
+        def on_the_forecast_alone(*args, **kwargs):
+            # The cheap-window fill is the house's own insurance; applied to
+            # the candidates it would fill Agile at its trough for no reason.
+            assert args[7].fill_price is None
+            return scored(*args, **kwargs)
+
+        recommend_mod.score_tariff = on_the_forecast_alone
+        try:
+            recommendation = await coordinator.async_recommend_tariffs()
+        finally:
+            recommend_mod.score_tariff = scored
         assert recommendation is not None
         return coordinator, recommendation
 
@@ -6625,3 +6639,69 @@ class TestATypedInTariffHasAStandingCharge:
         )
         coordinator = hass.data[DOMAIN][entry.entry_id]
         assert coordinator._current_manual_tariff() is None
+
+
+class TestAScheduleFillsItsCheapWindow:
+    """The rule in the optimiser is switched on by the tariff source and by
+    nothing else: a schedule repeats at the same prices, every other source
+    can be cheaper tomorrow."""
+
+    async def _coordinator(self, hass, **options):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, **options}
+        )
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    async def test_a_time_of_use_schedule_switches_it_on_at_its_cheapest_rate(self, hass):
+        coordinator = await self._coordinator(
+            hass,
+            import_provider="tou",
+            import_tou_schedule="00:30-05:30=9.5,13:00-16:00=20,05:30-00:30=33.56",
+            import_fixed_rate=33.56,
+        )
+        assert coordinator.optimiser_settings().fill_price == 9.5
+        assert coordinator.diagnostics()["forecast_sources"]["fill_price"] == 9.5
+
+    async def test_a_flat_rate_leaves_it_off(self, hass):
+        coordinator = await self._coordinator(hass, import_provider="fixed")
+        assert coordinator.optimiser_settings().fill_price is None
+        assert coordinator.diagnostics()["forecast_sources"]["fill_price"] is None
+
+    async def test_an_octopus_tariff_leaves_it_off(self, hass):
+        coordinator = await self._coordinator(
+            hass, import_provider="octopus_api", octopus_region="M"
+        )
+        assert coordinator.optimiser_settings().fill_price is None
+
+    async def test_the_plan_reaches_the_ceiling_in_the_first_window(self, hass):
+        """End to end through a real coordinator: the schedule's prices, the
+        default flat house, and a pack starting at its floor."""
+        coordinator = await self._coordinator(
+            hass,
+            import_provider="tou",
+            import_tou_schedule="00:30-05:30=9.5,05:30-00:30=33.56",
+            import_fixed_rate=33.56,
+        )
+        await coordinator.async_refresh()
+        plan = coordinator.plan
+        assert plan is not None, coordinator._plan_error
+        first_window = []
+        for slot in plan.slots:
+            if slot.import_price < 10.0:
+                first_window.append(slot)
+            elif first_window:
+                break
+        assert first_window, [s.import_price for s in plan.slots[:8]]
+        # The harness forecasts a sunny day, so the window leaves it room and
+        # the sun finishes the job.
+        assert first_window[-1].soc_end >= 65.0
+        assert (
+            max(s.soc_end for s in plan.slots[:40]) >= coordinator.settings.max_soc - 5.0
+        )
+        assert "fill the cheap window" in plan.reason

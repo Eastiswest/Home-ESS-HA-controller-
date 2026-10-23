@@ -132,6 +132,19 @@ class TimeOfUseTariffProvider(TariffProvider):
                 "Time-of-use schedule is empty; falling back to flat %.2f", self._default
             )
 
+    def cheapest_rate(self) -> float:
+        """The lowest rate the schedule charges in a day.
+
+        Read off the clock rather than the settings: the default rate only
+        applies where the windows leave a gap, and a schedule that covers the
+        day never charges it at all.
+        """
+        day = datetime(2000, 1, 3)  # a Monday, naive: read as wall-clock time
+        return min(
+            self.rate_at(day + timedelta(minutes=SLOT_MINUTES * index))
+            for index in range(24 * 60 // SLOT_MINUTES)
+        )
+
     def rate_at(self, moment: datetime) -> float:
         local = (
             moment.astimezone(self._tz)

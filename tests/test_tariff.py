@@ -116,6 +116,21 @@ class TestPriceSeries:
         assert added == 0
 
 
+class TestTheScheduleKnowsItsCheapestRate:
+    def test_the_lowest_window_rate(self):
+        provider = TimeOfUseTariffProvider("00:30-05:30=9.5,13:00-16:00=20", 33.56)
+        assert provider.cheapest_rate() == 9.5
+
+    def test_a_default_the_day_never_charges_does_not_count(self):
+        """The fallback rate box can hold anything from a previous tariff."""
+        provider = TimeOfUseTariffProvider("00:30-05:30=9.5,05:30-00:30=33.56", 1.0)
+        assert provider.cheapest_rate() == 9.5
+
+    def test_a_default_that_fills_a_gap_does(self):
+        provider = TimeOfUseTariffProvider("07:00-23:00=30", 8.0)
+        assert provider.cheapest_rate() == 8.0
+
+
 class TestOctopusParsing:
     def test_tariff_code_construction(self):
         assert build_tariff_code("AGILE-24-10-01", "C") == "E-1R-AGILE-24-10-01-C"

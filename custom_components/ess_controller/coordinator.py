@@ -224,6 +224,7 @@ from .stall import STALL_CYCLES, StallReading, stalled
 from .tariff import agile_predict
 from .tariff.base import PriceSeries, refill_price_from_outlook
 from .tariff.factory import build_provider
+from .tariff.fixed import TimeOfUseTariffProvider
 from .tariff.octopus import OctopusApiError, product_in_tariff_code
 
 _LOGGER = logging.getLogger(__name__)
@@ -720,6 +721,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             terminal_rate=float(options.get(CONF_TERMINAL_VALUE_RATE, 0.0) or 0.0),
             solar_headroom_error_kwh=self.solar_forecast_error_kwh(),
             floor_cushion_kwh=self.cushion_kwh(),
+            fill_price=self.fill_price,
             refill_price=self.refill_price()[0],
             stock_days=float(STOCK_OUTLOOK_DAYS),
             hold_min_benefit=self.hold_min_benefit,
@@ -728,6 +730,23 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 or DEFAULT_MIN_GRID_CHARGE_KWH
             ),
         )
+
+    @property
+    def fill_price(self) -> float | None:
+        """The rate at or below which the plan fills the pack regardless.
+
+        A time-of-use schedule repeats at the same prices every day, so there
+        is never a cheaper night to wait for and nothing bought in its
+        cheapest window is wasted; the plan fills to the ceiling less the
+        sun's room. Every other source can be cheaper tomorrow, and there the
+        forecast decides.
+        """
+        provider = self._import_provider
+        if self.options.get(
+            CONF_IMPORT_PROVIDER, PROVIDER_FIXED
+        ) != PROVIDER_TOU or not isinstance(provider, TimeOfUseTariffProvider):
+            return None
+        return provider.cheapest_rate()
 
     @property
     def hold_min_benefit(self) -> float:
@@ -2477,6 +2496,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "daytime_allowance_kwh": round(sum(day_uplift), 3),
             "solar_shortfall_ratio": round(sun_ratio, 3),
             "cushion_kwh": round(self.cushion_kwh(), 3),
+            "fill_price": self.fill_price,
             "refill_price": None if refill is None else round(refill, 2),
             "refill_source": refill_source,
             "away": self.settings.away,
@@ -2888,7 +2908,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_series = self._export_prices
         battery = self.battery_spec()
         grid = self.grid_spec()
-        settings = self.optimiser_settings()
+        # Every candidate is scored on the forecast alone. The cheap-window
+        # fill is insurance the house buys on its own schedule, and applied to
+        # an Agile candidate it would fill at that day's trough for no reason.
+        settings = replace(self.optimiser_settings(), fill_price=None)
         start_soc = self.battery.soc if self.battery.valid else 50.0
 
         fetched: list[tuple[Any, Any, float]] = []
