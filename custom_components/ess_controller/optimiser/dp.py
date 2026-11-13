@@ -891,7 +891,10 @@ def _fill_targets(
                 drain = min(-net, battery.max_discharge_kw * slot.duration_hours)
                 run -= drain / battery.discharge_efficiency
             peak = max(peak, run)
-        targets[index] = max(levels - math.ceil(peak / step - EPS), 0)
+        target = levels - math.ceil(peak / step - EPS)
+        # Room for the whole pack is no window at all: the sun fills it, and
+        # free charge serves the house in the window as well as anywhere.
+        targets[index] = target if target > 0 else -1
     return targets
 
 
@@ -1072,11 +1075,13 @@ def optimise(
                 if k < floor and k < j:
                     candidate += (min(j, floor) - k) * into_cushion
                 # Discharging in a window is priced as charging left undone,
-                # which it is from the fill's side; on an export site it also
-                # blocks a round trip the next window slot would have refilled,
-                # a loss accepted for the window never being drained to sell.
-                if target >= 0 and k < target:
-                    reach = min(j, target)
+                # whatever the level: the grid is never dearer than the pack
+                # here, and a pack drawn down in the window meets the morning
+                # short. On an export site that also blocks a round trip the
+                # next window slot would have refilled, a loss accepted for
+                # the window never being drained to sell.
+                if target >= 0 and k < max(j, target):
+                    reach = j
                     for up in charges:
                         if j + up > target:
                             break
@@ -1179,6 +1184,24 @@ def optimise(
             settings.hold_min_benefit,
         ):
             action = SlotAction.SELF_USE
+        # A cheap-window slot the sweep does not charge in holds the pack
+        # where it is until the window ends: the house runs on the grid at
+        # the window price, and the charge is worth the dear rate it will
+        # displace. Whatever the level -- at the target, a minimum purchase
+        # short of it, or under the solar ceiling -- there is nothing better
+        # to do with the battery here than keep it. Left to the margin test
+        # above, a quiet half-hour was published as self-use and the pack met
+        # the morning's heating two points down before anyone was up. Held by
+        # stopping the battery, never by charging: the adapter has no charge
+        # ceiling to write, so a forced charge at the limit would carry on
+        # past it.
+        if (
+            targets[i] >= 0
+            and delta >= -EPS
+            and action in (SlotAction.IDLE, SlotAction.SELF_USE)
+        ):
+            action = SlotAction.IDLE
+            hold_value = max(hold_value or 0.0, max(prices))
         plan.slots.append(
             PlanSlot(
                 start=slot.start,

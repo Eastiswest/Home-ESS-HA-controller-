@@ -2548,10 +2548,13 @@ class TestAScheduledTariffFillsItsCheapWindow:
         end = self._window_end(plan)
         room = 8 * 0.85 * 0.95 - 9 * 0.15 / 0.95
         aim = 95.0 - room / 22.0 * 100.0
-        assert end.soc_end == pytest.approx(aim, abs=2.0), (end.soc_end, aim)
-        # A fraction of a level per sunny half-hour is the grid's rounding, not
-        # a full pack; the plan with the rule off spills the same.
-        assert sum(s.curtailed_kwh for s in plan.slots[:48]) < 0.3
+        # Within a level or two: the sweep may buy a little over for the dear
+        # morning where the forecast says that pays.
+        assert end.soc_end == pytest.approx(aim, abs=3.0), (end.soc_end, aim)
+        # A fraction of a level per sunny half-hour is the grid's rounding,
+        # plus whatever the sweep bought over the target for the dear morning
+        # and the window then held: well under a kWh, not a full pack.
+        assert sum(s.curtailed_kwh for s in plan.slots[:48]) < 0.6
         after_sun = next(
             s for s in plan.slots if s.start.hour == 14 and s.start.minute == 0
         )
@@ -2684,6 +2687,44 @@ class TestAScheduledTariffFillsItsCheapWindow:
         assert self._dear_buying(plan) == 0.0
         assert self._window_end(plan).soc_end >= 94.0
 
+    def test_the_window_holds_the_pack_full_until_it_ends(self):
+        """Filled by 03:00, the pack used to be handed back to self-use for the
+        rest of the window and the early heating drew it down. Every window
+        slot after the fill now holds the battery stopped, with the house on
+        the grid at 9.5p, and the hold survives the write-time margin test."""
+        from custom_components.ess_controller.optimiser.dp import hold_is_worthwhile
+
+        heating = dict.fromkeys(range(16, 19), 0.9)  # 04:00 to 05:30
+        slots = self._slots()
+        for index, load in heating.items():
+            slots[index].load_kwh = load
+        plan = self._plan(slots)
+        window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
+        full_from = next(i for i, s in enumerate(window) if s.soc_end >= 94.0)
+        after = window[full_from + 1 :]
+        assert after, "the fill took the whole window"
+        assert all(s.action is SlotAction.IDLE for s in after), [s.action for s in after]
+        assert all(s.soc_end == pytest.approx(window[full_from].soc_end) for s in after)
+        assert all(s.grid_import_kwh == pytest.approx(s.load_kwh) for s in after)
+        assert all(
+            hold_is_worthwhile(self.NIGHT, s.hold_value, s.load_kwh, 0.5) for s in after
+        )
+        assert window[-1].soc_end >= 94.0
+
+    def test_a_window_held_below_the_ceiling_still_holds(self):
+        """Room left for the sun is held too: the pack is never drawn back
+        below what the window wanted before the window ends."""
+        sunny = dict.fromkeys(range(28, 36), 1.0)
+        plan = self._plan(self._slots(pv=sunny))
+        window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
+        aim = window[-1].soc_end
+        held = [s for s in window if s.action is SlotAction.IDLE]
+        assert len(held) >= 3, [s.action for s in window]
+        assert all(s.hold_value >= self.DAY for s in held)
+        for s in window:
+            if s.action not in (SlotAction.IDLE, SlotAction.CHARGE):
+                assert s.soc_end >= aim - 1.0, (s.start, s.action, s.soc_end, aim)
+
     def test_a_full_pack_only_tops_up_what_the_evening_took(self):
         plan = self._plan(self._slots(), start_soc=95.0)
         before = plan.slots[:9]  # 20:00 to 00:30, at the day rate
@@ -2722,7 +2763,9 @@ class TestAScheduledTariffFillsItsCheapWindow:
             sum(s.charge_ac_kwh for s in lean.slots[:48] if s.import_price == self.NIGHT),
             abs=0.3,
         )
-        assert plan.net_cost == pytest.approx(lean.net_cost, abs=5.0)
+        # The window still keeps the pack from serving the house, at the
+        # window price for its half-hours of standby: pennies, on principle.
+        assert plan.net_cost == pytest.approx(lean.net_cost, abs=12.0)
 
     def test_a_loss_beyond_the_fill_itself_is_still_vetoed(self):
         """The guard tolerates what the fill can cost and nothing more."""
