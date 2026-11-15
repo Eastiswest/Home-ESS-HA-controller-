@@ -1010,18 +1010,24 @@ def optimise(
     headroom = _solar_headroom_levels(slots, battery, settings, levels, step)
     floors = _cushion_levels(slots, settings, grid, levels, step)
     targets = _fill_targets(slots, battery, grid, settings, levels, step)
-    # Window charging left undone while below the target is priced per level
-    # at the spread: what the missing kWh costs bought later at the dearest
-    # half-hour, less what it would have cost here. It is the charging *this
-    # slot could have done* that is priced, never the shortfall itself: a
-    # shortfall can be shrunk by buying dear before the window or by holding
-    # the pack shut through a dear evening, and priced that way the sweep did
-    # both. Charging that no move in the slot can express -- the import limit,
-    # the minimum purchase, the solar reserve -- is not undone and costs
-    # nothing, for the same reason. Priced rather than enforced, so a charger
-    # too slow for the window fills what it can.
+    # Window charging left undone is priced per level at the spread -- what
+    # the missing kWh costs bought later at the dearest half-hour, less what
+    # it would have cost here -- but only once the rest of the window could
+    # no longer make it up. So the fill runs as late as the window allows and
+    # finishes as the cheap rate ends, with nothing to hold afterwards and no
+    # half-hour of self-use between the fill and the morning; a window too
+    # short for its charger fills from its first slot instead. It is the
+    # charging *this slot could have done* that is priced, never the shortfall
+    # itself: a shortfall can be shrunk by buying dear before the window or by
+    # holding the pack shut through a dear evening, and priced that way the
+    # sweep did both. Charging that no move in the slot can express -- the
+    # import limit, the minimum purchase, the solar reserve -- is not undone
+    # and costs nothing, for the same reason.
     prices = [slot.import_price for slot in slots]
     short_price = max(max(prices) - min(prices), 0.0) * step
+    # Levels the later slots of the current window could still charge, kept
+    # as the sweep walks backwards through it.
+    window_ahead = 0
     slack = min(step * battery.discharge_efficiency, MAX_DISCHARGE_SLACK_KWH)
 
     for i in range(n - 1, -1, -1):
@@ -1051,6 +1057,8 @@ def optimise(
         floor = floors[i]
         target = min(targets[i], ceiling) if targets[i] >= 0 else -1
         charges = sorted(offset for offset, _, _ in priced if offset > 0)
+        if target < 0:
+            window_ahead = 0
         # What a level discharged into the cushion costs here, on top of the
         # energy. Sized by this slot's price, so a shortfall is dear where
         # electricity is.
@@ -1074,18 +1082,17 @@ def optimise(
                 candidate = cost + future[k]
                 if k < floor and k < j:
                     candidate += (min(j, floor) - k) * into_cushion
-                # Discharging in a window is priced as charging left undone,
-                # whatever the level: the grid is never dearer than the pack
-                # here, and a pack drawn down in the window meets the morning
-                # short. On an export site that also blocks a round trip the
-                # next window slot would have refilled, a loss accepted for
-                # the window never being drained to sell.
-                if target >= 0 and k < max(j, target):
+                # Late in the window, a level not charged -- or discharged --
+                # is one the slots left cannot put back. The reach is the
+                # smallest purchase that makes the target, so a pack one
+                # minimum purchase short buys it and ends a little over
+                # rather than sitting idle for the last half-hour.
+                if target >= 0 and target - k > window_ahead:
                     reach = j
                     for up in charges:
-                        if j + up > target:
-                            break
                         reach = j + up
+                        if reach >= target:
+                            break
                     if k < reach:
                         candidate += (reach - k) * short_price
                 # Strictly ``<``, which breaks exact ties towards the more
@@ -1102,6 +1109,8 @@ def optimise(
             current[j] = best
             slot_choices[j] = best_k
 
+        if target >= 0:
+            window_ahead += charges[-1] if charges else 0
         values[i] = current
         future = current
 
@@ -1184,24 +1193,6 @@ def optimise(
             settings.hold_min_benefit,
         ):
             action = SlotAction.SELF_USE
-        # A cheap-window slot the sweep does not charge in holds the pack
-        # where it is until the window ends: the house runs on the grid at
-        # the window price, and the charge is worth the dear rate it will
-        # displace. Whatever the level -- at the target, a minimum purchase
-        # short of it, or under the solar ceiling -- there is nothing better
-        # to do with the battery here than keep it. Left to the margin test
-        # above, a quiet half-hour was published as self-use and the pack met
-        # the morning's heating two points down before anyone was up. Held by
-        # stopping the battery, never by charging: the adapter has no charge
-        # ceiling to write, so a forced charge at the limit would carry on
-        # past it.
-        if (
-            targets[i] >= 0
-            and delta >= -EPS
-            and action in (SlotAction.IDLE, SlotAction.SELF_USE)
-        ):
-            action = SlotAction.IDLE
-            hold_value = max(hold_value or 0.0, max(prices))
         plan.slots.append(
             PlanSlot(
                 start=slot.start,

@@ -2687,43 +2687,39 @@ class TestAScheduledTariffFillsItsCheapWindow:
         assert self._dear_buying(plan) == 0.0
         assert self._window_end(plan).soc_end >= 94.0
 
-    def test_the_window_holds_the_pack_full_until_it_ends(self):
+    def test_the_fill_finishes_as_the_window_ends(self):
         """Filled by 03:00, the pack used to be handed back to self-use for the
-        rest of the window and the early heating drew it down. Every window
-        slot after the fill now holds the battery stopped, with the house on
-        the grid at 9.5p, and the hold survives the write-time margin test."""
-        from custom_components.ess_controller.optimiser.dp import hold_is_worthwhile
-
+        rest of the window and the early heating drew it down. The fill now
+        runs as late as the window allows: the slots before it are ordinary
+        self-use, the last window slot is still charging, and the pack meets
+        the morning full. No hold anywhere, so nothing to get stuck in."""
         heating = dict.fromkeys(range(16, 19), 0.9)  # 04:00 to 05:30
         slots = self._slots()
         for index, load in heating.items():
             slots[index].load_kwh = load
         plan = self._plan(slots)
         window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
-        full_from = next(i for i, s in enumerate(window) if s.soc_end >= 94.0)
-        after = window[full_from + 1 :]
-        assert after, "the fill took the whole window"
-        assert all(s.action is SlotAction.IDLE for s in after), [s.action for s in after]
-        assert all(s.soc_end == pytest.approx(window[full_from].soc_end) for s in after)
-        assert all(s.grid_import_kwh == pytest.approx(s.load_kwh) for s in after)
-        assert all(
-            hold_is_worthwhile(self.NIGHT, s.hold_value, s.load_kwh, 0.5) for s in after
-        )
+        assert window[-1].action is SlotAction.CHARGE
         assert window[-1].soc_end >= 94.0
+        assert not [s for s in window if s.action is SlotAction.IDLE]
+        # The heating half-hours are charged through at full rate, so the
+        # pack never serves them, and the bulk of the fill sits at the end.
+        tail = window[-3:]
+        assert all(s.action is SlotAction.CHARGE for s in tail)
+        assert sum(s.charge_ac_kwh for s in tail) > 7.0
+        assert all(s.grid_import_kwh >= s.load_kwh - 1e-6 for s in tail)
+        assert self._dear_buying(plan) == 0.0
 
-    def test_a_window_held_below_the_ceiling_still_holds(self):
-        """Room left for the sun is held too: the pack is never drawn back
-        below what the window wanted before the window ends."""
+    def test_a_fill_below_the_ceiling_also_finishes_at_the_end(self):
+        """Room left for the sun does not change when the fill happens: as late
+        as it can, with no hold between the fill and the morning."""
         sunny = dict.fromkeys(range(28, 36), 1.0)
         plan = self._plan(self._slots(pv=sunny))
         window = [s for s in plan.slots[:48] if s.import_price == self.NIGHT]
-        aim = window[-1].soc_end
-        held = [s for s in window if s.action is SlotAction.IDLE]
-        assert len(held) >= 3, [s.action for s in window]
-        assert all(s.hold_value >= self.DAY for s in held)
-        for s in window:
-            if s.action not in (SlotAction.IDLE, SlotAction.CHARGE):
-                assert s.soc_end >= aim - 1.0, (s.start, s.action, s.soc_end, aim)
+        assert window[-1].action is SlotAction.CHARGE
+        assert not [s for s in window if s.action is SlotAction.IDLE]
+        room = 8 * 0.85 * 0.95 - 9 * 0.15 / 0.95
+        assert window[-1].soc_end >= 95.0 - room / 22.0 * 100.0 - 3.0
 
     def test_a_full_pack_only_tops_up_what_the_evening_took(self):
         plan = self._plan(self._slots(), start_soc=95.0)
