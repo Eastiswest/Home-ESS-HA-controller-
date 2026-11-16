@@ -77,6 +77,8 @@ from .const import (
     CONF_MAX_CHARGE_POWER,
     CONF_MAX_DISCHARGE_POWER,
     CONF_MIN_GRID_CHARGE_KWH,
+    CONF_NOTIFY_ON_CLEAR,
+    CONF_NOTIFY_SERVICE,
     CONF_OCTOPUS_ACCOUNT,
     CONF_OCTOPUS_API_KEY,
     CONF_OCTOPUS_EXPORT_PRODUCT,
@@ -137,6 +139,7 @@ from .const import (
     DEFAULT_MAX_SOC,
     DEFAULT_MIN_GRID_CHARGE_KWH,
     DEFAULT_MIN_SOC,
+    DEFAULT_NOTIFY_ON_CLEAR,
     DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
     DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
@@ -154,6 +157,7 @@ from .const import (
     EXPORT_PROVIDERS,
     IMPORT_PROVIDERS,
     NAME,
+    NOTIFY_OFF,
     PRICE_SCALE_AUTO,
     PRICE_SCALES,
     PROVIDER_ENTITY,
@@ -691,6 +695,24 @@ class EssFlowMixin:
             }
         )
 
+    def _alerts_schema(self, current: dict[str, Any]) -> vol.Schema:
+        # The notify services this instance actually has, so a phone is a
+        # pick from a list rather than a service name typed from memory. One
+        # chosen earlier stays in the list even if its integration is down.
+        services = sorted(self.hass.services.async_services().get("notify", {}))
+        chosen = current.get(CONF_NOTIFY_SERVICE)
+        if chosen and chosen != NOTIFY_OFF and chosen not in services:
+            services.insert(0, chosen)
+        pairs = [(NOTIFY_OFF, "Off")] + [(name, f"notify.{name}") for name in services]
+        return vol.Schema(
+            {
+                _suggest(current, CONF_NOTIFY_SERVICE, NOTIFY_OFF): _labelled(pairs),
+                _suggest(current, CONF_NOTIFY_ON_CLEAR, DEFAULT_NOTIFY_ON_CLEAR): (
+                    selector.BooleanSelector()
+                ),
+            }
+        )
+
     def _recommend_schema(self, current: dict[str, Any]) -> vol.Schema:
         return vol.Schema(
             {
@@ -1138,6 +1160,7 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
                 "shifting",
                 "outage",
                 "recommend",
+                "alerts",
                 "optimiser",
             ],
         )
@@ -1499,6 +1522,19 @@ class EssOptionsFlow(EssFlowMixin, OptionsFlow):
             return self._save()
         return self.async_show_form(
             step_id="recommend", data_schema=self._recommend_schema(self.current)
+        )
+
+    async def async_step_alerts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            self.current.update(_clean(user_input))
+            self.current[CONF_NOTIFY_ON_CLEAR] = bool(
+                user_input.get(CONF_NOTIFY_ON_CLEAR, DEFAULT_NOTIFY_ON_CLEAR)
+            )
+            return self._save()
+        return self.async_show_form(
+            step_id="alerts", data_schema=self._alerts_schema(self.current)
         )
 
     async def async_step_optimiser(

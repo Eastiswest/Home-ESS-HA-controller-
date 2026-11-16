@@ -155,6 +155,15 @@ CONF_ONLY_JOINED_SESSIONS: Final = "only_joined_sessions"
 CONF_SESSION_REWARD_EXPORT: Final = "session_reward_export"
 
 # Power cut anticipation
+# Phone alerts
+CONF_NOTIFY_SERVICE: Final = "notify_service"
+CONF_NOTIFY_ON_CLEAR: Final = "notify_on_clear"
+NOTIFY_OFF: Final = "none"
+DEFAULT_NOTIFY_ON_CLEAR: Final = True
+# A cheap window ending this many points of charge under what the plan meant
+# is worth a message: the inverter did not charge as asked.
+WINDOW_SHORT_POINTS: Final = 5.0
+
 CONF_OUTAGE_ENABLED: Final = "outage_enabled"
 CONF_OUTAGE_RISK_ENTITY: Final = "outage_risk_entity"
 CONF_OUTAGE_CALENDAR: Final = "outage_calendar"

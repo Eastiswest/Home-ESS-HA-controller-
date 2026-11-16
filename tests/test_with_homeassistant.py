@@ -23,6 +23,7 @@ import logging
 import pathlib
 import sys
 from datetime import timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,7 @@ OPTIONS_STEPS = (
     "outage",
     "shifting",
     "recommend",
+    "alerts",
 )
 
 
@@ -6708,3 +6710,174 @@ class TestAScheduleFillsItsCheapWindow:
         assert first_window[-1].action.value == "charge"
         assert not [s for s in first_window if s.action.value == "idle"]
         assert "fill the cheap window" in plan.reason
+
+
+class TestFaultsReachThePhone:
+    """Repairs is where faults are shown; a phone is where they are noticed.
+    Nobody opens the Repairs panel at five in the morning, and a fault
+    confirmed then was simply waited for."""
+
+    SERVICE = "mobile_app_test"
+
+    async def _coordinator(self, hass, **options):
+        from homeassistant.setup import async_setup_component
+
+        await async_setup_component(hass, DOMAIN, {})
+        await _complete_flow(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        if options:
+            hass.config_entries.async_update_entry(
+                entry, options={**entry.options, **options}
+            )
+        await hass.async_block_till_done()
+        return hass.data[DOMAIN][entry.entry_id]
+
+    def _phone(self, hass) -> list[dict]:
+        calls: list[dict] = []
+
+        async def handler(call):
+            calls.append(dict(call.data))
+
+        hass.services.async_register("notify", self.SERVICE, handler)
+        return calls
+
+    async def test_the_options_list_the_notify_services(self, hass):
+        import voluptuous_serialize
+        from homeassistant.helpers import config_validation as cv
+
+        self._phone(hass)
+        await self._coordinator(hass)
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": "alerts"}
+        )
+        fields = {
+            f["name"]: f
+            for f in voluptuous_serialize.convert(
+                result["data_schema"], custom_serializer=cv.custom_serializer
+            )
+        }
+        values = [
+            o["value"] for o in fields["notify_service"]["selector"]["select"]["options"]
+        ]
+        assert "none" in values and self.SERVICE in values
+        assert "notify_on_clear" in fields
+
+    async def test_a_confirmed_fault_is_sent_once_and_so_is_its_clearing(self, hass):
+        from custom_components.ess_controller import problems
+
+        calls = self._phone(hass)
+        coordinator = await self._coordinator(hass, notify_service=self.SERVICE)
+        broken = problems.Snapshot(controlling=True, soc_readable=False)
+        coordinator.problem_snapshot = lambda: broken
+
+        for _ in range(problems.PERSIST_CYCLES - 1):
+            coordinator._sync_problems()
+        await hass.async_block_till_done()
+        assert calls == [], "sent before the fault had persisted"
+
+        coordinator._sync_problems()
+        await hass.async_block_till_done()
+        assert len(calls) == 1
+        assert "cannot be read" in calls[0]["title"]
+        assert calls[0]["message"]
+        assert calls[0]["data"]["tag"] == f"{DOMAIN}_soc_unreadable"
+
+        coordinator._sync_problems()  # still broken: nothing new to say
+        await hass.async_block_till_done()
+        assert len(calls) == 1
+
+        coordinator.problem_snapshot = lambda: problems.Snapshot(controlling=True)
+        coordinator._sync_problems()
+        await hass.async_block_till_done()
+        assert len(calls) == 2
+        assert "resolved" in calls[1]["title"].lower()
+        assert "cannot be read" in calls[1]["message"]
+
+    async def test_nothing_is_sent_with_no_service_chosen(self, hass):
+        from custom_components.ess_controller import problems
+
+        calls = self._phone(hass)
+        coordinator = await self._coordinator(hass)
+        coordinator.problem_snapshot = lambda: problems.Snapshot(
+            controlling=True, soc_readable=False
+        )
+        for _ in range(problems.PERSIST_CYCLES + 1):
+            coordinator._sync_problems()
+        await hass.async_block_till_done()
+        assert calls == []
+
+    async def test_a_phone_that_cannot_be_reached_costs_the_battery_nothing(self, hass):
+        """The alert is the thing allowed to fail."""
+        from custom_components.ess_controller import problems
+
+        coordinator = await self._coordinator(hass, notify_service="nobody_home")
+        coordinator.problem_snapshot = lambda: problems.Snapshot(
+            controlling=True, soc_readable=False
+        )
+        for _ in range(problems.PERSIST_CYCLES):
+            coordinator._sync_problems()
+        await hass.async_block_till_done()
+        await coordinator.async_refresh()
+        assert coordinator.last_exception is None
+        assert coordinator.last_update_success is True
+
+    async def test_a_cheap_window_that_ended_short_is_reported_once(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        calls = self._phone(hass)
+        coordinator = await self._coordinator(
+            hass,
+            notify_service=self.SERVICE,
+            import_provider="tou",
+            import_tou_schedule="00:30-05:30=9.5,05:30-00:30=33.56",
+            import_fixed_rate=33.56,
+        )
+        now = dt_util.utcnow()
+        coordinator._window_aim = (now - timedelta(minutes=1), 95.0)
+        await coordinator._async_check_window_end(now, 71.0)
+        await hass.async_block_till_done()
+        assert len(calls) == 1
+        assert "ended short" in calls[0]["title"]
+        assert "71%" in calls[0]["message"] and "95%" in calls[0]["message"]
+        assert coordinator._window_aim is None
+        # Asked again, there is nothing left to say.
+        await coordinator._async_check_window_end(now, 71.0)
+        await hass.async_block_till_done()
+        assert len(calls) == 1
+
+    async def test_a_window_that_landed_near_enough_is_not_reported(self, hass):
+        from homeassistant.util import dt as dt_util
+
+        calls = self._phone(hass)
+        coordinator = await self._coordinator(hass, notify_service=self.SERVICE)
+        now = dt_util.utcnow()
+        coordinator._window_aim = (now - timedelta(minutes=1), 95.0)
+        await coordinator._async_check_window_end(now, 92.0)
+        # Nor one whose charge could not be read, nor one checked long after.
+        coordinator._window_aim = (now - timedelta(minutes=1), 95.0)
+        await coordinator._async_check_window_end(now, None)
+        coordinator._window_aim = (now - timedelta(hours=1), 95.0)
+        await coordinator._async_check_window_end(now, 50.0)
+        await hass.async_block_till_done()
+        assert calls == []
+
+    async def test_the_plan_remembers_where_its_window_should_end(self, hass):
+        coordinator = await self._coordinator(
+            hass,
+            import_provider="tou",
+            import_tou_schedule="00:30-05:30=9.5,05:30-00:30=33.56",
+            import_fixed_rate=33.56,
+        )
+        await coordinator.async_refresh()
+        assert coordinator._window_aim is not None
+        end, aim = coordinator._window_aim
+        last_cheap = [s for s in coordinator.plan.slots if s.import_price < 10.0]
+        first_run_end = next(
+            s.end
+            for s, later in pairwise(coordinator.plan.slots)
+            if s.import_price < 10.0 <= later.import_price
+        )
+        assert end == first_run_end
+        assert aim == next(s.soc_end for s in last_cheap if s.end == first_run_end)

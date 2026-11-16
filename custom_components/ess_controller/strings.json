@@ -267,7 +267,8 @@
           "sessions": "Grid incentive sessions",
           "outage": "Power cut anticipation",
           "shifting": "Flexible loads",
-          "recommend": "Tariff comparison"
+          "recommend": "Tariff comparison",
+          "alerts": "Phone alerts"
         }
       },
       "battery": {
@@ -526,6 +527,17 @@
         },
         "data_description": {
           "shiftable_loads": "One per line: Sauna=4.5kWh@3.6kW,16:00-21:00,tue/thu/sat -- name, energy and power, then any of: a local time window it must run inside, the days it may run (day names, 'weekdays' or 'weekends'; omit for every day), and a switch entity to have it driven for you. The fields after the power can come in any order."
+        }
+      },
+      "alerts": {
+        "title": "Phone alerts",
+        "description": "Faults the Repairs panel would show are also sent to a notify service as soon as they are confirmed, and so is a cheap window that ended well short of what the plan meant. Pick your phone's notify service to be told rather than left to find out.",
+        "data": {
+          "notify_service": "Send alerts through",
+          "notify_on_clear": "Also say when a fault clears"
+        },
+        "data_description": {
+          "notify_service": "The notify services this Home Assistant has. A phone with the companion app appears as notify.mobile_app_ followed by its name."
         }
       }
     },

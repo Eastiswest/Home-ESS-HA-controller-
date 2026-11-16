@@ -27,6 +27,8 @@ writes nothing until you arm the `Inverter control` switch.
 - Values charge carried past the horizon at the predicted price of the next
   refill, so a cheap night before a dear spell fills the pack and a cheap
   spell ahead leaves it lean
+- Phone alerts: pick a notify service and every confirmed fault, its clearing,
+  and a cheap window that ended short of its target is pushed to it
 - On a time-of-use schedule fills the pack in the cheapest window every day,
   leaving only the room the forecast sun needs; Go, Cosy or Economy 7 get
   this by being entered as a schedule rather than fetched from the API

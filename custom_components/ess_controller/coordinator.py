@@ -34,8 +34,8 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from . import alerts, problems, recommend
 from . import outage as outage_mod
-from . import problems, recommend
 from .adjustments import (
     KIND_FREE_ELECTRICITY,
     KIND_SAVING_SESSION,
@@ -73,6 +73,8 @@ from .const import (
     CONF_LOAD_POWER_ENTITY,
     CONF_LOG_RETENTION_DAYS,
     CONF_MIN_GRID_CHARGE_KWH,
+    CONF_NOTIFY_ON_CLEAR,
+    CONF_NOTIFY_SERVICE,
     CONF_OCTOPUS_IMPORT_PRODUCT,
     CONF_OCTOPUS_IMPORT_TARIFF,
     CONF_OCTOPUS_REGION,
@@ -113,6 +115,7 @@ from .const import (
     DEFAULT_LIVE_INTERVAL,
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_MIN_GRID_CHARGE_KWH,
+    DEFAULT_NOTIFY_ON_CLEAR,
     DEFAULT_OUTAGE_CALENDAR_ALL_EVENTS,
     DEFAULT_OUTAGE_CALENDAR_KEYWORDS,
     DEFAULT_OUTAGE_HIGH_RESERVE_SOC,
@@ -127,6 +130,7 @@ from .const import (
     DEFAULT_SOLAR_PEAK_POWER,
     DEFAULT_STANDING_CHARGE,
     DOMAIN,
+    NOTIFY_OFF,
     PROVIDER_FIXED,
     PROVIDER_TOU,
     SLOT_BOUNDARY_SECONDS,
@@ -138,6 +142,7 @@ from .const import (
     STRATEGY_OFF,
     STRATEGY_SELF_USE,
     TERMINAL_MODE_REPLACEMENT,
+    WINDOW_SHORT_POINTS,
 )
 from .dashboard import OUTAGE_HOLD_MARK
 from .forecast.confidence import (
@@ -196,6 +201,7 @@ from .models import (
     describe_horizon_reach,
 )
 from .optimiser.dp import (
+    FILL_WINDOW_PRICE_EPS,
     SLOTS_PER_DAY,
     OptimiserSettings,
     hold_is_worthwhile,
@@ -342,6 +348,9 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._stall_note = ""
         self._stall_may_wake = True
         self._stall_woken: datetime | None = None
+        # When the plan means the current cheap window to end, and at what
+        # charge, kept until the window has ended and been checked.
+        self._window_aim: tuple[datetime, float] | None = None
         self._writes_day: Any = None
         self._writes_by_role: dict[str, int] = {}
         self.accumulator = SlotAccumulator()
@@ -1024,6 +1033,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._note_slot_state(now, site)
             return self._build_data(now, site)
 
+        await self._async_check_window_end(now, site.soc if self.battery.valid else None)
         await self._async_refresh_forecasts(now)
         self._read_sessions(now)
         self._assess_outage(now)
@@ -1045,6 +1055,7 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 now,
             )
             self._note_raised_floor(self.plan)
+            self._remember_window_aim(now)
             await self._async_shift_loads(now, slots, site.soc)
 
         await self._async_drive_appliances(now)
@@ -1539,6 +1550,10 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
 
         wanted = {problem.key for problem in found}
+        raised = [
+            problem for problem in found if problem.key not in self._raised_problems
+        ]
+        cleared = sorted(key for key in self._raised_problems if key not in wanted)
         for problem in found:
             ir.async_create_issue(
                 self.hass,
@@ -1553,9 +1568,103 @@ class EssCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 translation_key=problem.key,
                 translation_placeholders=problem.placeholders or None,
             )
-        for issue_id in [key for key in self._raised_problems if key not in wanted]:
+        for issue_id in cleared:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         self._raised_problems = wanted
+        if (raised or cleared) and self._notify_service() is not None:
+            # Off the control loop: a phone that cannot be reached must never
+            # cost the battery a cycle.
+            self.hass.async_create_task(self._async_notify_problems(raised, cleared))
+
+    # ------------------------------------------------------------------
+    # Phone alerts
+    # ------------------------------------------------------------------
+
+    def _notify_service(self) -> str | None:
+        """The notify service alerts go to, without its domain, or None."""
+        service = self.options.get(CONF_NOTIFY_SERVICE)
+        if not service or service == NOTIFY_OFF:
+            return None
+        return str(service).removeprefix("notify.")
+
+    async def _async_notify(self, title: str, message: str, tag: str) -> None:
+        service = self._notify_service()
+        if service is None:
+            return
+        try:
+            await self.hass.services.async_call(
+                "notify",
+                service,
+                {"title": title, "message": message, "data": {"tag": f"{DOMAIN}_{tag}"}},
+                blocking=True,
+            )
+        except Exception as err:  # the alert is the thing allowed to fail
+            _LOGGER.warning(
+                "Could not send the %s alert via notify.%s: %s", tag, service, err
+            )
+
+    async def _async_notify_problems(
+        self, raised: list[problems.Problem], cleared: list[str]
+    ) -> None:
+        """Push newly confirmed faults, and cleared ones, in the Repairs wording."""
+        from homeassistant.helpers import translation
+
+        try:
+            texts = await translation.async_get_translations(
+                self.hass, self.hass.config.language, "issues", {DOMAIN}
+            )
+        except Exception:  # wording is a nicety; the alert is not
+            texts = {}
+        prefix = f"component.{DOMAIN}.issues."
+        for problem in raised:
+            title, message = alerts.problem_alert(
+                problem.key,
+                texts.get(f"{prefix}{problem.key}.title", ""),
+                texts.get(f"{prefix}{problem.key}.description", ""),
+                problem.placeholders,
+            )
+            await self._async_notify(title, message, problem.key)
+        if not self.options.get(CONF_NOTIFY_ON_CLEAR, DEFAULT_NOTIFY_ON_CLEAR):
+            return
+        for key in cleared:
+            title, message = alerts.resolved_alert(
+                key, texts.get(f"{prefix}{key}.title", "")
+            )
+            await self._async_notify(title, message, key)
+
+    def _remember_window_aim(self, now: datetime) -> None:
+        """Where the plan means the current cheap window to end, kept until then."""
+        price = self.fill_price
+        if price is None or self.plan is None:
+            self._window_aim = None
+            return
+        run_end: datetime | None = None
+        aim = 0.0
+        for slot in self.plan.slots:
+            if slot.import_price <= price + FILL_WINDOW_PRICE_EPS:
+                run_end, aim = slot.end, slot.soc_end
+            elif run_end is not None:
+                break
+        if run_end is not None and run_end > now:
+            self._window_aim = (run_end, aim)
+
+    async def _async_check_window_end(self, now: datetime, soc: float | None) -> None:
+        """Say so when a cheap window has ended well short of what the plan meant.
+
+        Checked before the cycle re-plans, because the new plan's first window
+        is tomorrow's. One message per window, and none when the charge was
+        not readable at the time: a guess is not worth waking anyone for.
+        """
+        aim = self._window_aim
+        if aim is None or now < aim[0]:
+            return
+        self._window_aim = None
+        end, wanted = aim
+        if soc is None or now > end + timedelta(minutes=20):
+            return
+        if wanted - soc > WINDOW_SHORT_POINTS:
+            title, message = alerts.window_short_alert(wanted, soc)
+            await self._async_notify(title, message, "window_short")
 
     def _remember_apply(self, now: datetime, result: ApplyResult, note: str = "") -> None:
         """Keep an apply in the rolling history, timestamped."""
