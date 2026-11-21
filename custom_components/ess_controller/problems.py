@@ -49,6 +49,13 @@ PERSIST_CYCLES = 3
 # sensor that has stopped.
 QUIET_LOAD_SLOTS = 6
 
+# Grid charge the plan did not ask for, summed over the two days the log is
+# read, below which nothing is said. A fifth of a kWh over two days is a
+# float charge and whole-percent rounding, and a 2p warning on a phone costs
+# more attention than it is worth; a schedule left armed at the inverter
+# shows up as kilowatt-hours.
+UNEXPLAINED_CHARGE_MIN_KWH = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class Problem:
@@ -153,7 +160,7 @@ def detect(state: Snapshot) -> list[Problem]:
             )
         )
 
-    if state.unexplained_charge_kwh > 0:
+    if state.unexplained_charge_kwh >= UNEXPLAINED_CHARGE_MIN_KWH:
         found.append(
             Problem(
                 "unexplained_grid_charging",

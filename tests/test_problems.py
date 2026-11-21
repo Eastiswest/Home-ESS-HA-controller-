@@ -89,6 +89,21 @@ class TestSomethingElseIsDrivingTheInverter:
             Snapshot(controlling=False, unexplained_charge_kwh=1.0)
         )
 
+    def test_a_fifth_of_a_kwh_over_two_days_is_not_worth_saying(self):
+        """A real install was warned, on its phone, about 0.2 kWh and 2p: a
+        float charge and whole-percent rounding, not a schedule left armed."""
+        from custom_components.ess_controller.problems import UNEXPLAINED_CHARGE_MIN_KWH
+
+        assert "unexplained_grid_charging" not in keys(
+            Snapshot(unexplained_charge_kwh=0.2, unexplained_charge_cost=2.0)
+        )
+        assert "unexplained_grid_charging" not in keys(
+            Snapshot(unexplained_charge_kwh=UNEXPLAINED_CHARGE_MIN_KWH - 0.01)
+        )
+        assert "unexplained_grid_charging" in keys(
+            Snapshot(unexplained_charge_kwh=UNEXPLAINED_CHARGE_MIN_KWH)
+        )
+
     def test_a_battery_idle_in_self_use_is_named_with_the_evidence(self):
         """The house is buying what the pack could supply, and the mode cycle
         that normally frees the inverter has already been tried."""
